@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+
+# Dados gerados pela autoia
+data/
+
+# Node / frontend
+node_modules/
+frontend/dist/
+
+# IDE / SO
+.idea/
+.vscode/
+.DS_Store
+
+# Env / segredos
+.env

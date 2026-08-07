@@ -1,0 +1,133 @@
+"""Testes do bounce-back automático (falha volta para a fase anterior)."""
+
+from __future__ import annotations
+
+from app.models import Task
+from app.worker import runner
+
+HARMLESS = [
+    {"role": "assistant", "content": "tarefa concluída"},
+]
+
+
+def _run_claim(flow) -> int | None:
+    return runner.claim_next(flow["session_factory"])
+
+
+def _execute(flow, step_id) -> None:
+    runner.execute_step(flow["settings"], flow["session_factory"], step_id)
+
+
+def _state(flow, task_id) -> dict:
+    """Snapshot serializado da task (sessão já fechada)."""
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        return {
+            "status": t.status,
+            "current_step": t.current_step,
+            "steps": [
+                {
+                    "position": st.position,
+                    "status": st.status,
+                    "attempt": st.attempt,
+                    "error": st.error,
+                }
+                for st in sorted(t.steps, key=lambda x: x.position)
+            ],
+        }
+
+
+def _step(state: dict, position: int) -> dict:
+    return next(st for st in state["steps"] if st["position"] == position)
+
+
+def test_tester_fail_bounces_to_developer(flow, fake_kimi):
+    """developer (pos 2) conclui; tester (pos 3) FAIL -> developer volta a pending."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    # po (0) e qa (1): po sem veredicto obrigatório; qa dá READY
+    for _ in range(2):
+        _execute(flow, _run_claim(flow))
+
+    # developer (2) conclui
+    _execute(flow, _run_claim(flow))
+
+    # troca o fake para o tester FALHAR
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="fail")
+    _execute(flow, _run_claim(flow))
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "in_progress"  # bounce-back, não failed
+    dev = _step(state, 2)
+    tester = _step(state, 3)
+    assert dev["status"] == "pending"
+    assert dev["attempt"] == 2
+    assert tester["status"] == "failed"
+    assert "FAIL" in (tester["error"] or "")
+    assert state["current_step"] == 2
+
+
+def test_qa_needs_work_bounces_to_po(flow, fake_kimi):
+    """QA (pos 1) NEEDS_WORK -> PO (pos 0) volta a pending."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="needs_work")
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    _execute(flow, _run_claim(flow))  # po conclui
+    _execute(flow, _run_claim(flow))  # qa NEEDS_WORK
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "in_progress"
+    po = _step(state, 0)
+    assert po["status"] == "pending"
+    assert po["attempt"] == 2
+
+
+def test_first_phase_failure_marks_task_failed(flow, tmp_path):
+    """Fase inicial (po, pos 0) falha sem anterior -> task failed direto."""
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+    script = tmp_path / "failing_kimi"
+    script.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(1)\n")
+    import stat as stat_mod
+
+    script.chmod(script.stat().st_mode | stat_mod.S_IEXEC)
+    settings.kimi_bin = str(script)
+    task = flow["task"]
+
+    _execute(flow, _run_claim(flow))
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "failed"
+    assert _step(state, 0)["status"] == "failed"
+
+
+def test_max_attempts_bounds_bounce_back(flow, fake_kimi):
+    """Tester falha repetidamente; bounce-back limitado por max_attempts (3)."""
+    settings = flow["settings"]
+    settings.max_attempts = 3
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    # po, qa, developer
+    for _ in range(3):
+        _execute(flow, _run_claim(flow))
+
+    # tester falha 3x, cada vez devolve para o developer
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="fail")
+    _execute(flow, _run_claim(flow))  # tester fail 1 -> dev attempt 2
+    _execute(flow, _run_claim(flow))  # dev 2 conclui
+    _execute(flow, _run_claim(flow))  # tester fail 2 -> dev attempt 3
+    _execute(flow, _run_claim(flow))  # dev 3 conclui
+    _execute(flow, _run_claim(flow))  # tester fail 3 -> dev 3<3 false -> task failed
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "failed"
+    dev = _step(state, 2)
+    assert dev["attempt"] == 3
+    assert _step(state, 3)["status"] == "failed"
