@@ -77,10 +77,21 @@ export interface RunEvent {
   cost: number;
 }
 
+export interface Notice {
+  task_id: number;
+  task_title: string;
+  task_status: string;
+  level: "critical" | "warning";
+  kind: string;
+  message: string;
+  ts: string;
+}
+
 export interface Dashboard {
   tasks_by_status: Record<string, number>;
   total_cost: number;
   total_tasks: number;
   guardrail_events: number;
   recent_guardrails: RunEvent[];
+  notices: Notice[];
 }

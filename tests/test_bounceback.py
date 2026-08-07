@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+
 from app.models import Task
 from app.worker import runner
 
@@ -131,3 +134,60 @@ def test_max_attempts_bounds_bounce_back(flow, fake_kimi):
     dev = _step(state, 2)
     assert dev["attempt"] == 3
     assert _step(state, 3)["status"] == "failed"
+
+
+def test_agents_md_written_and_never_committed(flow, fake_kimi):
+    """AGENTS.md é gerado no checkout em cada fase (inclui pós-merge) e nunca é versionado."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    with flow["session_factory"]() as s:
+        checkout = s.get(Task, task["id"]).repository.local_path
+
+    # roda o fluxo completo (todas as fases + merge + pós-merge)
+    while True:
+        step_id = _run_claim(flow)
+        if step_id is None:
+            break
+        _execute(flow, step_id)
+
+    assert os.path.isfile(os.path.join(checkout, "AGENTS.md"))
+    # nunca commitado — nem na branch da task, nem na default, nem no merge
+    log = subprocess.run(
+        ["git", "log", "--all", "--oneline", "--", "AGENTS.md"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert log.strip() == ""
+    state = _state(flow, task["id"])
+    assert state["status"] == "done"
+
+
+def test_avaliador_fail_bounces_to_tester(flow, fake_kimi):
+    """Avaliador (pos 4, pré-merge) FAIL -> tester (pos 3) volta a pending (bounce-back)."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    # po, qa, developer, tester passam
+    for _ in range(4):
+        _execute(flow, _run_claim(flow))
+
+    # avaliador FALHA -> bounce para a fase anterior (tester)
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="fail")
+    _execute(flow, _run_claim(flow))
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "in_progress"  # bounce-back, não failed
+    tester = _step(state, 3)
+    avaliador = _step(state, 4)
+    assert tester["status"] == "pending"
+    assert tester["attempt"] == 2
+    assert avaliador["status"] == "failed"
+    assert "FAIL" in (avaliador["error"] or "")
+    assert state["current_step"] == 3

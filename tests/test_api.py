@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import create_app
-from app.models import Task, TaskStep
+from app.models import RunEvent, Task, TaskStep
 from app.worker import runner
 
 HARMLESS = [
@@ -32,7 +32,7 @@ ONLY_TEXT = [
     {"role": "assistant", "content": "resposta única"},
 ]
 
-PIPELINE_STEPS = 5
+PIPELINE_STEPS = 6
 
 
 @pytest.fixture
@@ -91,14 +91,21 @@ def test_register_repository(app_client, bare_repo, settings):
 def test_seed_robots_and_pipeline(app_client):
     robots = app_client.get("/api/robots").json()
     names = {r["name"] for r in robots}
-    assert {"po", "qa", "developer", "tester", "merger", "pm"} <= names
+    assert {"po", "qa", "developer", "tester", "avaliador", "merger", "pm"} <= names
     roles = {r["name"]: r["role"] for r in robots}
     assert roles["po"] == "refine"
     assert roles["qa"] == "review"
     assert roles["tester"] == "verify"
+    assert roles["avaliador"] == "assess"
     assert roles["pm"] == "pm"
 
     pipelines = app_client.get("/api/pipelines").json()
+    # pipeline default (primeiro): com a fase de avaliação entre tester e merger
+    default = next(p for p in pipelines if p["name"] == "po-qa-dev-tester-avaliador-merge")
+    assert len(default["steps"]) == 6
+    order = [st["robot"]["name"] for st in default["steps"]]
+    assert order == ["po", "qa", "developer", "tester", "avaliador", "merger"]
+
     main = next(p for p in pipelines if p["name"] == "po-qa-dev-tester-merge")
     assert len(main["steps"]) == 5
     order = [st["robot"]["name"] for st in main["steps"]]
@@ -162,6 +169,50 @@ def test_dashboard(app_client, registered_repo):
     data = app_client.get("/api/dashboard").json()
     assert data["total_tasks"] >= 1
     assert "queued" in data["tasks_by_status"]
+
+
+def test_dashboard_notices(app_client, registered_repo):
+    """Avisos do dashboard: guardrail, needs_review, blocked, custo alto e arquitetura."""
+    _create_and_start_task(app_client)
+    with app_client.app.state.Session() as s:
+        t1 = s.get(Task, 1)
+        t1.status = "in_progress"
+        t1.cost_spent = 0.9 * (t1.budget_limit or 1.0)  # custo alto (>= 80%)
+        step = t1.steps[0]
+        step.status = "guardrail_blocked"
+        step.error = "guardrail: rm -rf"
+        s.add(
+            RunEvent(
+                step_id=step.id,
+                seq=99,
+                kind="arch_metric",
+                payload={"score": 80, "level": "alto", "reasons": ["A Dockerfile"]},
+            )
+        )
+        s.add_all(
+            [
+                Task(
+                    repository_id=1, pipeline_id=1, title="t2", kind="issue",
+                    status="needs_review", error="orçamento estourado",
+                ),
+                Task(
+                    repository_id=1, pipeline_id=1, title="t3", kind="issue",
+                    status="blocked", error="conflito de merge",
+                ),
+            ]
+        )
+        s.commit()
+
+    data = app_client.get("/api/dashboard").json()
+    kinds = {n["kind"] for n in data["notices"]}
+    assert kinds >= {"guardrail", "arch", "needs_review", "blocked", "budget_high"}
+    by_kind = {n["kind"]: n for n in data["notices"]}
+    assert by_kind["guardrail"]["level"] == "critical"
+    assert by_kind["arch"]["level"] == "critical"
+    assert by_kind["needs_review"]["level"] == "warning"
+    # críticos ordenados antes dos warnings
+    levels = [n["level"] for n in data["notices"]]
+    assert levels == sorted(levels, key=lambda l: 0 if l == "critical" else 1)
 
 
 # ---------- Fluxo do worker (kimi fake) ----------
@@ -253,3 +304,38 @@ def test_worker_guardrail_blocks(settings, bare_repo, tmp_path, fake_kimi):
         assert "rm -rf" in (step.error or "")
         kinds = [e.kind for e in step.events]
         assert "guardrail_blocked" in kinds
+
+
+def test_worker_arch_metric_event(settings, bare_repo, tmp_path, fake_kimi):
+    """Task que adiciona Dockerfile gera evento arch_metric 'alto' e aviso no dashboard."""
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass", write_file="Dockerfile")
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = _create_and_start_task(client)
+
+    for _ in range(PIPELINE_STEPS + 2):  # margem
+        claimed = runner.claim_next(session_factory)
+        if claimed is None:
+            break
+        runner.execute_step(settings, session_factory, claimed)
+
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "done"
+        merger = max(t.steps, key=lambda st: st.position)  # fase de integração
+        events = {e.kind: e for e in merger.events}
+        assert "arch_metric" in events
+        payload = events["arch_metric"].payload
+        assert payload["level"] == "alto"
+        assert any("Dockerfile" in r for r in payload["reasons"])
+
+    data = client.get("/api/dashboard").json()
+    kinds = {n["kind"] for n in data["notices"]}
+    assert "arch" in kinds

@@ -40,7 +40,7 @@ from ..models import (
     Task,
     TaskStep,
 )
-from . import gitops, kimi_exec, project
+from . import arch_metric, gitops, kimi_exec, project
 
 log = logging.getLogger("autoia.worker")
 
@@ -48,6 +48,7 @@ log = logging.getLogger("autoia.worker")
 VERDICT_EXPECTED = {
     "review": verdicts.V_READY,
     "verify": verdicts.V_PASS,
+    "assess": verdicts.V_PASS,
 }
 
 
@@ -187,6 +188,12 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
 
         step_context = _build_step_context(s, task, step, checkout, base, branch)
         project_info = project.detect_project(checkout)
+        try:
+            project.ensure_agents_md(checkout, project_info, settings.db_rule)
+        except (OSError, gitops.GitError):
+            log.warning(
+                "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
+            )
         prompt = prompts.build_prompt(
             step.robot, task, step_context, base, project_info=project_info
         )
@@ -351,6 +358,24 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
         merge_now = nxt is None or nxt.post_merge
         if merge_now:
             try:
+                changes = gitops.diff_changes(checkout, repo.default_branch, task.branch)
+                metric = arch_metric.compute_arch_metric(changes)
+                _system_event(
+                    s, step, "arch_metric",
+                    {
+                        "score": metric.score,
+                        "level": metric.level,
+                        "reasons": metric.reasons,
+                        "arquivos": len(changes),
+                    },
+                )
+            except gitops.GitError:
+                log.warning(
+                    "não foi possível computar a métrica de arquitetura no checkout %s",
+                    checkout,
+                    exc_info=True,
+                )
+            try:
                 result = gitops.merge_and_push(checkout, task.branch, repo.default_branch)
             except gitops.GitError as exc:
                 trigger = _handle_failure(settings, s, step, task, f"merge/push: {exc}", "merge_error", STEP_FAILED)
@@ -466,6 +491,13 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             return
         context = _pm_context(s, task)
         project_info = project.detect_project(checkout) if os.path.isdir(checkout) else ""
+        if os.path.isdir(checkout):
+            try:
+                project.ensure_agents_md(checkout, project_info, settings.db_rule)
+            except (OSError, gitops.GitError):
+                log.warning(
+                    "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
+                )
         prompt = prompts.build_prompt(
             pm_robot, task, context, task.repository.default_branch, project_info=project_info
         )

@@ -6,6 +6,8 @@ import json
 import os
 from dataclasses import dataclass, field
 
+from .worker.project import DEFAULT_DATABASE_RULE
+
 # Padrões de comandos considerados arriscados no shell dos robôs.
 # Robôs nunca precisam: destruir arquivos, mexer no sistema, rede externa,
 # privilégios, push ou sair da branch de trabalho.
@@ -85,6 +87,7 @@ class Settings:
         default_factory=lambda: _list("AUTOIA_WHITELISTED_HOSTS", DEFAULT_WHITELISTED_HOSTS)
     )
     branch_prefix: str = field(default_factory=lambda: _env("AUTOIA_BRANCH_PREFIX", "autoia"))
+    db_rule: str = field(default_factory=lambda: _env("AUTOIA_DB_RULE", DEFAULT_DATABASE_RULE))
     api_host: str = field(default_factory=lambda: _env("AUTOIA_API_HOST", "127.0.0.1"))
     api_port: int = field(default_factory=lambda: _int("AUTOIA_API_PORT", 8000))
     frontend_dist: str | None = field(default_factory=_frontend_dist_default)

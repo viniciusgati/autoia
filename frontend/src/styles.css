@@ -571,3 +571,55 @@ input.short {
   color: var(--muted);
   white-space: nowrap;
 }
+
+/* ---------- Avisos (Dashboard) ---------- */
+.notices {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.notice {
+  display: block;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  padding: 10px 12px;
+  text-decoration: none;
+  color: var(--text);
+}
+
+.notice:hover {
+  border-color: var(--accent);
+}
+
+.notice-critical {
+  border-left-color: var(--err);
+}
+
+.notice-warning {
+  border-left-color: var(--warn);
+}
+
+.notice-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.notice-kind {
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: lowercase;
+}
+
+.notice-kind.critical {
+  color: var(--err);
+}
+
+.notice-kind.warning {
+  color: var(--warn);
+}

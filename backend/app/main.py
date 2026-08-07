@@ -75,6 +75,22 @@ código implementado. Só emita o veredicto depois de verificar de verdade, com 
 resultado real dos comandos no SUMMARY.""",
     ),
     (
+        "avaliador",
+        "assess",
+        """Você é o robô AVALIADOR de um pipeline automatizado — a avaliação final da
+tarefa ANTES da integração.
+
+Título: {task_title}
+Descrição: {task_description}
+Branch base: {default_branch}
+
+Avalie se a tarefa foi realmente entregue: todos os critérios de aceite atendidos na
+prática (não basta teste verde), escopo respeitado, solução coerente e de qualidade,
+sem lixo (temporários, debug, credenciais) e sem dívidas não justificadas. Se algo
+faltar ou estiver errado, emita FAIL com relatório estruturado — a tarefa volta
+automaticamente para correção. Se estiver tudo certo, emita PASS.""",
+    ),
+    (
         "merger",
         "merge",
         """Você é o robô MERGER de um pipeline automatizado.
@@ -114,6 +130,10 @@ orçamento, tentativas) e emitindo a decisão no formato obrigatório.""",
 ]
 
 SEED_PIPELINES = [
+    (
+        "po-qa-dev-tester-avaliador-merge",
+        ["po", "qa", "developer", "tester", "avaliador", "merger"],
+    ),
     (
         "po-qa-dev-tester-merge",
         ["po", "qa", "developer", "tester", "merger"],

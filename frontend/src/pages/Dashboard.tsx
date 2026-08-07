@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../api";
+import StatusBadge from "../components/StatusBadge";
 import type { Dashboard as DashboardData } from "../types";
 
 export default function Dashboard() {
@@ -25,6 +27,33 @@ export default function Dashboard() {
   return (
     <div>
       <h2>Dashboard</h2>
+
+      <h3>Requer atenção</h3>
+      {data.notices.length === 0 ? (
+        <p className="muted">Nenhum aviso.</p>
+      ) : (
+        <div className="notices">
+          {data.notices.map((notice, i) => (
+            <Link
+              key={`${notice.kind}-${notice.task_id}-${i}`}
+              to={`/tasks/${notice.task_id}`}
+              className={`notice notice-${notice.level}`}
+            >
+              <div className="notice-line">
+                <span className="resumo-title">
+                  #{notice.task_id} {notice.task_title}
+                </span>
+                <StatusBadge status={notice.task_status} />
+              </div>
+              <div className="notice-line small">
+                <span className={`notice-kind ${notice.level}`}>{notice.kind}</span>
+                <span className="muted">{notice.message}</span>
+              </div>
+            </Link>
+          ))}
+        </div>
+      )}
+
       <div className="cards">
         <div className="card">
           <div className="card-value">{data.total_tasks}</div>

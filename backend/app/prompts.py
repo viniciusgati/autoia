@@ -109,6 +109,42 @@ SUMMARY: rodei `pytest` (4 testes, 4 passaram). Validei os critérios 1–3; tod
 
 NÃO faça commit do arquivo de veredicto."""
 
+CONTRACT_ASSESS = """## Formato de saída OBRIGATÓRIO (veredicto)
+Esta fase é a AVALIAÇÃO FINAL da tarefa, ANTES da integração (merge).
+- Analise a tarefa completa: história (descrição + critérios de aceite), os resumos das
+  fases anteriores e o diff da branch contra a base (git diff --stat contra a branch
+  base informada na missão).
+- Valide CADA critério de aceite contra o que foi implementado, um por um, e confira
+  também: escopo respeitado (nada fora da tarefa), solução coerente e idiomática, sem
+  lixo (arquivos temporários, debug, credenciais) e sem dívidas não justificadas.
+- NÃO altere código nem arquivos do projeto: você AVALIA e REPORTA. Correções voltam
+  automaticamente (bounce-back) com o seu relatório.
+- Só depois de avaliar tudo, escreva o arquivo `autoia_verdict.txt` na raiz do
+  repositório com a PRIMEIRA linha exatamente:
+
+PASS
+SUMMARY: o que foi avaliado, decisões e justificativas
+
+— ou —
+
+FAIL
+SUMMARY: relatório estruturado das falhas (abaixo)
+
+Se QUALQUER critério não atendido, escopo estourado ou problema de qualidade, o
+veredicto é FAIL. No FAIL, use EXATAMENTE este formato no SUMMARY (é o que o developer
+usará para corrigir):
+
+FALHAS:
+- item: <o que faltou ou falhou>
+  evidência: <o que você viu no código/diff>
+- item: ...
+
+### Exemplo (PASS)
+PASS
+SUMMARY: validei os critérios 1–4 no código e no diff; escopo respeitado, sem lixo.
+
+NÃO faça commit do arquivo de veredicto."""
+
 CONTRACT_PM = """## Formato de saída OBRIGATÓRIO (decisão)
 Você controla o projeto. Analise o contexto da tarefa (status, falhas, orçamento gasto,
 tentativas, relatórios) e decida o melhor próximo passo, escrevendo o arquivo
@@ -140,6 +176,7 @@ _CONTRACTS = {
     "refine": CONTRACT_REFINE,
     "review": CONTRACT_REVIEW,
     "verify": CONTRACT_VERIFY,
+    "assess": CONTRACT_ASSESS,
     "pm": CONTRACT_PM,
 }
 

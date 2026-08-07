@@ -17,6 +17,7 @@ def test_seed_roles_and_pipeline(settings):
         assert roles["qa"] == "review"
         assert roles["developer"] == "implement"
         assert roles["tester"] == "verify"
+        assert roles["avaliador"] == "assess"
         assert roles["merger"] == "merge"
         assert roles["deploy-tester"] == "verify"
         assert roles["pm"] == "pm"
@@ -29,7 +30,13 @@ def test_seed_roles_and_pipeline(settings):
         post = [st.post_merge for st in sorted(pipeline.steps, key=lambda x: x.position)]
         assert post == [False, False, False, False, False, True]
 
+        default = (
+            s.query(Pipeline).filter(Pipeline.name == "po-qa-dev-tester-avaliador-merge").one()
+        )
+        order = [st.robot.name for st in sorted(default.steps, key=lambda x: x.position)]
+        assert order == ["po", "qa", "developer", "tester", "avaliador", "merger"]
+
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
-        assert s.query(Robot).count() == 7
+        assert s.query(Robot).count() == 8

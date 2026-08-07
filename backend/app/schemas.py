@@ -159,9 +159,22 @@ class RunEventOut(BaseModel):
 
 # ---------- Dashboard ----------
 
+class NoticeOut(BaseModel):
+    """Aviso de uma tarefa que requer atenção (guardrail, orçamento, arquitetura...)."""
+
+    task_id: int
+    task_title: str
+    task_status: str
+    level: Literal["critical", "warning"]
+    kind: str
+    message: str
+    ts: datetime
+
+
 class DashboardOut(BaseModel):
     tasks_by_status: dict[str, int]
     total_cost: float
     total_tasks: int
     guardrail_events: int
     recent_guardrails: list[RunEventOut]
+    notices: list[NoticeOut] = []
