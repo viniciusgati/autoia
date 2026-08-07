@@ -14,19 +14,19 @@ e, no final, o merger integra tudo na branch default. Tudo com **logs no banco**
 ```
 ┌──────────┐  React SPA (Vite) ── polling ──┐
 │  browser │                                 ▼
-└──────────┘                        ┌──────────────────┐   SQLite/Postgres
+└──────────┘                       ┌───────────────────┐   SQLite/Postgres
                                    │  FastAPI (REST)   │◄─── (SQLAlchemy)
                                    │  /api/...         │
-                                   └────────┬─────────┘
+                                   └────────┬──────────┘
                                             │ claim de steps
                                    ┌────────▼─────────┐
                                    │  Worker (único)  │
                                    │  ─ runner.py     │
                                    └────────┬─────────┘
-        ┌───────────────────────────────────┼────────────────────┐
-        │ 1. gitops (clone/branch/commit)   │ 2. kimi -p stream-json
-        │ 3. guardrails em tempo real       │ 4. orçamento (cost)
-        └───────────────────────────────────┴────────────────────┘
+        ┌───────────────────────────────────┼───────────────────────┐
+        │ 1. gitops (clone/branch/commit)   │ 2. kimi -p stream-json|
+        │ 3. guardrails em tempo real       │ 4. orçamento (cost)   |
+        └───────────────────────────────────┴───────────────────────┘
 ```
 
 - **Repositories**: repo git registrado (SSH ou caminho local/`file://`), clonado em
