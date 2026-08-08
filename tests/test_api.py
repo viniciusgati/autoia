@@ -8,11 +8,13 @@ O pipeline default agora é po-qa-dev-tester-merge (5 fases).
 from __future__ import annotations
 
 import json
+import os
 import stat
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import Settings
 from app.main import create_app
 from app.models import RunEvent, Task, TaskStep
 from app.worker import runner
@@ -32,7 +34,7 @@ ONLY_TEXT = [
     {"role": "assistant", "content": "resposta única"},
 ]
 
-PIPELINE_STEPS = 6
+PIPELINE_STEPS = 7
 
 
 @pytest.fixture
@@ -88,6 +90,53 @@ def test_register_repository(app_client, bare_repo, settings):
     assert app_client.get("/api/repositories").status_code == 200
 
 
+def test_clone_failure_allows_retry(app_client, bare_repo, settings):
+    """Falha de clone não deixa checkout órfão: o retry com URL válida funciona."""
+    url_invalida = "/tmp/nao-existe-xyz.git"
+
+    primeiro = app_client.post(
+        "/api/repositories",
+        json={"name": "r-falha", "url": url_invalida, "default_branch": "main"},
+    )
+    assert primeiro.status_code == 400
+    assert "falha ao clonar" in primeiro.text
+    # registro foi removido e nenhum checkout órfão ficou no workspace
+    assert app_client.get("/api/repositories").json() == []
+    assert not os.path.isdir(os.path.join(settings.workspace_dir, "1"))
+
+    retry = app_client.post(
+        "/api/repositories",
+        json={"name": "r-falha", "url": bare_repo, "default_branch": "main"},
+    )
+    assert retry.status_code == 201, retry.text
+    assert os.path.isdir(os.path.join(settings.workspace_dir, "1"))
+
+
+def test_register_repository_relative_workspace(bare_repo, tmp_path, monkeypatch):
+    """Com workspace_dir relativo, o checkout é criado no lugar certo (não aninhado)."""
+    monkeypatch.chdir(tmp_path)
+    app = create_app(
+        Settings(
+            database_url=f"sqlite:///{tmp_path}/rel.db",
+            workspace_dir="data/workspaces",
+            log_dir="data/logs",
+        )
+    )
+    client = TestClient(app)
+
+    repo = client.post(
+        "/api/repositories",
+        json={"name": "r-rel", "url": bare_repo, "default_branch": "main"},
+    )
+    assert repo.status_code == 201, repo.text
+    dest = repo.json()["local_path"]
+    assert os.path.isabs(dest)
+    assert dest == os.path.join(os.getcwd(), "data", "workspaces", "1")
+    assert os.path.isfile(os.path.join(dest, "README.md"))
+    # nada aninhado (o bug antigo criava workspaces/workspaces/...)
+    assert not os.path.isdir(os.path.join(dest, "data"))
+
+
 def test_seed_robots_and_pipeline(app_client):
     robots = app_client.get("/api/robots").json()
     names = {r["name"] for r in robots}
@@ -100,16 +149,15 @@ def test_seed_robots_and_pipeline(app_client):
     assert roles["pm"] == "pm"
 
     pipelines = app_client.get("/api/pipelines").json()
-    # pipeline default (primeiro): com a fase de avaliação entre tester e merger
-    default = next(p for p in pipelines if p["name"] == "po-qa-dev-tester-avaliador-merge")
-    assert len(default["steps"]) == 6
+    # pipeline único: avaliador pré-merge + deploy-tester pós-merge
+    default = next(
+        p for p in pipelines if p["name"] == "po-qa-dev-tester-avaliador-deploytest"
+    )
+    assert len(default["steps"]) == 7
     order = [st["robot"]["name"] for st in default["steps"]]
-    assert order == ["po", "qa", "developer", "tester", "avaliador", "merger"]
-
-    main = next(p for p in pipelines if p["name"] == "po-qa-dev-tester-merge")
-    assert len(main["steps"]) == 5
-    order = [st["robot"]["name"] for st in main["steps"]]
-    assert order == ["po", "qa", "developer", "tester", "merger"]
+    assert order == ["po", "qa", "developer", "tester", "avaliador", "merger", "deploy-tester"]
+    post = [st["post_merge"] for st in default["steps"]]
+    assert post == [False, False, False, False, False, False, True]
 
 
 def test_create_and_start_task(app_client, registered_repo):
@@ -218,7 +266,7 @@ def test_dashboard_notices(app_client, registered_repo):
 # ---------- Fluxo do worker (kimi fake) ----------
 
 def test_worker_advances_phases_and_merges(settings, bare_repo, tmp_path, fake_kimi):
-    """po -> qa -> developer -> tester -> merger com kimi fake; no fim, merge+push."""
+    """po -> qa -> developer -> tester -> avaliador -> merger (merge+push) -> deploy-tester."""
     settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
     settings.task_budget = 100.0
     from app.db import make_engine, make_session_factory
@@ -329,7 +377,10 @@ def test_worker_arch_metric_event(settings, bare_repo, tmp_path, fake_kimi):
     with session_factory() as s:
         t = s.get(Task, task["id"])
         assert t.status == "done"
-        merger = max(t.steps, key=lambda st: st.position)  # fase de integração
+        # a métrica é gravada na última fase PRÉ-merge (o deploy-tester é pós-merge)
+        merger = max(
+            (st for st in t.steps if not st.post_merge), key=lambda st: st.position
+        )
         events = {e.kind: e for e in merger.events}
         assert "arch_metric" in events
         payload = events["arch_metric"].payload
@@ -339,3 +390,149 @@ def test_worker_arch_metric_event(settings, bare_repo, tmp_path, fake_kimi):
     data = client.get("/api/dashboard").json()
     kinds = {n["kind"] for n in data["notices"]}
     assert "arch" in kinds
+
+
+def test_events_endpoint_order_desc(settings, bare_repo, tmp_path, fake_kimi):
+    """O endpoint de eventos aceita order=desc (mais recente primeiro) — usado pelo Resumo."""
+    settings.kimi_bin = fake_kimi(ONLY_TEXT)
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = _create_and_start_task(client)
+
+    claimed = runner.claim_next(session_factory)
+    runner.execute_step(settings, session_factory, claimed)
+
+    step_id = task["steps"][0]["id"]
+    asc = client.get(f"/api/steps/{step_id}/events").json()
+    desc = client.get(f"/api/steps/{step_id}/events?order=desc").json()
+    assert len(asc) > 0
+    assert [e["id"] for e in desc] == [e["id"] for e in reversed(asc)]
+    # marcadores que alimentam a visão de chat: início de tentativa e prompt da fase
+    kinds = {e["kind"] for e in asc}
+    assert "attempt_started" in kinds
+    assert "prompt" in kinds
+
+
+# ---------- Fluxo ponta-a-ponta com subtarefas ----------
+
+
+def test_worker_subtasks_full_pipeline(settings, bare_repo, tmp_path, monkeypatch):
+    """Task com subtarefas definidas manualmente → pipeline completo → merge.
+
+    Fluxo: PO → QA → developer (itera 3 subtarefas) → tester (verifica cada uma)
+    → avaliador → merger (merge+push) → deploy-tester (pós-merge).
+
+    Usa mock de kimi_exec.run_kimi para evitar subprocess; os veredictos são
+    injetados via monkeypatch de verdicts.read_verdict.
+    """
+    import app.worker.kimi_exec as ke
+    import app.verdicts as vmod
+
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+    from app.models import SubTask
+
+    app = create_app(settings)
+    engine = make_engine(settings.database_url)
+    session_factory = make_session_factory(engine)
+    client = TestClient(app)
+
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+
+    # Cria task com 3 subtarefas manuais
+    resp = client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "task com subtarefas",
+            "description": "ideia crua",
+            "kind": "feature",
+            "subtasks": [
+                {"title": "Sub 1", "description": "parte A", "acceptance_criteria": "- [ ] crit A"},
+                {"title": "Sub 2", "description": "parte B", "acceptance_criteria": "- [ ] crit B"},
+                {"title": "Sub 3", "description": "parte C", "acceptance_criteria": "- [ ] crit C"},
+            ],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    task = resp.json()
+    assert len(task["subtasks"]) == 3
+    client.post(f"/api/tasks/{task['id']}/start")
+
+    # Mock: kimi sempre retorna sucesso
+    def fake_run_kimi(prompt, **kwargs):
+        return ke.KimiOutcome(exit_code=0, final_text="ok", interaction_count=1)
+
+    _read_count = 0
+
+    def fake_read_verdict(checkout):
+        nonlocal _read_count
+        _read_count += 1
+        # QA (review) é a primeira leitura — espera READY
+        if _read_count == 1:
+            return "READY\nSUMMARY: historia ok"
+        return "PASS\nSUMMARY: ok"
+
+    def fake_remove_verdict(checkout):
+        pass
+
+    with monkeypatch.context() as mp:
+        mp.setattr(ke, "run_kimi", fake_run_kimi)
+        mp.setattr(vmod, "read_verdict", fake_read_verdict)
+        mp.setattr(vmod, "remove_verdict", fake_remove_verdict)
+
+        # Avança todas as fases (7 passos + margem)
+        for _ in range(PIPELINE_STEPS + 2):
+            claimed = runner.claim_next(session_factory)
+            if claimed is None:
+                break
+            runner.execute_step(settings, session_factory, claimed)
+
+    # Verifica estado final
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "done", f"task status={t.status}, error={t.error}"
+        assert all(st.status == "done" for st in t.steps), [
+            (st.position, st.status, st.error) for st in t.steps
+        ]
+
+        subs = (
+            s.query(SubTask)
+            .filter(SubTask.task_id == task["id"])
+            .order_by(SubTask.position)
+            .all()
+        )
+        assert len(subs) == 3
+        for sub in subs:
+            assert sub.status == "done", f"sub {sub.position} status={sub.status}"
+            assert sub.verdict == "PASS", f"sub {sub.position} verdict={sub.verdict}"
+            assert sub.summary, f"sub {sub.position} sem resumo"
+
+        # Eventos de subtarefa: implement no developer, verify no tester
+        dev_step = t.steps[2]
+        dev_kinds = {e.kind for e in dev_step.events}
+        for expected in ("subtask_start", "subtask_implemented"):
+            assert expected in dev_kinds, f"evento {expected} ausente no developer"
+
+        tester_step = t.steps[3]
+        tester_kinds = {e.kind for e in tester_step.events}
+        assert "subtask_verified" in tester_kinds, "subtask_verified ausente no tester"
+
+        total_events = sum(len(st.events) for st in t.steps)
+        assert total_events > 0
+
+    # merge chegou no bare
+    dest = tmp_path / "verify_subtasks"
+    import subprocess
+    subprocess.run(["git", "clone", bare_repo, str(dest)], check=True, capture_output=True)
+    assert (dest / "README.md").exists()

@@ -1,4 +1,4 @@
-"""Testes do seed (robôs com papéis + pipeline default)."""
+"""Testes do seed (robôs com papéis + pipelines: com e sem deploy pós-merge)."""
 
 from __future__ import annotations
 
@@ -22,21 +22,31 @@ def test_seed_roles_and_pipeline(settings):
         assert roles["deploy-tester"] == "verify"
         assert roles["pm"] == "pm"
 
-        pipeline = (
-            s.query(Pipeline).filter(Pipeline.name == "po-qa-dev-tester-deploytest").one()
-        )
-        order = [st.robot.name for st in sorted(pipeline.steps, key=lambda x: x.position)]
-        assert order == ["po", "qa", "developer", "tester", "merger", "deploy-tester"]
-        post = [st.post_merge for st in sorted(pipeline.steps, key=lambda x: x.position)]
-        assert post == [False, False, False, False, False, True]
+        assert s.query(Pipeline).count() == 2
 
-        default = (
-            s.query(Pipeline).filter(Pipeline.name == "po-qa-dev-tester-avaliador-merge").one()
+        # com deploy: avaliador pré-merge + deploy-tester pós-merge (7 fases)
+        deploy = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "po-qa-dev-tester-avaliador-deploytest")
+            .one()
         )
-        order = [st.robot.name for st in sorted(default.steps, key=lambda x: x.position)]
+        order = [st.robot.name for st in sorted(deploy.steps, key=lambda x: x.position)]
+        assert order == ["po", "qa", "developer", "tester", "avaliador", "merger", "deploy-tester"]
+        post = [st.post_merge for st in sorted(deploy.steps, key=lambda x: x.position)]
+        assert post == [False, False, False, False, False, False, True]
+
+        # sem deploy: termina no merger (6 fases, todas pré-merge)
+        sem_deploy = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "po-qa-dev-tester-avaliador-merge")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(sem_deploy.steps, key=lambda x: x.position)]
         assert order == ["po", "qa", "developer", "tester", "avaliador", "merger"]
+        assert all(not st.post_merge for st in sem_deploy.steps)
 
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
         assert s.query(Robot).count() == 8
+        assert s.query(Pipeline).count() == 2

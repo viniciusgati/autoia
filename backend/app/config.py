@@ -5,8 +5,41 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 from .worker.project import DEFAULT_DATABASE_RULE
+
+
+def _load_dotenv(directory: str | None = None) -> None:
+    """Carrega um `.env` opcional (KEY=VALUE, sem sobrescrever env já setada).
+
+    Procura em `directory` (para teste), senão no cwd e na raiz do projeto.
+    Suporta `\n` no valor (ex.: regras multi-linha). Best-effort.
+    """
+    candidates: list[Path] = []
+    if directory:
+        candidates.append(Path(directory) / ".env")
+    else:
+        candidates.append(Path.cwd() / ".env")
+        candidates.append(Path(__file__).resolve().parents[2] / ".env")
+    for env_path in candidates:
+        if not env_path.is_file():
+            continue
+        try:
+            for line in env_path.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                if key and key not in os.environ:
+                    os.environ[key] = value.strip().replace("\\n", "\n")
+        except OSError:
+            pass
+        return  # usa o primeiro .env encontrado
+
+
+_load_dotenv()
 
 # Padrões de comandos considerados arriscados no shell dos robôs.
 # Robôs nunca precisam: destruir arquivos, mexer no sistema, rede externa,
@@ -89,7 +122,7 @@ class Settings:
     branch_prefix: str = field(default_factory=lambda: _env("AUTOIA_BRANCH_PREFIX", "autoia"))
     db_rule: str = field(default_factory=lambda: _env("AUTOIA_DB_RULE", DEFAULT_DATABASE_RULE))
     api_host: str = field(default_factory=lambda: _env("AUTOIA_API_HOST", "127.0.0.1"))
-    api_port: int = field(default_factory=lambda: _int("AUTOIA_API_PORT", 8000))
+    api_port: int = field(default_factory=lambda: _int("AUTOIA_API_PORT", 9000))
     frontend_dist: str | None = field(default_factory=_frontend_dist_default)
 
     def ensure_dirs(self) -> None:

@@ -6,8 +6,16 @@ from .models import Robot, Task
 
 # Regras reforçadas no prompt, alinhadas com guardrails.py.
 GUARDRAIL_INSTRUCTIONS = """## Regras obrigatórias
-- Trabalhe SOMENTE dentro do repositório atual (o diretório de trabalho). Não leia nem escreva arquivos fora dele.
-- NÃO rode comandos destrutivos (rm -rf, mkfs, dd, sudo, chmod 777, shutdown etc.), NÃO use curl/wget/ssh/scp, NÃO instale dependências globais.
+- Trabalhe SOMENTE dentro do repositório atual (o diretório de trabalho). NÃO leia nem
+  escreva arquivos fora dele: as ferramentas de arquivo (Read/Write/Edit/Glob/Grep) só
+  funcionam DENTRO do checkout — qualquer caminho fora (ex.: ~/.kimi-code, /tmp, logs do
+  pipeline) é BLOQUEADO e encerra a sua execução na hora.
+- NÃO rode comandos destrutivos ou de sistema: rm -rf, mkfs, dd, sudo, chown, chmod 777,
+  curl, wget, ssh, scp, pip install, npm install -g, make install, shutdown/reboot/halt,
+  systemctl, service, killall/pkill, pkexec, su. A infraestrutura (banco, serviços,
+  deploy) já está provisionada pelo ambiente — NÃO tente instalar, iniciar ou verificar
+  serviços do sistema operacional; use as variáveis de ambiente fornecidas (ex.:
+  DATABASE_URL) ou mocks nos testes.
 - NÃO rode `git push`. NÃO troque para as branches main/master (`git checkout main`). Trabalhe apenas na branch atual.
 - Faça commits locais com `git add -A && git commit -m "mensagem"` quando concluir.
 - Se algo estiver quebrado, corrija o que estiver ao seu alcance e relate o resto. Não invente resultados."""
@@ -21,6 +29,34 @@ EVIDENCE = """### Evidência
 No seu resumo/final, liste os comandos que executou e as saídas relevantes (trechos
 reais). Isso é auditado e usado pelas próximas fases — sem evidência, a fase anterior
 não tem como saber o que de fato aconteceu."""
+
+# Caderno de trabalho: o worker gera autoia_handoff.md no checkout antes de cada fase
+# com o histórico COMPLETO das fases anteriores + diff + instrução da fase atual.
+HANDOFF_READ = """## Caderno de trabalho (leia antes de começar)
+ANTES de começar, LEIA o arquivo `autoia_handoff.md` na raiz do repositório: ele
+contém o histórico COMPLETO das fases anteriores, o diff atual da branch e a instrução
+desta fase. Baseie seu trabalho nele — é o registro oficial do que já foi feito."""
+
+# Documentação da fase no texto final (papéis que executam/verificam trabalho).
+# O worker persiste o texto final INTEGRAL como histórico da fase (fonte de verdade).
+HANDOFF_DOCUMENT = """## Documentação obrigatória (handoff)
+Ao terminar, o seu TEXTO FINAL é a documentação desta fase — é exatamente o que a
+próxima fase receberá como histórico. Escreva com EXATAMENTE estes tópicos:
+
+### O que foi feito
+<resumo objetivo do trabalho desta fase>
+
+### Arquivos alterados
+- <caminho> — <para quê> (ou "Nenhum" se não alterou arquivos)
+
+### Evidência
+<comandos executados e saídas relevantes — trechos REAIS>
+
+### Pendências
+- <o que não foi possível fazer, ou "Nenhuma">
+
+### Para a próxima fase
+<instruções diretas ao próximo robô: o que verificar, o que falta, onde olhar>"""
 
 CONTRACT_REFINE = """## Formato de saída OBRIGATÓRIO
 Escreva a história no texto final com EXATAMENTE estes marcadores:
@@ -36,10 +72,30 @@ Escreva a história no texto final com EXATAMENTE estes marcadores:
 ## Fora de escopo
 - <o que NÃO será feito nesta história> (opcional se não houver)
 
+## Plano de implementação
+Divida o trabalho em subtarefas ordenadas e independentes, cada uma com seu próprio
+escopo e critérios verificáveis. Cada subtarefa deve ser implementável em uma sessão
+(código focado, ~1–3 arquivos).
+
+### Subtarefa 1: <título curto>
+**Escopo:** <o que implementar, 1–3 frases>
+**Critérios:**
+- [ ] critério verificável
+- [ ] ...
+
+### Subtarefa 2: <título curto>
+**Escopo:** <o que implementar>
+**Critérios:**
+- [ ] ...
+
+... (2 a 6 subtarefas; se a tarefa for muito simples, 1 subtarefa é aceitável)
+
 ### Regras da história
 - Critérios devem ser objetivos e verificáveis (dado/quando/então quando fizer sentido).
 - PROIBIDO critério subjetivo ("bonito", "rápido", "fácil de usar") sem alvo mensurável.
 - Se a ideia crua for vaga, faça as melhores suposições e deixe-as EXPLÍCITAS na descrição.
+- Subtarefas devem ser independentes: a ordem é de implementação, mas cada uma pode ser
+  testada isoladamente com seus próprios critérios.
 NÃO escreva arquivos no repositório: apenas responda com a história.
 
 ### Exemplo do formato
@@ -48,7 +104,21 @@ Como usuária do módulo de cálculos, quero uma função `multiplicar`, para n�
 
 ## Critérios de aceite
 - [ ] dado `multiplicar(3, 4)`, então o retorno é `12`
-- [ ] dado o comando `pytest` na raiz, então todos os testes passam"""
+- [ ] dado o comando `pytest` na raiz, então todos os testes passam
+
+## Plano de implementação
+
+### Subtarefa 1: Implementar função multiplicar
+**Escopo:** Criar a função `multiplicar(a, b)` no módulo `calculos.py` com type hints e docstring.
+**Critérios:**
+- [ ] dado `multiplicar(3, 4)`, retorna `12`
+- [ ] dado `multiplicar(-2, 5)`, retorna `-10`
+
+### Subtarefa 2: Adicionar testes
+**Escopo:** Criar `test_calculos.py` com pytest cobrindo a função multiplicar.
+**Critérios:**
+- [ ] `pytest` passa com 2+ testes para `multiplicar`
+- [ ] cobre caso positivo, negativo e zero"""
 
 CONTRACT_REVIEW = """## Formato de saída OBRIGATÓRIO (veredicto)
 Revise a história (descrição + critérios de aceite) com o checklist abaixo. Depois
@@ -203,9 +273,20 @@ def build_prompt(
         parts.append(f"### Critérios de aceite da história\n{task.acceptance_criteria}")
     if step_context:
         parts.append(f"### Contexto das fases\n{step_context}")
+    if task.feedback:
+        parts.append(
+            f"### Feedback externo (do usuário/sistema)\n{task.feedback}\n\n"
+            "Leve em conta este feedback no seu trabalho — pode conter erros de deploy, "
+            "pedidos de ajuste ou informações do ambiente."
+        )
+    parts.append(HANDOFF_READ)
     contract = _CONTRACTS.get(robot.role)
     if contract:
         parts.append(contract)
+    # refine (história) e pm (decisão) têm formatos de saída próprios; os demais
+    # documentam o trabalho no texto final, que vira o histórico da fase no handoff.
+    if robot.role not in ("refine", "pm"):
+        parts.append(HANDOFF_DOCUMENT)
     parts.append(EVIDENCE)
     parts.append(GUARDRAIL_INSTRUCTIONS)
     return "\n\n".join(p for p in parts if p)

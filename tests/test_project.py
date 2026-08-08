@@ -124,6 +124,26 @@ def test_ensure_agents_md_idempotent(bare_repo, tmp_path):
     assert exclude.count("AGENTS.md") == 1
 
 
+def test_build_prompt_guardrails_explicit():
+    """As limitações reais do guardrail ficam explícitas no prompt de todo robô."""
+    from app.models import Robot, Task
+    from app.prompts import build_prompt
+
+    prompt = build_prompt(
+        Robot(name="dev", role="implement", mission="m."),
+        Task(title="t", description="d"),
+        "",
+        "main",
+    )
+    # comandos de sistema bloqueados (o tester tentou systemctl em produção)
+    assert "systemctl" in prompt
+    assert "curl" in prompt
+    # ferramentas de arquivo restritas ao checkout
+    assert "DENTRO do checkout" in prompt
+    # infra é do ambiente: banco via variável, não via serviço do SO
+    assert "DATABASE_URL" in prompt
+
+
 def test_ensure_agents_md_preserves_tracked(bare_repo, tmp_path):
     """AGENTS.md já versionado pelo repositório prevalece (não é sobrescrito)."""
     dest = str(tmp_path / "clone")

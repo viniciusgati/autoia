@@ -23,6 +23,13 @@ STEP_DONE = "done"
 STEP_FAILED = "failed"
 STEP_GUARDRAIL_BLOCKED = "guardrail_blocked"
 
+SUB_PENDING = "pending"
+SUB_IMPLEMENTING = "implementing"
+SUB_IMPLEMENTED = "implemented"
+SUB_VERIFYING = "verifying"
+SUB_DONE = "done"
+SUB_FAILED = "failed"
+
 
 class Repository(Base):
     __tablename__ = "repositories"
@@ -92,6 +99,7 @@ class Task(Base):
     budget_limit: Mapped[float] = mapped_column(Float, default=10.0)
     cost_spent: Mapped[float] = mapped_column(Float, default=0.0)
     pm_decisions: Mapped[int] = mapped_column(Integer, default=0)
+    feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
@@ -101,6 +109,11 @@ class Task(Base):
     steps: Mapped[list["TaskStep"]] = relationship(
         back_populates="task",
         order_by="TaskStep.position",
+        cascade="all, delete-orphan",
+    )
+    subtasks: Mapped[list["SubTask"]] = relationship(
+        back_populates="task",
+        order_by="SubTask.position",
         cascade="all, delete-orphan",
     )
 
@@ -145,3 +158,26 @@ class RunEvent(Base):
     cost: Mapped[float] = mapped_column(Float, default=0.0)
 
     step: Mapped[TaskStep] = relationship(back_populates="events")
+
+
+class SubTask(Base):
+    """Unidade de implementação de uma tarefa. Cada subtarefa tem seu próprio ciclo
+    implement → verify com bounce-back independente, na mesma branch da task."""
+
+    __tablename__ = "subtasks"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    position: Mapped[int] = mapped_column(Integer)
+    title: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text, default="")
+    acceptance_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default=SUB_PENDING)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    task: Mapped[Task] = relationship(back_populates="subtasks")

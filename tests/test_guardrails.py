@@ -49,6 +49,68 @@ def test_check_tool_call_file_outside_workspace(tmp_path):
     assert check_tool_call(inside, [], checkout) is None
 
 
+def test_read_logs_fora_do_checkout_permitido(tmp_path):
+    """Leitura (Read/Grep) de logs do próprio kimi e de /tmp é permitida; escrita não."""
+    checkout = str(tmp_path / "checkout")
+    # log de servidor em /tmp criado pelo robô
+    assert (
+        check_tool_call(
+            {"function": {"name": "Read", "arguments": '{"path":"/tmp/server.log"}'}},
+            [],
+            checkout,
+        )
+        is None
+    )
+    assert (
+        check_tool_call(
+            {"function": {"name": "Grep", "arguments": '{"path":"/tmp/out.log"}'}},
+            [],
+            checkout,
+        )
+        is None
+    )
+    # escrita fora do checkout continua bloqueada, mesmo em /tmp
+    assert (
+        check_tool_call(
+            {"function": {"name": "Write", "arguments": '{"path":"/tmp/x.py"}'}},
+            [],
+            checkout,
+        )
+        is not None
+    )
+    # arquivo sensível fora das raízes liberadas segue bloqueado
+    assert (
+        check_tool_call(
+            {"function": {"name": "Read", "arguments": '{"path":"/etc/passwd"}'}},
+            [],
+            checkout,
+        )
+        is not None
+    )
+
+
+def test_read_sessions_kimi_permitido(tmp_path, monkeypatch):
+    """output.log do próprio kimi (~/.kimi-code/sessions) é legível; o resto do home não."""
+    from app import guardrails
+
+    sessions = str(tmp_path / "kimi-code" / "sessions")
+    monkeypatch.setattr(guardrails, "_READABLE_EXTRA_ROOTS", (sessions,))
+    checkout = str(tmp_path / "checkout")
+    log = f"{sessions}/wd_1/out.log"
+    assert (
+        check_tool_call({"function": {"name": "Read", "arguments": f'{{"path":"{log}"}}'}}, [], checkout)
+        is None
+    )
+    assert (
+        check_tool_call(
+            {"function": {"name": "Read", "arguments": '{"path":"/home/x/.ssh/id_rsa"}'}},
+            [],
+            checkout,
+        )
+        is not None
+    )
+
+
 def test_path_is_within(tmp_path):
     root = str(tmp_path / "checkout")
     assert path_is_within(str(tmp_path / "checkout" / "src" / "a.py"), root)

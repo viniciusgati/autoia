@@ -9,7 +9,7 @@ HARMLESS = [
     {"role": "assistant", "content": "tarefa concluída"},
 ]
 
-PIPELINE_DEPLOY = "po-qa-dev-tester-deploytest"  # 6 fases, última post_merge
+PIPELINE_DEPLOY = "po-qa-dev-tester-avaliador-deploytest"  # 7 fases, última post_merge
 
 
 def _make_task_with_deploy_pipeline(flow) -> dict:
@@ -65,8 +65,8 @@ def test_happy_path_merges_then_runs_post_merge_on_main(flow, fake_kimi):
     settings.max_pm_decisions = 0
     task = _make_task_with_deploy_pipeline(flow)
 
-    # 6 fases: po, qa, developer, tester, merger (pré) + deploy-tester (pós)
-    for _ in range(8):
+    # 7 fases: po, qa, developer, tester, avaliador, merger (pré) + deploy-tester (pós)
+    for _ in range(9):
         step_id = runner.claim_next(flow["session_factory"])
         if step_id is None:
             break
@@ -96,7 +96,7 @@ def test_post_merge_failure_goes_to_review_no_bounce(flow, fake_kimi):
     settings.max_pm_decisions = 0  # sem PM automático neste teste
     task = _make_task_with_deploy_pipeline(flow)
 
-    for _ in range(5):  # po..merger passam; 6ª (deploy-tester) roda em seguida
+    for _ in range(6):  # po..merger (6 pré-merge) passam; deploy-tester (7ª) roda em seguida
         step_id = runner.claim_next(flow["session_factory"])
         if step_id is None:
             break
@@ -130,7 +130,7 @@ def test_pm_can_retry_post_merge_phase(flow, fake_kimi):
     settings.max_pm_decisions = 2
     task = _make_task_with_deploy_pipeline(flow)
 
-    for _ in range(5):  # po..merger (pré-merge) passam; deploy-tester fica pendente
+    for _ in range(6):  # po..merger (pré-merge) passam; deploy-tester fica pendente
         step_id = runner.claim_next(flow["session_factory"])
         if step_id is None:
             break
@@ -143,7 +143,7 @@ def test_pm_can_retry_post_merge_phase(flow, fake_kimi):
     state = _state(flow, task["id"])
     assert state["status"] == "needs_review"
 
-    # PM decide retry da fase pós-merge (posição 5)
+    # PM decide retry da fase pós-merge (posição 6)
     settings.kimi_bin = fake_kimi(HARMLESS, verdict="pm_retry_post")
     runner._pm_decide(flow["session_factory"], settings, task["id"], "teste")
 

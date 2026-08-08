@@ -45,6 +45,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "tasks": [
         ("acceptance_criteria", "TEXT"),
         ("pm_decisions", "INTEGER DEFAULT 0 NOT NULL"),
+        ("feedback", "TEXT"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),

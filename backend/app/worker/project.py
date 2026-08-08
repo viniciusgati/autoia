@@ -121,10 +121,10 @@ def ensure_agents_md(checkout: str, project_info: str, db_rule: str = DEFAULT_DA
         return
     with open(os.path.join(checkout, "AGENTS.md"), "w", encoding="utf-8") as f:
         f.write(build_agents_md(project_info, db_rule))
-    _exclude_local(checkout, "AGENTS.md")
+    exclude_local(checkout, "AGENTS.md")
 
 
-def _exclude_local(checkout: str, name: str) -> None:
+def exclude_local(checkout: str, name: str) -> None:
     """Garante `name` no .git/info/exclude do checkout (idempotente)."""
     exclude_path = os.path.join(checkout, ".git", "info", "exclude")
     try:

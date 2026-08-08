@@ -4,6 +4,7 @@ import type {
   Repository,
   Robot,
   RunEvent,
+  SubTask,
   Task,
 } from "./types";
 
@@ -63,14 +64,33 @@ export const api = {
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
   reviewTask: (id: number, data: { action: "approve" | "cancel"; extra_budget: number; note?: string }) =>
     request<Task>(`/api/tasks/${id}/review`, { method: "POST", body: JSON.stringify(data) }),
-  retryStep: (taskId: number, position: number) =>
-    request<Task>(`/api/tasks/${taskId}/steps/${position}/retry`, { method: "POST" }),
+  retryStep: (taskId: number, position: number, note?: string) =>
+    request<Task>(`/api/tasks/${taskId}/steps/${position}/retry`, {
+      method: "POST",
+      body: note ? JSON.stringify({ note }) : undefined,
+    }),
+  setFeedback: (taskId: number, text: string) =>
+    request<Task>(`/api/tasks/${taskId}/feedback`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  clearFeedback: (taskId: number) =>
+    request<Task>(`/api/tasks/${taskId}/feedback`, { method: "DELETE" }),
   pmDecide: (taskId: number) =>
     request<Task>(`/api/tasks/${taskId}/pm/decide`, { method: "POST" }),
 
+  // subtasks
+  retrySubtask: (taskId: number, position: number) =>
+    request<SubTask>(`/api/tasks/${taskId}/subtasks/${position}/retry`, {
+      method: "POST",
+    }),
+
   // observabilidade
-  listEvents: (stepId: number, kind?: string) => {
-    const query = kind ? `?kind=${encodeURIComponent(kind)}` : "";
+  listEvents: (stepId: number, kind?: string, order?: "asc" | "desc") => {
+    const params = new URLSearchParams();
+    if (kind) params.set("kind", kind);
+    if (order) params.set("order", order);
+    const query = params.toString() ? `?${params}` : "";
     return request<RunEvent[]>(`/api/steps/${stepId}/events${query}`);
   },
   getLog: async (stepId: number): Promise<string> => {

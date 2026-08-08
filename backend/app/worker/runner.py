@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import types
 
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -37,10 +38,11 @@ from ..models import (
     TASK_QUEUED,
     Robot,
     RunEvent,
+    SubTask,
     Task,
     TaskStep,
 )
-from . import arch_metric, gitops, kimi_exec, project
+from . import arch_metric, gitops, handoff, kimi_exec, project, subtask
 
 log = logging.getLogger("autoia.worker")
 
@@ -52,11 +54,39 @@ VERDICT_EXPECTED = {
 }
 
 
+def recover_stale_steps(session_factory) -> int:
+    """No startup do worker: steps `running` de tasks ativas são órfãos de um
+    restart/crash anterior (worker síncrono e único) — volta para `pending` para
+    re-executar, em vez de travar a task para sempre."""
+    with session_factory() as s:
+        stale = (
+            s.query(TaskStep)
+            .join(Task)
+            .filter(
+                TaskStep.status == STEP_RUNNING,
+                Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+            )
+            .all()
+        )
+        for st in stale:
+            st.status = STEP_PENDING
+            st.started_at = None
+            _system_event(
+                s, st, "worker_recovered",
+                {"reason": "step running órfão de restart anterior; re-executando"},
+            )
+        s.commit()
+        return len(stale)
+
+
 def worker_loop(settings: Settings) -> None:
     engine = make_engine(settings.database_url)
     Base.metadata.create_all(engine)  # não depende da API ter subido antes
     migrate_schema(engine)
     session_factory = make_session_factory(engine)
+    recovered = recover_stale_steps(session_factory)
+    if recovered:
+        log.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
     log.info("worker iniciado (dir de trabalho: %s)", settings.workspace_dir)
     while True:
         try:
@@ -150,6 +180,61 @@ def _build_step_context(
     return context
 
 
+def _build_handoff(
+    s: Session, task: Task, current_step: TaskStep, checkout: str, base: str, branch: str
+) -> str:
+    """Monta o autoia_handoff.md: histórico COMPLETO das fases + diff + instrução atual.
+
+    Fases anteriores entram com o resumo INTEGRAL (sem truncar) + veredicto; fases
+    posteriores que falharam (bounce-back) entram com o relatório completo da falha.
+    """
+    sections: list[str] = []
+    for st in sorted(task.steps, key=lambda x: x.position):
+        if st.position == current_step.position:
+            continue
+        robot_name = st.robot.name if st.robot else "?"
+        role = st.robot.role if st.robot else ""
+        if st.position < current_step.position:
+            head = f"### Fase {st.position} — {robot_name} ({role}) — {st.status}"
+            if st.verdict:
+                head += f" — veredicto: {st.verdict}"
+            sections.append(f"{head}\n{st.summary or '(sem resumo)'}")
+        elif st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED) and (st.summary or st.error):
+            detail = st.summary or ""
+            if st.error:
+                detail = f"{st.error}\n{detail}".strip()
+            sections.append(
+                f"### Fase {st.position} — {robot_name} ({role}) — FALHOU\n"
+                f"_Esta fase falhou e o trabalho voltou para você._\n{detail}"
+            )
+    diff = ""
+    try:
+        diff = gitops.diff_stat(checkout, base, branch)
+    except gitops.GitError:
+        pass
+
+    # Inclui progresso de subtarefas no handoff, se existirem
+    if task.subtasks:
+        sections.append(_subtask_progress_summary(task))
+
+    current = (
+        f"**Fase {current_step.position} — {current_step.robot.name if current_step.robot else '?'} "
+        f"({current_step.robot.role if current_step.robot else '?'})**\n"
+        "Ao terminar, documente no seu texto final: o que fez, arquivos alterados, "
+        "evidência (comandos/saídas), pendências e instruções para a próxima fase."
+    )
+    return handoff.build_handoff(
+        task_id=task.id,
+        task_title=task.title or "",
+        task_status=task.status,
+        branch=branch,
+        phase_sections=sections,
+        diff=diff,
+        current=current,
+        feedback=task.feedback or "",
+    )
+
+
 def execute_step(settings: Settings, session_factory, step_id: int) -> dict | None:
     """Executa o step. Retorna um gatilho de PM ({task_id, reason}) quando aplicável."""
     with session_factory() as s:
@@ -194,12 +279,46 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             log.warning(
                 "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
             )
+        try:
+            handoff.write_handoff(
+                checkout, _build_handoff(s, task, step, checkout, base, branch)
+            )
+        except (OSError, gitops.GitError):
+            log.warning(
+                "não foi possível escrever autoia_handoff.md no checkout %s",
+                checkout,
+                exc_info=True,
+            )
         prompt = prompts.build_prompt(
             step.robot, task, step_context, base, project_info=project_info
         )
         log_path = os.path.join(settings.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
+        # Marca o início da tentativa nos eventos: uma fase pode ser re-executada
+        # (bounce-back) e os eventos se acumulam no mesmo step — sem esse marcador
+        # a UI não consegue separar as tentativas no histórico.
+        _system_event(
+            s, step, "attempt_started",
+            {"attempt": step.attempt, "robot": step.robot.name if step.robot else None},
+        )
+        # Persiste o prompt da fase (o que o robô pediu) para a visão de chat.
+        _system_event(
+            s, step, "prompt",
+            {"prompt": prompt, "robot": step.robot.name if step.robot else None},
+        )
+        role = step.robot.role if step.robot else ""
+        has_subtasks = bool(task.subtasks)  # força eager load dentro da sessão
         s.commit()
+
+    # ── Ramo de subtarefas: implement e verify iteram sobre subtarefas ──
+    if has_subtasks and role == "implement":
+        return _decide_subtask_implement(
+            settings, session_factory, step_id, checkout, base, branch, project_info
+        )
+    if has_subtasks and role == "verify":
+        return _decide_subtask_verify(
+            settings, session_factory, step_id, checkout, base, branch, project_info
+        )
 
     state = {"seq": _event_count(session_factory, step_id), "cost": 0.0}
 
@@ -253,7 +372,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
 def _consume_verdict(s: Session, step: TaskStep, checkout: str) -> str | None:
     """Lê e remove o veredicto, se o papel do robô exigir. Retorna o rótulo."""
     role = step.robot.role if step.robot else ""
-    if role not in VERDICT_EXPECTED:
+    expected = VERDICT_EXPECTED.get(role)
+    if expected is None:
         return None
     raw = verdicts.read_verdict(checkout)
     verdicts.remove_verdict(checkout)
@@ -262,6 +382,11 @@ def _consume_verdict(s: Session, step: TaskStep, checkout: str) -> str | None:
     else:
         label = verdicts.parse_pass_fail(raw)
     step.verdict = label or (raw or "")[:30] or "AUSENTE"
+    if label != expected and raw:
+        # Veredicto de correção (NEEDS_WORK/FAIL): preserva o conteúdo COMPLETO
+        # no summary — é o que a fase anterior precisa para corrigir (bounce-back)
+        # e o que o handoff mostra na seção "FALHOU".
+        step.summary = raw
     return label
 
 
@@ -328,7 +453,9 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
                 s.commit()
                 return trigger
 
-        step.summary = (outcome.final_text or "")[:2000]
+        # Texto final COMPLETO: é a documentação da fase e vira o histórico no handoff
+        # da próxima fase (requisito: nunca truncar conteúdo).
+        step.summary = outcome.final_text or ""
 
         # Papel refine (po): grava a história na task.
         if role == "refine":
@@ -337,6 +464,23 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
                 task.description = description
             if criteria:
                 task.acceptance_criteria = criteria
+            # Gera subtarefas a partir do plano de implementação (se o PO gerou)
+            if not task.subtasks:
+                subtask_data = verdicts.parse_subtasks(outcome.final_text or "")
+                for i, sd in enumerate(subtask_data):
+                    task.subtasks.append(
+                        SubTask(
+                            position=i,
+                            title=sd["title"],
+                            description=sd["description"],
+                            acceptance_criteria=sd["acceptance_criteria"],
+                        )
+                    )
+                if subtask_data:
+                    _system_event(
+                        s, step, "subtasks_generated",
+                        {"count": len(subtask_data), "titles": [sd["title"] for sd in subtask_data]},
+                    )
 
         steps = sorted(task.steps, key=lambda x: x.position)
         nxt = next((st for st in steps if st.position > step.position), None)
@@ -458,6 +602,221 @@ def _handle_failure(settings: Settings, s: Session, step: TaskStep, task: Task, 
 
 
 # ---------------------------------------------------------------------------
+# Decisão pós-execução de subtarefas (implement e verify)
+# ---------------------------------------------------------------------------
+
+
+def _decide_subtask_implement(
+    settings: Settings,
+    session_factory,
+    step_id: int,
+    checkout: str,
+    base: str,
+    branch: str,
+    project_info: str,
+) -> dict | None:
+    """Executa o ciclo implement das subtarefas e decide o próximo passo."""
+    with session_factory() as s:
+        step = s.get(TaskStep, step_id)
+        if step is None:
+            return None
+        task_id = step.task_id
+        log_path = step.log_path or os.path.join(settings.log_dir, f"step_{step_id}.log")
+
+    abort_reason = subtask.run_implement_subtasks(
+        settings, session_factory, step,
+        task_id, checkout, base, branch, project_info, log_path,
+    )
+
+    with session_factory() as s:
+        step = s.get(TaskStep, step_id)
+        if step is None:
+            return None
+        task = step.task
+
+        if abort_reason:
+            # Erro durante a implementação de uma subtarefa
+            if "orçamento" in abort_reason:
+                _system_event(s, step, "budget_hit", {"reason": abort_reason})
+                task.status = TASK_NEEDS_REVIEW
+                task.error = abort_reason
+                step.status = STEP_PENDING
+                step.error = abort_reason
+                step.started_at = None
+                s.commit()
+                return {"task_id": task.id, "reason": abort_reason}
+
+            # Guardrail / timeout / erro de commit
+            trigger = _handle_failure(
+                settings, s, step, task, abort_reason,
+                "guardrail_blocked" if "guardrail" in abort_reason else "error",
+                STEP_FAILED,
+            )
+            s.commit()
+            return trigger
+
+        # Todas as subtarefas implementadas → avança para verify
+        step.summary = _subtask_progress_summary(task)
+        step.status = STEP_DONE
+        task.current_step = step.position
+        nxt = next(
+            (st for st in sorted(task.steps, key=lambda x: x.position)
+             if st.position > step.position),
+            None,
+        )
+        if nxt:
+            nxt.status = STEP_PENDING
+        else:
+            task.status = TASK_DONE
+        _system_event(s, step, "phase_done", {"next": nxt.position if nxt else None, "subtasks": True})
+        _finish(step)
+        s.commit()
+    return None
+
+
+def _decide_subtask_verify(
+    settings: Settings,
+    session_factory,
+    step_id: int,
+    checkout: str,
+    base: str,
+    branch: str,
+    project_info: str,
+) -> dict | None:
+    """Executa o ciclo verify das subtarefas e decide: bounce-back ou avançar."""
+    with session_factory() as s:
+        step = s.get(TaskStep, step_id)
+        if step is None:
+            return None
+        task_id = step.task_id
+        log_path = step.log_path or os.path.join(settings.log_dir, f"step_{step_id}.log")
+
+    result = subtask.run_verify_subtasks(
+        settings, session_factory, step,
+        task_id, checkout, base, branch, project_info, log_path,
+    )
+
+    with session_factory() as s:
+        step = s.get(TaskStep, step_id)
+        if step is None:
+            return None
+        task = step.task
+
+        if result is None:
+            # Todas as subtarefas PASS → avança para o próximo step
+            step.summary = _subtask_progress_summary(task)
+            step.status = STEP_DONE
+            step.verdict = "PASS"
+            task.current_step = step.position
+            nxt = next(
+                (st for st in sorted(task.steps, key=lambda x: x.position)
+                 if st.position > step.position),
+                None,
+            )
+            if nxt:
+                nxt.status = STEP_PENDING
+            else:
+                task.status = TASK_DONE
+            _system_event(
+                s, step, "phase_done",
+                {"next": nxt.position if nxt else None, "subtasks": True},
+            )
+            _finish(step)
+            s.commit()
+            return None
+
+        if result.startswith("sub:"):
+            # Algumas subtarefas falharam → bounce-back para implement
+            subs = [
+                s for s in sorted(task.subtasks, key=lambda x: x.position)
+                if s.status not in ("done",)
+            ]
+            for st in subs:
+                st.status = "pending"
+                st.verdict = None
+                st.finished_at = None
+                if st.attempt >= settings.max_attempts:
+                    st.status = "failed"
+                    st.error = f"tentativas excedidas ({settings.max_attempts})"
+
+            all_failed = all(s.status == "failed" for s in task.subtasks if s.position in [
+                int(p) for p in result.split(":")[1].split(",")
+            ])
+
+            if all_failed:
+                task.status = TASK_NEEDS_REVIEW
+                task.error = f"subtarefas falharam: {result}"
+                step.status = STEP_FAILED
+                step.error = task.error
+                _finish(step)
+                s.commit()
+                return {"task_id": task.id, "reason": task.error}
+
+            # Bounce-back: volta para o implement step
+            previous = next(
+                (st for st in sorted(task.steps, key=lambda x: -x.position)
+                 if st.position < step.position),
+                None,
+            )
+            if previous is not None:
+                previous.status = STEP_PENDING
+                previous.attempt += 1
+                previous.error = None
+                previous.summary = None
+                previous.finished_at = None
+                task.status = TASK_IN_PROGRESS
+                task.current_step = previous.position
+                task.error = None
+                step.status = STEP_FAILED
+                step.error = f"subtarefas reprovadas: {result}"
+                _system_event(
+                    s, step, "subtask_bounce_back",
+                    {"positions": result, "reason": "veredicto FAIL em subtarefas"},
+                )
+                _finish(step)
+                s.commit()
+                return None
+
+            task.status = TASK_FAILED
+            task.error = f"subtarefas falharam sem fase anterior: {result}"
+            step.status = STEP_FAILED
+            step.error = task.error
+            _finish(step)
+            s.commit()
+            return {"task_id": task.id, "reason": task.error}
+
+        # Erro genérico (abort, etc.)
+        step.status = STEP_FAILED
+        step.error = result
+        _finish(step)
+        task.status = TASK_NEEDS_REVIEW
+        task.error = result
+        s.commit()
+        return {"task_id": task.id, "reason": result}
+
+
+def _subtask_progress_summary(task: Task) -> str:
+    """Resumo legível do progresso das subtarefas para o handoff."""
+    lines = ["## Progresso das subtarefas"]
+    for s in sorted(task.subtasks, key=lambda x: x.position):
+        status_icon = {
+            "done": "[OK]",
+            "implemented": "[IMPLEMENTADA]",
+            "implementing": "[EM ANDAMENTO]",
+            "verifying": "[VERIFICANDO]",
+            "pending": "[PENDENTE]",
+            "failed": "[FALHOU]",
+        }.get(s.status, f"[{s.status.upper()}]")
+        line = f"- {status_icon} Subtarefa {s.position + 1}: {s.title}"
+        if s.summary:
+            line += f" — {s.summary[:200]}"
+        if s.verdict:
+            line += f" (veredicto: {s.verdict})"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
 # PM (controle do projeto)
 # ---------------------------------------------------------------------------
 
@@ -473,8 +832,7 @@ def _pm_context(s: Session, task: Task) -> str:
         lines.append(
             f"Fase {st.position} ({robot_name}) [{st.status}] tentativa {st.attempt}"
             f"{' veredicto ' + st.verdict if st.verdict else ''}"
-            f"{' erro: ' + st.error[:300] if st.error else ''}"
-            f"{' resumo: ' + (st.summary or '')[:300] if st.summary else ''}"
+            f"{' erro: ' + st.error if st.error else ''}"
         )
     return "\n".join(lines)
 
@@ -494,9 +852,20 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
         if os.path.isdir(checkout):
             try:
                 project.ensure_agents_md(checkout, project_info, settings.db_rule)
+                # handoff com TODAS as fases (o PM é a "fase fantasma" seguinte)
+                last_pos = max((st.position for st in task.steps), default=-1)
+                ghost = types.SimpleNamespace(position=last_pos + 1, robot=None)
+                handoff.write_handoff(
+                    checkout,
+                    _build_handoff(
+                        s, task, ghost, checkout, task.repository.default_branch, task.branch
+                    ),
+                )
             except (OSError, gitops.GitError):
                 log.warning(
-                    "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
+                    "não foi possível escrever AGENTS.md/handoff no checkout %s",
+                    checkout,
+                    exc_info=True,
                 )
         prompt = prompts.build_prompt(
             pm_robot, task, context, task.repository.default_branch, project_info=project_info

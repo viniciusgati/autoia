@@ -103,3 +103,59 @@ def parse_story(text: str) -> tuple[str, str]:
             didx = description.lower().index(desc_marker.lower())
             description = description[didx + len(desc_marker) :].strip()
     return description, criteria
+
+
+def _split_subtasks(text: str) -> list[str]:
+    """Separa o bloco de subtarefas em blocos por `### Subtarefa N:`."""
+    import re
+    # encontra divisões por "### Subtarefa N:" (case-insensitive, com número ou sem)
+    pattern = re.compile(r"(?=^###\s+Subtarefa\s+\d+:)", re.MULTILINE | re.IGNORECASE)
+    parts = pattern.split(text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def parse_subtasks(text: str) -> list[dict]:
+    """Extrai subtarefas do texto (bloco `## Plano de implementação`).
+
+    Retorna lista de dicts com title, description, acceptance_criteria.
+    Se não houver plano, retorna lista vazia.
+    """
+    marker = "## Plano de implementação"
+    lowered = text.lower()
+    idx = lowered.find(marker.lower())
+    if idx == -1:
+        return []
+
+    # pega do marcador até o próximo `## ` de nível 2 ou fim do texto
+    section = text[idx + len(marker):]
+    next_h2 = re.search(r"\n##\s", section)
+    if next_h2:
+        section = section[:next_h2.start()]
+
+    blocks = _split_subtasks(section.strip())
+    if not blocks:
+        return []
+
+    subtasks: list[dict] = []
+    pattern = re.compile(r"^###\s+Subtarefa\s+(\d+):\s*(.+)", re.IGNORECASE)
+    for block in blocks:
+        match = pattern.match(block)
+        if not match:
+            continue
+        title = match.group(2).strip()
+        body = block[match.end():].strip()
+
+        # extrai Escopo
+        scope_match = re.search(r"\*\*Escopo:\*\*\s*(.+?)(?=\n\*\*Critérios|\Z)", body, re.DOTALL)
+        description = scope_match.group(1).strip() if scope_match else ""
+
+        # extrai Critérios
+        criteria_match = re.search(r"\*\*Critérios:\*\*\s*(.+?)(?=\n###\s+Subtarefa|\Z)", body, re.DOTALL)
+        acceptance_criteria = criteria_match.group(1).strip() if criteria_match else ""
+
+        subtasks.append({
+            "title": title,
+            "description": description,
+            "acceptance_criteria": acceptance_criteria,
+        })
+    return subtasks

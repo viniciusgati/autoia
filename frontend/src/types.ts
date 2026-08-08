@@ -47,6 +47,21 @@ export interface TaskStep {
   finished_at: string | null;
 }
 
+export interface SubTask {
+  id: number;
+  position: number;
+  title: string;
+  description: string;
+  acceptance_criteria: string | null;
+  status: string;
+  attempt: number;
+  summary: string | null;
+  verdict: string | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
 export interface Task {
   id: number;
   repository_id: number;
@@ -61,10 +76,12 @@ export interface Task {
   budget_limit: number;
   cost_spent: number;
   pm_decisions: number;
+  feedback: string | null;
   error: string | null;
   created_at: string;
   updated_at: string;
   steps: TaskStep[];
+  subtasks: SubTask[];
 }
 
 export interface RunEvent {

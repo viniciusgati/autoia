@@ -11,10 +11,22 @@ from __future__ import annotations
 import json
 import os
 import re
+import tempfile
 from dataclasses import dataclass
 
 # Ferramentas do kimi que manipulam caminhos de arquivo.
 _FILE_TOOLS = {"Read", "Write", "Edit", "Glob", "Grep", "MultiEdit"}
+
+# Raízes de FORA do checkout cuja LEITURA é permitida: logs do próprio kimi
+# (`~/.kimi-code/sessions/.../output.log`, gerados a cada Bash tool) e temporários
+# criados pelos robôs (ex.: log de servidor em /tmp). Escrita fora do checkout
+# continua sempre bloqueada — a leitura liberada é só para inspecionar a saída
+# de comandos que o próprio robô executou.
+_READABLE_EXTRA_ROOTS = (
+    os.path.join(os.path.expanduser("~"), ".kimi-code", "sessions"),
+    tempfile.gettempdir(),
+    "/var/tmp",
+)
 
 
 @dataclass
@@ -58,6 +70,15 @@ def path_is_within(path: str, root: str) -> bool:
     return path_real == root_real or path_real.startswith(root_real + os.sep)
 
 
+def _read_allowed_extra(path: str) -> bool:
+    """Leitura fora do checkout permitida apenas sob raízes de logs/temporários."""
+    if not os.path.isabs(path):
+        return False
+    real = os.path.realpath(path)
+    roots = [os.path.realpath(r) for r in _READABLE_EXTRA_ROOTS if r]
+    return any(real == root or real.startswith(root + os.sep) for root in roots)
+
+
 def check_command(command: str, patterns: list[str]) -> GuardrailViolation | None:
     if not command or not command.strip():
         return None
@@ -84,6 +105,10 @@ def check_tool_call(
     if name in _FILE_TOOLS:
         path = extract_file_path(arguments)
         if path and checkout_path and not path_is_within(path, checkout_path):
+            # Leitura de logs do próprio kimi/temporários é permitida (o robô precisa
+            # inspecionar a saída de comandos que ele mesmo executou); escrita não.
+            if name in ("Read", "Grep") and _read_allowed_extra(path):
+                return None
             return GuardrailViolation(
                 pattern="path-outside-workspace",
                 detail=f"{name} {path} (fora de {checkout_path})",

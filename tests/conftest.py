@@ -30,7 +30,7 @@ VERDICT_RULES = {
         "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: retry 3\\nMOTIVO: corrigível'\nelse:\n    v = None"
     ),
     "pm_retry_post": (
-        "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: retry 5\\nMOTIVO: re-testar na main'\nelse:\n    v = None"
+        "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: retry 6\\nMOTIVO: re-testar na main'\nelse:\n    v = None"
     ),
     "pm_continue": (
         "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: continuar\\nMOTIVO: progresso real'\nelse:\n    v = None"

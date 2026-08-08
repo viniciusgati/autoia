@@ -36,7 +36,8 @@ e, no final, o merger integra tudo na branch default. Tudo com **logs no banco**
   `merger` (merge) e `pm` (decisões).
 - **Pipelines**: template de fases ordenadas, cada fase aponta para um robô, com
   fases **pós-merge** (rodam na default após a integração). Defaults:
-  `po-qa-dev-tester-merge` e `po-qa-dev-tester-deploytest` (com teste final pós-deploy).
+  `po-qa-dev-tester-avaliador-deploytest` (com teste final pós-deploy) e
+  `po-qa-dev-tester-avaliador-merge` (sem deploy).
 - **Tasks**: a unidade de trabalho. Ao iniciar, cria a branch `autoia/task-<id>` e o
   worker executa as fases em ordem, usando o kimi-code em modo não-interativo
   (`kimi -p --output-format stream-json`) com `cwd` no checkout.
@@ -107,7 +108,7 @@ npm install
 ## Rodando
 
 ```bash
-# Terminal 1 — API (http://127.0.0.1:8000)
+# Terminal 1 — API (http://127.0.0.1:9000)
 autoia-api
 # ou: uvicorn app.main:app
 
@@ -119,7 +120,7 @@ cd frontend && npm run dev
 ```
 
 Primeiros passos na UI: **Repositories** → adicionar repo → **Tasks** → nova tarefa
-(repo + pipeline `po-qa-dev-tester-merge`, descreva a **ideia crua**) → iniciar →
+(repo + pipeline `po-qa-dev-tester-avaliador-deploytest`, descreva a **ideia crua**) → iniciar →
 acompanhar no **Resumo** (mobile) ou no **TaskDetail** (timeline com polling a cada
 ~1,5 s, transcript completo dos eventos).
 
@@ -130,10 +131,10 @@ acompanhar no **Resumo** (mobile) ou no **TaskDetail** (timeline com polling a c
   um app.
 - Para expor a API + frontend na sua rede: `AUTOIA_API_HOST=0.0.0.0 autoia-api` (a API
   serve também o build do frontend em `frontend/dist`; rode `cd frontend && npm run
-  build` antes). Acesse via `http://<ip-da-máquina>:8000`.
+  build` antes). Acesse via `http://<ip-da-máquina>:9000`.
 - **Atenção**: o service worker (instalação do PWA) exige **HTTPS** (secure context).
   Em LAN use um túnel com HTTPS grátis (`cloudflared tunnel`, `ngrok`) apontando para a
-  porta 8000; sem instalar, a UI funciona normalmente via HTTP.
+  porta 9000; sem instalar, a UI funciona normalmente via HTTP.
 - Tela **Resumo** (`/resumo`): cards concisos por tarefa (status, fase atual, custo,
   último resumo) com polling de 5 s — otimizada para o celular.
 
@@ -154,7 +155,8 @@ acompanhar no **Resumo** (mobile) ou no **TaskDetail** (timeline com polling a c
 | `AUTOIA_COST_PER_INTERACTION` | `0.01` | custo estimado por interação |
 | `AUTOIA_RISKY_PATTERNS` | lista padrão | padrões regex de comandos bloqueados (JSON) |
 | `AUTOIA_BRANCH_PREFIX` | `autoia` | prefixo das branches de trabalho |
-| `AUTOIA_API_HOST` / `AUTOIA_API_PORT` | `127.0.0.1` / `8000` | bind da API |
+| `AUTOIA_DB_RULE` | regra padrão | instrução de banco no AGENTS.md gerado (ex.: declarar um PostgreSQL local de testes) |
+| `AUTOIA_API_HOST` / `AUTOIA_API_PORT` | `127.0.0.1` / `9000` | bind da API |
 
 ## API (resumo)
 

@@ -39,7 +39,10 @@ def run_git(cwd: str, *args: str, check: bool = True, timeout: int = _GIT_TIMEOU
 def clone(url: str, dest: str) -> None:
     if ".." in url.split("/"):
         raise GitError(("clone", url), "url inválida")
-    run_git(os.path.dirname(dest), "clone", url, dest)
+    # dest absoluto: com dest relativo, o git resolve o caminho relativo ao cwd do
+    # clone (dirname(dest)) e pode criar o checkout no lugar errado (aninhado).
+    dest_abs = os.path.abspath(dest)
+    run_git(os.path.dirname(dest_abs), "clone", url, dest_abs)
 
 
 def resolve_default_branch(path: str, fallback: str) -> str:

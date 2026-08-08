@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -37,13 +38,17 @@ def create_repository(
     session.commit()
     session.refresh(repo)
 
-    dest = os.path.join(settings.workspace_dir, str(repo.id))
+    dest = os.path.abspath(os.path.join(settings.workspace_dir, str(repo.id)))
+    # descarta checkout órfão de tentativa anterior (falha no meio do clone)
+    shutil.rmtree(dest, ignore_errors=True)
     try:
         gitops.clone(data.url, dest)
         default_branch = gitops.resolve_default_branch(dest, data.default_branch)
     except (gitops.GitError, OSError) as exc:
         session.delete(repo)
         session.commit()
+        # não deixa checkout parcial para trás (senão o retry falha com "already exists")
+        shutil.rmtree(dest, ignore_errors=True)
         raise HTTPException(400, f"falha ao clonar: {exc}") from exc
 
     repo.local_path = dest

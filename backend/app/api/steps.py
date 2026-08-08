@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
@@ -27,14 +28,16 @@ def list_events(
     kind: str | None = None,
     offset: int = 0,
     limit: int = 200,
+    order: Literal["asc", "desc"] = "asc",
     session: Session = Depends(get_session),
 ):
     _get_step_or_404(session, step_id)
     query = session.query(RunEvent).filter(RunEvent.step_id == step_id)
     if kind:
         query = query.filter(RunEvent.kind == kind)
+    ordering = RunEvent.seq.desc() if order == "desc" else RunEvent.seq
     return (
-        query.order_by(RunEvent.seq)
+        query.order_by(ordering)
         .offset(max(offset, 0))
         .limit(min(max(limit, 1), 1000))
         .all()

@@ -17,10 +17,11 @@ from ..models import (
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
     Pipeline,
+    SubTask,
     Task,
     TaskStep,
 )
-from ..schemas import ReviewRequest, TaskCreate, TaskOut
+from ..schemas import FeedbackCreate, RetryRequest, ReviewRequest, TaskCreate, TaskOut
 from ..worker.runner import _pm_decide
 from .deps import get_repository_or_404, get_session, get_settings
 
@@ -35,6 +36,7 @@ def _task_query(session: Session):
     return session.query(Task).options(
         joinedload(Task.steps).joinedload(TaskStep.robot),
         joinedload(Task.repository),
+        joinedload(Task.subtasks),
     )
 
 
@@ -72,6 +74,15 @@ def create_task(
                 position=step.position,
                 robot_id=step.robot_id,
                 post_merge=step.post_merge,
+            )
+        )
+    for i, st_data in enumerate(data.subtasks):
+        task.subtasks.append(
+            SubTask(
+                position=i,
+                title=st_data.title,
+                description=st_data.description,
+                acceptance_criteria=st_data.acceptance_criteria,
             )
         )
     session.add(task)
@@ -135,24 +146,57 @@ def review_task(
 def retry_step(
     task_id: int,
     position: int,
+    data: RetryRequest | None = None,
     session: Session = Depends(get_session),
     settings=Depends(get_settings),
 ):
+    """Reabre uma fase para re-execução, opcionalmente com uma nota (feedback externo).
+
+    Fases `failed`/`guardrail_blocked` voltam a pending; fases já `done` também podem
+    voltar (ex.: "voltar para o developer" com a nota do erro externo) — as fases
+    seguintes são reabertas naturalmente conforme o fluxo avança.
+    """
     task = _get_task_or_404(session, task_id)
+    if task.status == "created":
+        raise HTTPException(400, "tarefa ainda não foi iniciada")
     step = next((st for st in task.steps if st.position == position), None)
     if step is None:
         raise HTTPException(404, "fase não encontrada")
-    if step.status not in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED):
-        raise HTTPException(400, f"fase não pode ser repetida (status: {step.status})")
-    if step.attempt >= settings.max_attempts:
+    if step.status in (STEP_PENDING, "running"):
+        raise HTTPException(400, f"fase em andamento (status: {step.status})")
+    if step.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED) and step.attempt >= settings.max_attempts:
         raise HTTPException(400, f"tentativas máximas atingidas ({settings.max_attempts})")
+
+    if data and data.note:
+        task.feedback = data.note
     step.attempt += 1
     step.status = STEP_PENDING
     step.error = None
     step.summary = None
     step.finished_at = None
+    step.started_at = None
     task.status = TASK_QUEUED
     task.error = None
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/feedback", response_model=TaskOut)
+def set_feedback(
+    task_id: int, data: FeedbackCreate, session: Session = Depends(get_session)
+):
+    """Anexa/sobrescreve uma nota externa (erro de deploy, pedido de ajuste...) que as
+    próximas fases recebem no handoff e no prompt."""
+    task = _get_task_or_404(session, task_id)
+    task.feedback = data.text
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.delete("/{task_id}/feedback", response_model=TaskOut)
+def clear_feedback(task_id: int, session: Session = Depends(get_session)):
+    task = _get_task_or_404(session, task_id)
+    task.feedback = None
     session.commit()
     return _get_task_or_404(session, task_id)
 

@@ -9,7 +9,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .api import dashboard, pipelines, repositories, robots, steps, tasks
+from .api import dashboard, pipelines, repositories, robots, steps, subtasks, tasks
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, migrate_schema
 from .models import Pipeline, PipelineStep, Robot
@@ -131,23 +131,20 @@ orçamento, tentativas) e emitindo a decisão no formato obrigatório.""",
 
 SEED_PIPELINES = [
     (
-        "po-qa-dev-tester-avaliador-merge",
-        ["po", "qa", "developer", "tester", "avaliador", "merger"],
-    ),
-    (
-        "po-qa-dev-tester-merge",
-        ["po", "qa", "developer", "tester", "merger"],
-    ),
-    (
-        "po-qa-dev-tester-deploytest",
+        "po-qa-dev-tester-avaliador-deploytest",
         [
             ("po", False),
             ("qa", False),
             ("developer", False),
             ("tester", False),
+            ("avaliador", False),
             ("merger", False),
             ("deploy-tester", True),  # pós-merge: roda na default integrada
         ],
+    ),
+    (
+        "po-qa-dev-tester-avaliador-merge",
+        ["po", "qa", "developer", "tester", "avaliador", "merger"],
     ),
 ]
 
@@ -206,6 +203,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(robots.router)
     app.include_router(pipelines.router)
     app.include_router(tasks.router)
+    app.include_router(subtasks.router)
     app.include_router(steps.router)
     app.include_router(dashboard.router)
 

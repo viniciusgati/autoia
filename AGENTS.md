@@ -51,8 +51,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 
 - **Task** = lista ordenada de **TaskSteps** (fases). Cada fase tem um **Robot** com um
   `role`: `refine` (po), `review` (qa), `implement` (developer), `verify` (tester),
-  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 8 robôs e 3 pipelines
-  (default: po, qa, developer, tester, avaliador, merger).
+  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 8 robôs e **2 pipelines**:
+  `po-qa-dev-tester-avaliador-deploytest` (po, qa, developer, tester, avaliador, merger
+  + deploy-tester pós-merge) e `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
+  para projetos sem deploy).
 - **Fases `post_merge`** rodam na branch **default integrada** (`gitops.checkout_default`
   = fetch + `reset --hard origin/<base>`); fases normais rodam na branch `autoia/task-<id>`.
   O **merge+push acontece na última fase pré-merge** (feito pelo worker, nunca pelo robô).
@@ -60,13 +62,24 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `AGENTS.md` **não versionado** na raiz do checkout (excluído via `.git/info/exclude`)
   declarando a tecnologia detectada do projeto + regras de padrão (não introduzir outra
   linguagem/framework) + regra de banco de dados (**PostgreSQL** por padrão; SQLite só em
-  testes em memória — configurável via `AUTOIA_DB_RULE`). Se o repo já versiona um
-  `AGENTS.md`, o dele prevalece.
+  testes em memória — configurável via `AUTOIA_DB_RULE`, que pode declarar um PostgreSQL
+  local de testes, ex.: host/porta/banco/credenciais). Se o repo já versiona um
+  `AGENTS.md`, o dele prevalece. O `config.py` carrega opcionalmente um `.env` na raiz
+  (sem sobrescrever env já setada).
 - **Contrato de veredicto**: robôs `review`/`verify`/`assess`/`pm` escrevem
   `autoia_verdict.txt` na raiz do checkout (o worker lê, **remove** e decide).
   `verify`/`assess` sem veredicto = FAIL.
   Parse tolerante a preâmbulo (marcador como palavra isolada em qualquer linha) em
   `verdicts.py` — não restrinja à primeira linha.
+- **Handoff entre fases** (`autoia_handoff.md`, em `worker/handoff.py`): o worker gera,
+  **antes de cada execução do kimi** (steps e PM), um documento **não versionado** na
+  raiz do checkout com o histórico **COMPLETO** das fases anteriores (resumos integrais
+  + veredictos) + diff atual + instrução da fase atual. Os robôs são instruídos no
+  prompt a **ler o arquivo antes de começar** (`HANDOFF_READ`) e a documentar o trabalho
+  no **texto final** com as seções *O que foi feito / Arquivos alterados / Evidência /
+  Pendências / Para a próxima fase* (`HANDOFF_DOCUMENT`; exceto `refine` e `pm`, que têm
+  formatos próprios). O worker persiste o texto final **INTEGRAL** em `TaskStep.summary`
+  (nunca trunca) e regenera o handoff para a próxima fase.
 - **Bounce-back automático**: falha de fase **pré-merge** (veredicto FAIL/NEEDS_WORK,
   timeout, guardrail, erro) → a **fase anterior** volta a `pending` com o relatório
   completo no contexto, até `max_attempts`. Falha **pós-merge** → **nunca** bounce
@@ -101,7 +114,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   (evita lock no SQLite WAL). Não confie em lazy-load fora do `with`.
 - **Worker é síncrono**: não converta para asyncio. Subprocess com
   `start_new_session=True` (kill por grupo); guardrails avaliam no loop de leitura do
-  stdout; `_kill_group` = SIGTERM → SIGKILL.
+  stdout; `_kill_group` = SIGTERM → SIGKILL. No startup, o worker recupera steps
+  `running` órfãos de restart/crash anterior (`recover_stale_steps` → voltam a
+  `pending` para re-execução) — sem isso, um worker morto no meio de uma fase travava
+  a task para sempre.
 - **Nunca trunque payloads** de `RunEvent` nem do log — "textos completos" é requisito.
 - **Migração de schema é aditiva**: colunas novas entram em `models.py` **e** em
   `ADDITIVE_COLUMNS` (`db.py`). Nunca drop/rename coluna sem plano de migração.
@@ -143,7 +159,7 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 ```bash
 python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 pytest                      # suíte (52 testes; exige git no PATH)
-autoia-api                  # API :8000 (serve frontend/dist; AUTOIA_API_HOST=0.0.0.0 p/ LAN)
+autoia-api                  # API :9000 (serve frontend/dist; AUTOIA_API_HOST=0.0.0.0 p/ LAN)
 autoia-worker               # worker (processo separado)
 cd frontend && npm install && npm run dev   # frontend dev :5173
 cd frontend && npm run build                # atualiza dist (servido pela API)

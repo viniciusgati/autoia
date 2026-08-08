@@ -89,6 +89,39 @@ class PipelineOut(BaseModel):
 
 # ---------- Task ----------
 
+class SubTaskIn(BaseModel):
+    """Subtarefa definida na criação da task (opcional — o PO também pode gerar)."""
+
+    title: str = Field(min_length=1, max_length=300)
+    description: str = ""
+    acceptance_criteria: str | None = None
+
+
+class SubTaskUpdate(BaseModel):
+    """Edição de subtarefa durante a execução (injeta contexto)."""
+
+    title: str | None = None
+    description: str | None = None
+    acceptance_criteria: str | None = None
+
+
+class SubTaskOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    position: int
+    title: str
+    description: str
+    acceptance_criteria: str | None
+    status: str
+    attempt: int
+    summary: str | None
+    verdict: str | None
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
 class TaskCreate(BaseModel):
     repository_id: int
     pipeline_id: int
@@ -96,6 +129,7 @@ class TaskCreate(BaseModel):
     description: str = ""
     kind: Literal["issue", "bug", "feature", "chore"] = "issue"
     budget_limit: float | None = Field(default=None, gt=0)
+    subtasks: list[SubTaskIn] = []
 
 
 class TaskStepOut(BaseModel):
@@ -131,10 +165,22 @@ class TaskOut(BaseModel):
     budget_limit: float
     cost_spent: float
     pm_decisions: int
+    feedback: str | None = None
     error: str | None
     created_at: datetime
     updated_at: datetime
     steps: list[TaskStepOut] = []
+    subtasks: list[SubTaskOut] = []
+
+
+class FeedbackCreate(BaseModel):
+    text: str = Field(min_length=1, max_length=10000)
+
+
+class RetryRequest(BaseModel):
+    """Retry manual de fase: `note` opcional vira feedback externo da task."""
+
+    note: str | None = Field(default=None, max_length=10000)
 
 
 class ReviewRequest(BaseModel):

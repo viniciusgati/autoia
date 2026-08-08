@@ -90,6 +90,33 @@ def test_qa_needs_work_bounces_to_po(flow, fake_kimi):
     assert po["attempt"] == 2
 
 
+def test_needs_work_content_reaches_bounce_back(flow, fake_kimi):
+    """O conteúdo do NEEDS_WORK (correção pedida) é preservado para quem vai corrigir."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="needs_work")
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    with flow["session_factory"]() as s:
+        checkout = s.get(Task, task["id"]).repository.local_path
+
+    _execute(flow, _run_claim(flow))  # po conclui
+    _execute(flow, _run_claim(flow))  # qa NEEDS_WORK
+
+    # o veredicto (com o SUMMARY) ficou gravado na fase que falhou
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task["id"])
+        qa = next(st for st in t.steps if st.position == 1)
+        assert qa.verdict == "NEEDS_WORK"
+        assert "historia ambigua" in (qa.summary or "")
+
+    # o handoff da fase refeita (po, bounce-back) entrega a correção pedida
+    _execute(flow, _run_claim(flow))  # po re-executa com o handoff da falha
+    md = open(os.path.join(checkout, "autoia_handoff.md"), encoding="utf-8").read()
+    assert "FALHOU" in md
+    assert "historia ambigua" in md
+
+
 def test_first_phase_failure_marks_task_failed(flow, tmp_path):
     """Fase inicial (po, pos 0) falha sem anterior -> task failed direto."""
     settings = flow["settings"]
@@ -107,6 +134,28 @@ def test_first_phase_failure_marks_task_failed(flow, tmp_path):
     state = _state(flow, task["id"])
     assert state["status"] == "failed"
     assert _step(state, 0)["status"] == "failed"
+
+
+def test_recover_stale_steps(flow):
+    """Step running órfão (worker morto no meio) volta a pending no startup."""
+    settings = flow["settings"]
+    task = flow["task"]
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task["id"])
+        st = sorted(t.steps, key=lambda x: x.position)[0]
+        st.status = "running"
+        s.commit()
+
+    recovered = runner.recover_stale_steps(flow["session_factory"])
+    assert recovered == 1
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task["id"])
+        st = sorted(t.steps, key=lambda x: x.position)[0]
+        assert st.status == "pending"
+        assert st.started_at is None
+        assert any(e.kind == "worker_recovered" for e in st.events)
 
 
 def test_max_attempts_bounds_bounce_back(flow, fake_kimi):
