@@ -35,8 +35,8 @@ def create_subtask(
     session: Session = Depends(get_session),
 ):
     task = _get_task_or_404(session, task_id)
-    if task.status in ("done", "failed"):
-        raise HTTPException(400, "tarefa já finalizada")
+    if task.status == "failed":
+        raise HTTPException(400, "tarefa falhou — crie uma nova task")
     position = max((st.position for st in task.subtasks), default=-1) + 1
     st = SubTask(
         task_id=task.id,

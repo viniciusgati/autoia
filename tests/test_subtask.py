@@ -468,3 +468,152 @@ class TestPOGeneratesSubtasks:
             assert subs[0].status == "pending"
             assert "Criar modelo" in subs[0].description
             assert "migration ok" in subs[0].acceptance_criteria
+
+
+# ---------------------------------------------------------------------------
+# Cenário real: pós-deploy — erro em produção → nova subtarefa → resolve
+# ---------------------------------------------------------------------------
+
+class TestPostDeployFix:
+    def test_post_deploy_error_new_subtask_fix(
+        self, flow, settings, monkeypatch, tmp_path,
+    ):
+        """Task conclui → erro de deploy (variável de ambiente faltante)
+        → usuário cria subtarefa de correção → pipeline re-executa → sucesso.
+
+        Fluxo:
+        1. Task com 2 subtarefas vai até done (mockado)
+        2. Usuário reporta erro via feedback + cria subtarefa 3 de correção
+        3. Retry da fase implement → só a subtarefa nova é processada
+        4. Verify, assess, merge → task done de novo, subtarefa 3 done
+        """
+        import app.worker.kimi_exec as ke
+        import app.verdicts as vmod
+        from app.models import Task
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        client = flow["client"]
+        task_id = flow["task"]["id"]
+
+        # --- Fase 1: task original até done (mock rápido) ---
+        # Configura subtarefas e pula direto para o developer
+        with session_factory() as s:
+            from app.models import (
+                STEP_DONE, SUB_PENDING, SubTask, Task, TaskStep,
+            )
+            s.add(SubTask(task_id=task_id, position=0, title="Sub 1", description="parte A", status=SUB_PENDING))
+            s.add(SubTask(task_id=task_id, position=1, title="Sub 2", description="parte B", status=SUB_PENDING))
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            steps[0].status = STEP_DONE
+            steps[0].summary = "história"
+            steps[1].status = STEP_DONE
+            steps[1].summary = "revisão ok"
+            steps[2].status = "pending"  # developer
+            s.commit()
+
+        # Mocks
+        read_count = 0
+
+        def fake_run_kimi(prompt, **kw):
+            return ke.KimiOutcome(exit_code=0, final_text="ok", interaction_count=1)
+
+        def fake_read_verdict(checkout):
+            nonlocal read_count
+            read_count += 1
+            return "PASS\nSUMMARY: ok"
+
+        def fake_remove_verdict(checkout):
+            pass
+
+        with monkeypatch.context() as mp:
+            mp.setattr(ke, "run_kimi", fake_run_kimi)
+            mp.setattr(vmod, "read_verdict", fake_read_verdict)
+            mp.setattr(vmod, "remove_verdict", fake_remove_verdict)
+
+            # Avança do developer até o fim (5 fases: dev, tester, assess, merger, deploy-tester)
+            for _ in range(7):
+                claimed = claim_next(session_factory)
+                if claimed is None:
+                    break
+                execute_step(settings, session_factory, claimed)
+
+        # Task deve estar done
+        with session_factory() as s:
+            t = s.get(Task, task_id)
+            assert t.status == "done", f"task status={t.status}"
+            subs = (
+                s.query(SubTask).filter(SubTask.task_id == task_id)
+                .order_by(SubTask.position).all()
+            )
+            assert len(subs) == 2
+            for sub in subs:
+                assert sub.status == "done", f"sub {sub.position} = {sub.status}"
+
+        # --- Fase 2: erro de deploy → correção ---
+
+        # Reporta erro de deploy
+        resp = client.post(
+            f"/api/tasks/{task_id}/feedback",
+            json={"text": "Erro no deploy: variável DATABASE_URL não está definida no ambiente de produção."},
+        )
+        assert resp.status_code == 200
+
+        # Cria subtarefa de correção via API
+        resp = client.post(
+            f"/api/tasks/{task_id}/subtasks",
+            json={
+                "title": "Corrigir deploy: adicionar DATABASE_URL",
+                "description": "Adicionar fallback para DATABASE_URL no entrypoint e documentar no README.",
+                "acceptance_criteria": "- [ ] app sobe sem DATABASE_URL definida\n- [ ] README documenta a variável",
+            },
+        )
+        assert resp.status_code == 201, resp.text
+        new_sub = resp.json()
+        assert new_sub["position"] == 2  # terceira subtarefa
+        assert new_sub["status"] == "pending"
+
+        # Retry da fase implement (posição 2) — sem note para não sobrescrever o feedback
+        resp = client.post(f"/api/tasks/{task_id}/steps/2/retry")
+        assert resp.status_code == 200, resp.text
+
+        # --- Fase 3: re-execução ---
+        with monkeypatch.context() as mp:
+            mp.setattr(ke, "run_kimi", fake_run_kimi)
+            mp.setattr(vmod, "read_verdict", fake_read_verdict)
+            mp.setattr(vmod, "remove_verdict", fake_remove_verdict)
+
+            for _ in range(7):
+                claimed = claim_next(session_factory)
+                if claimed is None:
+                    break
+                execute_step(settings, session_factory, claimed)
+
+        # --- Verificações finais ---
+        with session_factory() as s:
+            t = s.get(Task, task_id)
+            assert t.status == "done", f"task status={t.status}, error={t.error}"
+            assert t.feedback and "DATABASE_URL" in t.feedback
+
+            subs = (
+                s.query(SubTask).filter(SubTask.task_id == task_id)
+                .order_by(SubTask.position).all()
+            )
+            assert len(subs) == 3
+            # Subtarefas originais continuam done
+            assert subs[0].status == "done"
+            assert subs[1].status == "done"
+            # Nova subtarefa concluída
+            assert subs[2].status == "done", f"sub 2 status={subs[2].status}"
+            assert subs[2].title == "Corrigir deploy: adicionar DATABASE_URL"
+            assert subs[2].verdict == "PASS"
+            assert subs[2].summary == "ok"
+
+            # Todos os steps devem estar done (exceto talvez o deploy-tester que
+            # pode ter ficado pending na segunda rodada — mas o merge re-ocorreu)
+            for st in t.steps:
+                assert st.status == "done", f"step {st.position} = {st.status}"
+
+        # Feedback ainda está salvo e visível
+        task_json = client.get(f"/api/tasks/{task_id}").json()
+        assert task_json["feedback"] and "DATABASE_URL" in task_json["feedback"]
