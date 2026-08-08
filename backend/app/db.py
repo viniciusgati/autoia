@@ -50,6 +50,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("diff_stat", "TEXT"),
     ],
     "pipeline_steps": [("post_merge", "BOOLEAN DEFAULT 0 NOT NULL")],
 }

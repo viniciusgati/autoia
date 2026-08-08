@@ -688,6 +688,12 @@ export default function TaskDetail() {
               </div>
             </>
           )}
+          {selectedStep.diff_stat && (
+            <>
+              <h3>Alterações da fase {selectedStep.position}</h3>
+              <pre className="diff-stat">{selectedStep.diff_stat}</pre>
+            </>
+          )}
           {selectedStep.error && (
             <>
               <h3>Erro da fase {selectedStep.position}</h3>

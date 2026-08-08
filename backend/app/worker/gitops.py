@@ -117,6 +117,21 @@ def diff_stat(path: str, base: str, branch: str) -> str:
     ).stdout.strip()
 
 
+def diff_last_commit(path: str) -> str:
+    """Diff --stat do último commit (HEAD~1..HEAD). Se não houver commit anterior
+    (branch nova com 1 commit), retorna diff contra a árvore vazia (4b825dc...)."""
+    result = run_git(path, "diff", "--stat", "HEAD~1..HEAD", check=False)
+    if result.returncode == 0:
+        return result.stdout.strip()
+    # branch nova: diff do commit raiz contra árvore vazia
+    result = run_git(
+        path, "diff", "--stat",
+        "4b825dc642cb6eb9a060e54bf8993c8fd1a2e6d6", "HEAD",
+        check=False,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
 @dataclass
 class DiffChange:
     """Uma mudança de arquivo no diff (status A/M/D, path e linhas adicionadas/removidas)."""

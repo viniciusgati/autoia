@@ -198,7 +198,10 @@ def _build_handoff(
             head = f"### Fase {st.position} — {robot_name} ({role}) — {st.status}"
             if st.verdict:
                 head += f" — veredicto: {st.verdict}"
-            sections.append(f"{head}\n{st.summary or '(sem resumo)'}")
+            body = st.summary or "(sem resumo)"
+            if st.diff_stat:
+                body += f"\n\n**Alterações:**\n```\n{st.diff_stat}\n```"
+            sections.append(f"{head}\n{body}")
         elif st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED) and (st.summary or st.error):
             detail = st.summary or ""
             if st.error:
@@ -447,7 +450,12 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
         # Sucesso: commit local apenas em fases pré-merge.
         if not step.post_merge:
             try:
-                gitops.commit_all(checkout, f"autoia: {task.title} (fase {step.position})")
+                committed = gitops.commit_all(checkout, f"autoia: {task.title} (fase {step.position})")
+                if committed:
+                    try:
+                        step.diff_stat = gitops.diff_last_commit(checkout) or ""
+                    except gitops.GitError:
+                        pass
             except gitops.GitError as exc:
                 trigger = _handle_failure(settings, s, step, task, f"commit: {exc}", "git_error", STEP_FAILED)
                 s.commit()
@@ -657,6 +665,10 @@ def _decide_subtask_implement(
 
         # Todas as subtarefas implementadas → avança para verify
         step.summary = _subtask_progress_summary(task)
+        try:
+            step.diff_stat = gitops.diff_stat(checkout, base, branch) or ""
+        except gitops.GitError:
+            pass
         step.status = STEP_DONE
         task.current_step = step.position
         nxt = next(

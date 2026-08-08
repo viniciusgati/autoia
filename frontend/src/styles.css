@@ -1314,3 +1314,17 @@ input.short {
 .subtask-actions {
   flex-shrink: 0;
 }
+
+/* diff stat (git --stat style) */
+.diff-stat {
+  background: #1a1a2e;
+  color: #c9d1d9;
+  padding: 12px 14px;
+  border-radius: 6px;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.8rem;
+  line-height: 1.6;
+  overflow-x: auto;
+  white-space: pre;
+  margin-bottom: 16px;
+}

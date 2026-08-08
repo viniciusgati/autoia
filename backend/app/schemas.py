@@ -144,6 +144,7 @@ class TaskStepOut(BaseModel):
     post_merge: bool
     log_path: str | None
     summary: str | None
+    diff_stat: str | None = None
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None

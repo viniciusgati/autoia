@@ -531,6 +531,9 @@ def test_worker_subtasks_full_pipeline(settings, bare_repo, tmp_path, monkeypatc
         total_events = sum(len(st.events) for st in t.steps)
         assert total_events > 0
 
+        # Fase implement deve ter diff_stat (pode ser vazio em testes mock)
+        assert dev_step.diff_stat is not None, "developer com diff_stat=None"
+
     # merge chegou no bare
     dest = tmp_path / "verify_subtasks"
     import subprocess

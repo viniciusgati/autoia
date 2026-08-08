@@ -42,6 +42,7 @@ export interface TaskStep {
   post_merge: boolean;
   log_path: string | null;
   summary: string | null;
+  diff_stat: string | null;
   error: string | null;
   started_at: string | null;
   finished_at: string | null;
