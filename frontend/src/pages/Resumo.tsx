@@ -133,6 +133,11 @@ export default function Resumo() {
               gasto {sessionTask.cost_spent.toFixed(2)} / {sessionTask.budget_limit.toFixed(2)}{" "}
               US$ · {tempoDecorrido(runningStep)}
             </span>
+            {faseComDiff(sessionTask)?.diff_stat && (
+              <span className="diff-summary" title={faseComDiff(sessionTask)!.diff_stat ?? undefined}>
+                {diffSummary(faseComDiff(sessionTask)!.diff_stat)}
+              </span>
+            )}
             <div className="session-actions">
               <button className="link-btn" onClick={() => setShowSession((s) => !s)}>
                 {showSession ? "ocultar dados" : "ver dados da sessão"}
@@ -172,6 +177,9 @@ export default function Resumo() {
               <span>{etapaAtualLabel(task)}</span>
               <span>
                 {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
+                {faseComDiff(task)?.diff_stat && (
+                  <> · <span className="diff-summary" title={faseComDiff(task)!.diff_stat ?? undefined}>{diffSummary(faseComDiff(task)!.diff_stat)}</span></>
+                )}
               </span>
             </div>
             {needsReview && (
@@ -219,6 +227,11 @@ export default function Resumo() {
                 ) : (
                   <span className="resumo-error" title={task.error ?? undefined}>
                     {task.error || "sem detalhes"}
+                  </span>
+                )}
+                {faseComDiff(task)?.diff_stat && (
+                  <span className="diff-summary" title={faseComDiff(task)!.diff_stat ?? undefined}>
+                    {" · "}{diffSummary(faseComDiff(task)!.diff_stat)}
                   </span>
                 )}
               </div>
@@ -293,4 +306,28 @@ function tempoDecorrido(step: TaskStep): string {
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m ${s % 60}s`;
   return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
+/** Extrai resumo legível de um diff_stat (git --stat): "3 arquivos, +45/-12". */
+function diffSummary(diffStat: string | null): string | null {
+  if (!diffStat) return null;
+  const lines = diffStat.trim().split("\n");
+  const last = lines[lines.length - 1];
+  const match = last.match(/(\d+)\s+files?\s+changed(?:,\s*(\d+)\s+insertions?\(\+\))?(?:,\s*(\d+)\s+deletions?\(\-\))?/);
+  if (!match) {
+    // fallback: conta linhas com "|" (uma por arquivo)
+    const fileLines = lines.filter((l) => l.includes("|")).length;
+    if (fileLines > 0) return `${fileLines} arquivo(s) alterado(s)`;
+    return null;
+  }
+  const files = match[1];
+  const plus = match[2] ? `+${match[2]}` : "+0";
+  const minus = match[3] ? `-${match[3]}` : "-0";
+  if (plus === "+0" && minus === "-0") return null;
+  return `${files} arquivo(s) · ${plus} ${minus}`;
+}
+
+/** Encontra a fase implement (primeira com diff_stat) para mostrar alterações. */
+function faseComDiff(task: Task): TaskStep | null {
+  return [...task.steps].sort((a, b) => a.position - b.position).find((s) => s.diff_stat) ?? null;
 }

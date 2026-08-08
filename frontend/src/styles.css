@@ -1328,3 +1328,14 @@ input.short {
   white-space: pre;
   margin-bottom: 16px;
 }
+
+.diff-summary {
+  display: inline-block;
+  font-family: "SF Mono", "Fira Code", monospace;
+  font-size: 0.72rem;
+  color: var(--muted);
+  background: var(--bg-alt);
+  padding: 1px 6px;
+  border-radius: 3px;
+  white-space: nowrap;
+}
