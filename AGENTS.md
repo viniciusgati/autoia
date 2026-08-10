@@ -125,7 +125,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   stdout; `_kill_group` = SIGTERM → SIGKILL. No startup, o worker recupera steps
   `running` órfãos de restart/crash anterior (`recover_stale_steps` → voltam a
   `pending` para re-execução) — sem isso, um worker morto no meio de uma fase travava
-  a task para sempre.
+  a task para sempre. **Instância única**: `acquire_worker_lock` (flock em
+  `data/workspaces/worker.lock`) — um segundo `autoia-worker` se recusa a iniciar
+  (dois workers disputando tasks causam fases rodando em paralelo). Além disso, o
+  `claim_next` nunca reclama outra fase de uma task que já tem step `running`.
 - **Nunca trunque payloads** de `RunEvent` nem do log — "textos completos" é requisito.
 - **Migração de schema é aditiva**: colunas novas entram em `models.py` **e** em
   `ADDITIVE_COLUMNS` (`db.py`). Nunca drop/rename coluna sem plano de migração.

@@ -20,7 +20,7 @@ import time
 import types
 from dataclasses import dataclass, field
 
-from sqlalchemy import func, update
+from sqlalchemy import exists, func, update
 from sqlalchemy.orm import Session
 
 from .. import budget, prompts, verdicts
@@ -166,6 +166,31 @@ def _task_workspace(settings, repo_id: int, task_id: int) -> str:
     return os.path.join(settings.workspace_dir, str(repo_id), f"task_{task_id}")
 
 
+def acquire_worker_lock(lock_path: str) -> object | None:
+    """Trava de instância única do worker (flock não-bloqueante).
+
+    Retorna o handle do lock se adquirido, ou None se outro worker já está
+    rodando. O lock é liberado automaticamente quando o processo morre
+    (sem lock órfão); o PID é gravado no arquivo para diagnóstico.
+    Usa modo append: não trunca o arquivo antes do flock (senão o segundo
+    worker apagaria o PID do primeiro ao tentar adquirir).
+    """
+    import fcntl
+
+    os.makedirs(os.path.dirname(lock_path), exist_ok=True)
+    handle = open(lock_path, "a+", encoding="utf-8")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        return None
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    return handle
+
+
 def worker_loop(settings: Settings) -> None:
     engine = make_engine(settings.database_url)
     Base.metadata.create_all(engine)  # não depende da API ter subido antes
@@ -232,7 +257,17 @@ def claim_next(session_factory) -> int | None:
             return None
         result = s.execute(
             update(TaskStep)
-            .where(TaskStep.id == step.id, TaskStep.status == STEP_PENDING)
+            .where(
+                TaskStep.id == step.id,
+                TaskStep.status == STEP_PENDING,
+                # Trava de concorrência: nunca reclama outra fase da MESMA task
+                # enquanto uma já está running (ex.: segundo worker por engano).
+                ~exists().where(
+                    TaskStep.task_id == step.task_id,
+                    TaskStep.status == STEP_RUNNING,
+                    TaskStep.id != step.id,
+                ),
+            )
             .values(status=STEP_RUNNING, started_at=utcnow())
         )
         if result.rowcount != 1:

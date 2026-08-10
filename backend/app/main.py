@@ -14,7 +14,7 @@ from .api import dashboard, pipelines, repositories, robots, steps, subtasks, ta
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, migrate_schema
 from .models import Pipeline, PipelineStep, Robot
-from .worker.runner import worker_loop
+from .worker.runner import acquire_worker_lock, worker_loop
 
 log = logging.getLogger("autoia")
 
@@ -336,6 +336,7 @@ def run_api() -> None:
 
 def run_worker() -> None:
     import argparse
+    import sys
     import threading
 
     parser = argparse.ArgumentParser(description="autoia worker")
@@ -347,6 +348,22 @@ def run_worker() -> None:
     )
     settings = Settings()
     settings.ensure_dirs()
+
+    # Instância única: um segundo `autoia-worker` se recusa a iniciar (evita
+    # dois workers disputando as mesmas tasks → fases rodando em paralelo).
+    lock = acquire_worker_lock(os.path.join(settings.workspace_dir, "worker.lock"))
+    if lock is None:
+        try:
+            pid = open(
+                os.path.join(settings.workspace_dir, "worker.lock"), encoding="utf-8"
+            ).read().strip()
+        except OSError:
+            pid = "?"
+        print(
+            f"worker já está rodando (PID {pid}); não é possível iniciar outro.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     if args.workers <= 1:
         worker_loop(settings)
