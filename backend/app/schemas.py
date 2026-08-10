@@ -187,6 +187,7 @@ class TaskStepOut(BaseModel):
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    artifacts: list[ArtifactOut] = []
 
 
 class TaskOut(BaseModel):
@@ -249,6 +250,18 @@ class RunEventOut(BaseModel):
     kind: str
     payload: dict
     cost: float
+
+
+class ArtifactOut(BaseModel):
+    """Metadados de um arquivo gerado por um robô (ex.: screenshot de smoke test)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    step_id: int
+    filename: str
+    description: str | None
+    created_at: datetime
 
 
 # ---------- Dashboard ----------

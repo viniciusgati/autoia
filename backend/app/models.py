@@ -160,6 +160,11 @@ class TaskStep(Base):
         order_by="RunEvent.seq",
         cascade="all, delete-orphan",
     )
+    artifacts: Mapped[list["StepArtifact"]] = relationship(
+        back_populates="step",
+        order_by="StepArtifact.created_at",
+        cascade="all, delete-orphan",
+    )
 
 
 class RunEvent(Base):
@@ -199,3 +204,20 @@ class SubTask(Base):
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
 
     task: Mapped[Task] = relationship(back_populates="subtasks")
+
+
+class StepArtifact(Base):
+    """Arquivo gerado por um robô durante a execução de uma fase (ex.: screenshot de
+    smoke test). Os arquivos ficam no checkout (não versionados); esta tabela rastreia
+    os metadados para exibição na UI."""
+
+    __tablename__ = "step_artifacts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    step_id: Mapped[int] = mapped_column(ForeignKey("task_steps.id"))
+    filename: Mapped[str] = mapped_column(String(300))
+    filepath: Mapped[str] = mapped_column(String(500))
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    step: Mapped[TaskStep] = relationship(back_populates="artifacts")

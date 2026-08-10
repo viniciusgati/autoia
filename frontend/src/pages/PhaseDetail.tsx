@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
+import ArtifactGallery from "../components/ArtifactGallery";
 import StatusBadge from "../components/StatusBadge";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
@@ -338,7 +339,7 @@ export default function PhaseDetail() {
         </p>
       )}
 
-      {/* Subtarefas */}
+      <ArtifactGallery stepId={step.id} />      {/* Subtarefas */}
       {task.subtasks && task.subtasks.length > 0 &&
        (step.robot?.role === "implement" || step.robot?.role === "verify") && (
         <>

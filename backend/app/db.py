@@ -66,6 +66,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("diff_stat", "TEXT"),
     ],
     "pipeline_steps": [("post_merge", "BOOLEAN DEFAULT 0 NOT NULL")],
+    "step_artifacts": [],
 }
 
 

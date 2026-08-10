@@ -43,6 +43,7 @@ from ..models import (
     Repository,
     Robot,
     RunEvent,
+    StepArtifact,
     SubTask,
     Task,
     TaskStep,
@@ -389,6 +390,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             handoff.write_handoff(
                 checkout, _build_handoff(s, task, step, checkout, base, branch)
             )
+            project.exclude_local(checkout, "autoia_screenshots/")
         except (OSError, gitops.GitError):
             log.warning(
                 "não foi possível escrever autoia_handoff.md no checkout %s",
@@ -501,6 +503,34 @@ def _event_count(session_factory, step_id: int) -> int:
         return s.query(func.count(RunEvent.id)).filter(RunEvent.step_id == step_id).scalar() or 0
 
 
+def _scan_artifacts(s: Session, step: TaskStep, checkout: str) -> int:
+    """Scaneia `autoia_screenshots/step_<id>/` no checkout e registra arquivos de imagem
+    como StepArtifact (idempotente: não duplica pelo filename). Retorna quantos foram
+    registrados."""
+    screens_dir = os.path.join(checkout, "autoia_screenshots", f"step_{step.id}")
+    if not os.path.isdir(screens_dir):
+        return 0
+    IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    count = 0
+    for fname in sorted(os.listdir(screens_dir)):
+        fpath = os.path.join(screens_dir, fname)
+        if not os.path.isfile(fpath):
+            continue
+        if os.path.splitext(fname)[1].lower() not in IMAGE_EXTS:
+            continue
+        existing = (
+            s.query(StepArtifact)
+            .filter(StepArtifact.step_id == step.id, StepArtifact.filename == fname)
+            .first()
+        )
+        if existing is not None:
+            continue
+        relpath = os.path.relpath(fpath, checkout)
+        s.add(StepArtifact(step_id=step.id, filename=fname, filepath=relpath))
+        count += 1
+    return count
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -563,6 +593,12 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                 trigger = _handle_failure(eff, s, step, task, f"commit: {exc}", "git_error", STEP_FAILED)
                 s.commit()
                 return trigger
+
+        # Registra screenshots e outros arquivos gerados pelo robô no checkout.
+        try:
+            _scan_artifacts(s, step, checkout)
+        except OSError:
+            log.warning("não foi possível escanear artifacts no checkout %s", checkout, exc_info=True)
 
         # Texto final COMPLETO: é a documentação da fase e vira o histórico no handoff
         # da próxima fase (requisito: nunca truncar conteúdo).

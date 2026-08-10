@@ -1,4 +1,5 @@
 import type {
+  Artifact,
   Dashboard,
   Pipeline,
   Repository,
@@ -121,4 +122,10 @@ export const api = {
 
   // worker
   getWorkerStatus: () => request<{ alive: boolean; last_heartbeat_sec: number | null }>("/api/worker/status"),
+
+  // artifacts
+  getArtifacts: (stepId: number) => request<Artifact[]>(`/api/steps/${stepId}/artifacts`),
+  getArtifactUrl: (artifactId: number) => `/api/steps/artifacts/${artifactId}/file`,
+  deleteArtifacts: (stepId: number) =>
+    request<{ deleted: number }>(`/api/steps/${stepId}/artifacts`, { method: "DELETE" }),
 };

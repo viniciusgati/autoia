@@ -57,6 +57,15 @@ export interface TaskStep {
   error: string | null;
   started_at: string | null;
   finished_at: string | null;
+  artifacts?: Artifact[];
+}
+
+export interface Artifact {
+  id: number;
+  step_id: number;
+  filename: string;
+  description: string | null;
+  created_at: string;
 }
 
 export interface SubTask {

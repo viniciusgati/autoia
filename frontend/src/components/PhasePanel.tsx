@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
+import ArtifactGallery from "./ArtifactGallery";
 import HelpTip from "./HelpTip";
 import StatusBadge from "./StatusBadge";
 import Markdown from "../lib/markdown";
@@ -113,6 +114,9 @@ export default function PhasePanel({ step, repoId, taskId, taskStatus, onClose, 
               </p>
             )}
           </div>
+
+          {/* Artifacts (screenshots) */}
+          <ArtifactGallery stepId={step.id} />
 
           {/* Meta info */}
           <div className="panel-section">

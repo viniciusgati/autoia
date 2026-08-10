@@ -182,6 +182,17 @@ Esta fase é a GARANTIA DE QUALIDADE AUTOMATIZADA: sem humano revisando depois.
   implementado.
 - NÃO altere código nem arquivos do projeto: você VERIFICA e REPORTA. Correções voltam
   para o developer automaticamente (bounce-back) com o seu relatório.
+
+### Testes visuais (smoke test com screenshots)
+Se o projeto tiver interface visual (web, desktop, mobile), faça um smoke test visual:
+- Inicie o projeto e use as ferramentas de navegador (kimi-webbridge) para abrir as
+  telas principais e verificar visualmente o funcionamento.
+- Para cada tela/fluxo testado, tire um screenshot e salve no diretório
+  `autoia_screenshots/` na raiz do checkout. Use nomes descritivos como
+  `login.png`, `dashboard.png`, `form-erro.png`.
+- Documente cada screenshot no SUMMARY com o que foi testado e se passou ou falhou.
+  Exemplo: "smoke-login.png: tela de login carregou, campos visíveis, botão funcional — OK"
+
 - Só depois de tudo verificado, escreva o arquivo `autoia_verdict.txt` na raiz do
   repositório com a PRIMEIRA linha exatamente:
 
