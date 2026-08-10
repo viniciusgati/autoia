@@ -33,6 +33,7 @@ from ..models import (
     STEP_PENDING,
     STEP_RUNNING,
     TASK_BLOCKED,
+    TASK_CANCELLED,
     TASK_DONE,
     TASK_FAILED,
     TASK_IN_PROGRESS,
@@ -593,6 +594,20 @@ def _scan_artifacts(s: Session, step: TaskStep, checkout: str) -> int:
     return count
 
 
+def _handle_cancelled(s: Session, step: TaskStep, task: Task) -> bool:
+    """True se a task foi cancelada durante a execução: marca o step e não avança.
+
+    Sem esse guard, o _decide pós-execução continuaria o pipeline (e até faria
+    merge/push) de uma task que o usuário cancelou enquanto a fase rodava.
+    """
+    if task.status != TASK_CANCELLED:
+        return False
+    step.status = STEP_PENDING
+    step.error = "tarefa cancelada durante a execução"
+    _finish(step)
+    return True
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -603,6 +618,10 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         repo = task.repository
         role = step.robot.role if step.robot else ""
         reason = outcome.abort_reason or ""
+
+        if _handle_cancelled(s, step, task):
+            s.commit()
+            return None
 
         if outcome.aborted:
             if "orçamento" in reason:
@@ -859,6 +878,10 @@ def _decide_subtask_implement(
             return None
         task = step.task
 
+        if _handle_cancelled(s, step, task):
+            s.commit()
+            return None
+
         if abort_reason:
             # Erro durante a implementação de uma subtarefa
             if "orçamento" in abort_reason:
@@ -931,6 +954,10 @@ def _decide_subtask_verify(
         if step is None:
             return None
         task = step.task
+
+        if _handle_cancelled(s, step, task):
+            s.commit()
+            return None
 
         if result is None:
             # Todas as subtarefas PASS → avança para o próximo step

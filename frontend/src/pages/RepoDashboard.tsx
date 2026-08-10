@@ -50,7 +50,12 @@ export default function RepoDashboard() {
     setBusy(task.id);
     setError("");
     try {
-      await api.reviewTask(task.id, { action, extra_budget: 0 });
+      if (action === "cancel") {
+        if (!window.confirm(`Cancelar a tarefa #${task.id}?`)) return;
+        await api.cancelTask(task.id);
+      } else {
+        await api.reviewTask(task.id, { action, extra_budget: 0 });
+      }
       await load();
     } catch (e) {
       setError(String(e));

@@ -115,6 +115,42 @@ export default function TaskCard({
             iniciar
           </button>
         )}
+        {(task.status === "queued" || task.status === "in_progress") && (
+          <>
+            <button onClick={() => run(() => api.pauseTask(task.id))} disabled={busy}>
+              pausar
+            </button>
+            <button
+              className="danger"
+              onClick={() => {
+                if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
+                  run(() => api.cancelTask(task.id));
+                }
+              }}
+              disabled={busy}
+            >
+              cancelar
+            </button>
+          </>
+        )}
+        {task.status === "paused" && (
+          <>
+            <button onClick={() => run(() => api.resumeTask(task.id))} disabled={busy}>
+              retomar
+            </button>
+            <button
+              className="danger"
+              onClick={() => {
+                if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
+                  run(() => api.cancelTask(task.id));
+                }
+              }}
+              disabled={busy}
+            >
+              cancelar
+            </button>
+          </>
+        )}
         {task.status === "needs_review" && (
           <>
             <button
@@ -129,6 +165,17 @@ export default function TaskCard({
               disabled={busy}
             >
               retornar ao dev
+            </button>
+            <button
+              className="danger"
+              onClick={() => {
+                if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
+                  run(() => api.cancelTask(task.id));
+                }
+              }}
+              disabled={busy}
+            >
+              cancelar
             </button>
           </>
         )}

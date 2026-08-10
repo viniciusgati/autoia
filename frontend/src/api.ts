@@ -82,6 +82,9 @@ export const api = {
     budget_limit?: number;
   }) => request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(data) }),
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
+  pauseTask: (id: number) => request<Task>(`/api/tasks/${id}/pause`, { method: "POST" }),
+  resumeTask: (id: number) => request<Task>(`/api/tasks/${id}/resume`, { method: "POST" }),
+  cancelTask: (id: number) => request<Task>(`/api/tasks/${id}/cancel`, { method: "POST" }),
   deleteTask: (id: number) =>
     request<void>(`/api/tasks/${id}`, { method: "DELETE" }),
   reviewTask: (id: number, data: { action: "approve" | "cancel"; extra_budget: number; note?: string }) =>

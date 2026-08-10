@@ -217,6 +217,64 @@ def test_retry_step(app_client, registered_repo, settings):
     assert body["status"] == "queued"
 
 
+def test_pause_resume_cancel(app_client, registered_repo):
+    """Pausa/retoma/cancela uma task em andamento, com as transições válidas."""
+    task = _create_and_start_task(app_client)
+
+    # pausa
+    body = app_client.post(f"/api/tasks/{task['id']}/pause").json()
+    assert body["status"] == "paused"
+
+    # pausar de novo é erro
+    r = app_client.post(f"/api/tasks/{task['id']}/pause")
+    assert r.status_code == 400
+
+    # retoma → volta para a fila
+    body = app_client.post(f"/api/tasks/{task['id']}/resume").json()
+    assert body["status"] == "queued"
+
+    # cancela
+    body = app_client.post(f"/api/tasks/{task['id']}/cancel").json()
+    assert body["status"] == "cancelled"
+    assert "cancelada" in body["error"]
+
+    # terminal: cancelar de novo dá erro
+    r = app_client.post(f"/api/tasks/{task['id']}/cancel")
+    assert r.status_code == 400
+
+
+def test_cancel_during_run_stops_pipeline(settings, bare_repo, tmp_path, fake_kimi):
+    """Task cancelada enquanto a fase roda: o worker não avança nem faz merge."""
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = _create_and_start_task(client)
+
+    # executa a primeira fase (po) normalmente
+    claimed = runner.claim_next(session_factory)
+    runner.execute_step(settings, session_factory, claimed)
+
+    # cancela durante a execução da fase 2 (como se o usuário cancelasse no meio)
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        t.status = "cancelled"
+        s.commit()
+
+    claimed = runner.claim_next(session_factory)
+    assert claimed is None  # worker não reclama mais nada
+
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "cancelled"
+
+
 def test_review_approve_and_cancel(app_client, registered_repo):
     task = _create_and_start_task(app_client)
     with app_client.app.state.Session() as s:

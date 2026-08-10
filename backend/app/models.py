@@ -17,6 +17,8 @@ TASK_FAILED = "failed"
 TASK_BLOCKED = "blocked"
 TASK_NEEDS_REVIEW = "needs_review"
 TASK_WAITING_APPROVAL = "waiting_approval"
+TASK_PAUSED = "paused"
+TASK_CANCELLED = "cancelled"
 
 STEP_PENDING = "pending"
 STEP_RUNNING = "running"

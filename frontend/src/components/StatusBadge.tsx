@@ -10,6 +10,8 @@ const LABELS: Record<string, { label: string; cls: string }> = {
   pending: { label: "pendente", cls: "badge-muted" },
   running: { label: "rodando", cls: "badge-run" },
   guardrail_blocked: { label: "guardrail", cls: "badge-err" },
+  paused: { label: "pausada", cls: "badge-warn" },
+  cancelled: { label: "cancelada", cls: "badge-err" },
 };
 
 export default function StatusBadge({ status }: { status: string }) {

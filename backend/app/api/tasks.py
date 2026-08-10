@@ -14,9 +14,12 @@ from ..models import (
     STEP_GUARDRAIL_BLOCKED,
     STEP_PENDING,
     TASK_BLOCKED,
+    TASK_CANCELLED,
+    TASK_DONE,
     TASK_FAILED,
     TASK_IN_PROGRESS,
     TASK_NEEDS_REVIEW,
+    TASK_PAUSED,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
     Pipeline,
@@ -35,7 +38,7 @@ from ..schemas import (
     TaskOut,
     TaskUpdateRequest,
 )
-from ..worker.runner import _pm_decide
+from ..worker.runner import _pm_decide, _system_event
 from .deps import get_repository_or_404, get_session, get_settings
 
 log = logging.getLogger("autoia.api")
@@ -137,6 +140,56 @@ def start_task(
     min(task.steps, key=lambda st: st.position).status = STEP_PENDING
     session.commit()
     return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/pause", response_model=TaskOut)
+def pause_task(task_id: int, session: Session = Depends(get_session)):
+    """Pausa uma tarefa em andamento (worker para de reclamar fases)."""
+    task = _get_task_or_404(session, task_id)
+    if task.status not in (TASK_QUEUED, TASK_IN_PROGRESS):
+        raise HTTPException(
+            400, f"só dá para pausar tarefa em andamento (status atual: {task.status})"
+        )
+    task.status = TASK_PAUSED
+    anchor = _anchor_step(task)
+    _system_event(session, anchor, "task_paused", {"status_anterior": "in_progress"})
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/resume", response_model=TaskOut)
+def resume_task(task_id: int, session: Session = Depends(get_session)):
+    """Retoma uma tarefa pausada (volta para a fila; fases pendentes re-executam)."""
+    task = _get_task_or_404(session, task_id)
+    if task.status != TASK_PAUSED:
+        raise HTTPException(400, f"tarefa não está pausada (status atual: {task.status})")
+    task.status = TASK_QUEUED
+    anchor = _anchor_step(task)
+    _system_event(session, anchor, "task_resumed", {})
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/cancel", response_model=TaskOut)
+def cancel_task(task_id: int, session: Session = Depends(get_session)):
+    """Cancela uma tarefa: terminal, o pipeline não avança nem integra mais."""
+    task = _get_task_or_404(session, task_id)
+    if task.status in (TASK_DONE, TASK_FAILED, TASK_CANCELLED):
+        raise HTTPException(
+            400, f"tarefa em estado terminal '{task.status}' não pode ser cancelada"
+        )
+    task.status = TASK_CANCELLED
+    task.error = "cancelada pelo usuário"
+    anchor = _anchor_step(task)
+    _system_event(session, anchor, "task_cancelled", {})
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+def _anchor_step(task: Task) -> TaskStep:
+    """Step usado como âncora para eventos de nível de task (corrente ou o primeiro)."""
+    steps = sorted(task.steps, key=lambda st: st.position)
+    return next((st for st in steps if st.position == task.current_step), steps[0] if steps else None)
 
 
 @router.post("/{task_id}/review", response_model=TaskOut)

@@ -53,6 +53,7 @@ export default function TaskDetail() {
   const [bouncebackNote, setBouncebackNote] = useState("");
   const [reviewedBy, setReviewedBy] = useState("humano");
   const [bouncebackBusy, setBouncebackBusy] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
 
   // Aprovação humana (gate do pipeline)
   const [approvalNote, setApprovalNote] = useState("");
@@ -223,6 +224,23 @@ export default function TaskDetail() {
     }
   };
 
+  const taskAction = async (action: "pause" | "resume" | "cancel") => {
+    setActionBusy(true);
+    try {
+      if (action === "pause") await api.pauseTask(taskId);
+      else if (action === "resume") await api.resumeTask(taskId);
+      else {
+        if (!window.confirm(`Cancelar a tarefa #${taskId}?`)) return;
+        await api.cancelTask(taskId);
+      }
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setActionBusy(false);
+    }
+  };
+
   const approveGate = async (position: number) => {
     setApprovalBusy(true);
     try {
@@ -327,6 +345,28 @@ export default function TaskDetail() {
           </span>
           <span className="muted">decisões PM: {task.pm_decisions}</span>
         </div>
+        {["created", "queued", "in_progress", "paused", "needs_review", "waiting_approval", "blocked"].includes(
+          task.status,
+        ) && (
+          <div className="meta" style={{ marginTop: 4 }}>
+            {task.status === "paused" ? (
+              <button onClick={() => taskAction("resume")} disabled={actionBusy}>
+                retomar
+              </button>
+            ) : task.status === "queued" || task.status === "in_progress" ? (
+              <button onClick={() => taskAction("pause")} disabled={actionBusy}>
+                pausar
+              </button>
+            ) : null}
+            <button
+              className="danger"
+              onClick={() => taskAction("cancel")}
+              disabled={actionBusy}
+            >
+              cancelar tarefa
+            </button>
+          </div>
+        )}
         {task.subtasks && task.subtasks.length > 0 && (
           <div className="meta" style={{ marginTop: 4 }}>
             <span>
@@ -383,6 +423,16 @@ export default function TaskDetail() {
           <div className="sticky-alert">
             <span>⚠ Aguardando aprovação humana — o pipeline parou na fase {etapaAtualLabel(task)}</span>
             <button onClick={scrollToApproval}>ir para a aprovação ↓</button>
+          </div>
+        )}
+        {task.status === "paused" && (
+          <div className="sticky-alert">
+            <span>⏸ Tarefa pausada — o pipeline não avança até retomar</span>
+          </div>
+        )}
+        {task.status === "cancelled" && (
+          <div className="sticky-alert sticky-alert-critical">
+            <span>✕ Tarefa cancelada — pipeline encerrado</span>
           </div>
         )}
         {subAlert && (
