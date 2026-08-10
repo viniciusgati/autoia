@@ -51,29 +51,38 @@ export default function Pipelines() {
     <div>
       <h2>Pipelines</h2>
       <form className="form-stack" onSubmit={submit}>
-        <input placeholder="nome do pipeline" value={name} onChange={(e) => setName(e.target.value)} required />
+        <div className="form-field">
+          <label className="form-label">Nome do pipeline</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} required />
+        </div>
         {rows.map((row, index) => (
           <div className="form-inline" key={index}>
-            <input
-              type="number"
-              className="short"
-              value={row.position}
-              onChange={(e) =>
-                setRows((rows) => rows.map((r, i) => (i === index ? { ...r, position: Number(e.target.value) } : r)))
-              }
-            />
-            <select
-              value={row.robot_id}
-              onChange={(e) => setRows((rows) => rows.map((r, i) => (i === index ? { ...r, robot_id: e.target.value } : r)))}
-            >
-              <option value="">— robô —</option>
-              {robots.map((robot) => (
-                <option key={robot.id} value={robot.id}>
-                  {robot.name}
-                </option>
-              ))}
-            </select>
-            <label className="post-merge-label">
+            <div className="form-field">
+              <label className="form-label">Posição</label>
+              <input
+                type="number"
+                className="short"
+                value={row.position}
+                onChange={(e) =>
+                  setRows((rows) => rows.map((r, i) => (i === index ? { ...r, position: Number(e.target.value) } : r)))
+                }
+              />
+            </div>
+            <div className="form-field" style={{flex: 1, minWidth: 160}}>
+              <label className="form-label">Robô</label>
+              <select
+                value={row.robot_id}
+                onChange={(e) => setRows((rows) => rows.map((r, i) => (i === index ? { ...r, robot_id: e.target.value } : r)))}
+              >
+                <option value="">— selecione —</option>
+                {robots.map((robot) => (
+                  <option key={robot.id} value={robot.id}>
+                    {robot.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <label className="post-merge-label" style={{alignSelf: "flex-end", marginBottom: 2}}>
               <input
                 type="checkbox"
                 checked={row.post_merge}
@@ -86,13 +95,14 @@ export default function Pipelines() {
             <button
               type="button"
               className="danger"
+              style={{alignSelf: "flex-end", marginBottom: 2}}
               onClick={() => setRows((rows) => rows.filter((_, i) => i !== index))}
             >
-              x
+              remover
             </button>
           </div>
         ))}
-        <div className="form-inline">
+        <div className="form-actions">
           <button
             type="button"
             onClick={() =>

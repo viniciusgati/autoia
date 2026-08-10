@@ -47,7 +47,8 @@ def test_feedback_reaches_handoff_and_prompt(flow, fake_kimi):
     task = flow["task"]
 
     with flow["session_factory"]() as s:
-        checkout = s.get(Task, task["id"]).repository.local_path
+        t = s.get(Task, task["id"])
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
 
     _execute(flow, _run_claim(flow))  # fase 0 (po) conclui
     resp = flow["client"].post(

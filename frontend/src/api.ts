@@ -37,6 +37,11 @@ export const api = {
     }),
   deleteRepository: (id: number) =>
     request<void>(`/api/repositories/${id}`, { method: "DELETE" }),
+  updateRepository: (id: number, data: Partial<Repository>) =>
+    request<Repository>(`/api/repositories/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
 
   // robots
   listRobots: () => request<Robot[]>("/api/robots"),
@@ -51,7 +56,10 @@ export const api = {
     request<Pipeline>("/api/pipelines", { method: "POST", body: JSON.stringify(data) }),
 
   // tasks
-  listTasks: () => request<Task[]>("/api/tasks"),
+  listTasks: (repositoryId?: number) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<Task[]>(`/api/tasks${params}`);
+  },
   getTask: (id: number) => request<Task>(`/api/tasks/${id}`),
   createTask: (data: {
     repository_id: number;
@@ -62,6 +70,8 @@ export const api = {
     budget_limit?: number;
   }) => request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(data) }),
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
+  deleteTask: (id: number) =>
+    request<void>(`/api/tasks/${id}`, { method: "DELETE" }),
   reviewTask: (id: number, data: { action: "approve" | "cancel"; extra_budget: number; note?: string }) =>
     request<Task>(`/api/tasks/${id}/review`, { method: "POST", body: JSON.stringify(data) }),
   retryStep: (taskId: number, position: number, note?: string) =>
@@ -78,6 +88,11 @@ export const api = {
     request<Task>(`/api/tasks/${taskId}/feedback`, { method: "DELETE" }),
   pmDecide: (taskId: number) =>
     request<Task>(`/api/tasks/${taskId}/pm/decide`, { method: "POST" }),
+  bouncebackTask: (taskId: number, targetPosition: number, note?: string, reviewedBy?: string) =>
+    request<Task>(`/api/tasks/${taskId}/bounceback`, {
+      method: "POST",
+      body: JSON.stringify({ target_position: targetPosition, note, reviewed_by: reviewedBy || "humano" }),
+    }),
 
   // subtasks
   retrySubtask: (taskId: number, position: number) =>
@@ -99,5 +114,11 @@ export const api = {
   },
 
   // dashboard
-  getDashboard: () => request<Dashboard>("/api/dashboard"),
+  getDashboard: (repositoryId?: number) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<Dashboard>(`/api/dashboard${params}`);
+  },
+
+  // worker
+  getWorkerStatus: () => request<{ alive: boolean; last_heartbeat_sec: number | null }>("/api/worker/status"),
 };

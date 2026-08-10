@@ -97,7 +97,8 @@ def test_handoff_written_and_never_committed(flow, fake_kimi):
     task = flow["task"]
 
     with flow["session_factory"]() as s:
-        checkout = s.get(Task, task["id"]).repository.local_path
+        t = s.get(Task, task["id"])
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
 
     while True:
         step_id = _run_claim(flow)
@@ -136,7 +137,8 @@ def test_handoff_phase_two_receives_phase_one_summary(flow, fake_kimi):
     task = flow["task"]
 
     with flow["session_factory"]() as s:
-        checkout = s.get(Task, task["id"]).repository.local_path
+        t = s.get(Task, task["id"])
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
 
     _execute(flow, _run_claim(flow))  # fase 0 (po) conclui
     _execute(flow, _run_claim(flow))  # fase 1 (qa) roda com o handoff da fase 0

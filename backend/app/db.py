@@ -41,11 +41,24 @@ def make_session_factory(engine):
 
 # Colunas aditivas para bancos criados em versões anteriores (v1.0 -> v1.1).
 ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
+    "repositories": [
+        ("max_attempts", "INTEGER"),
+        ("max_pm_decisions", "INTEGER"),
+        ("run_timeout", "INTEGER"),
+        ("task_budget", "FLOAT"),
+        ("cost_per_interaction", "FLOAT"),
+        ("risky_patterns_extra", "TEXT"),
+        ("db_rule", "TEXT"),
+        ("allow_auto_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("allow_external_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
+    ],
     "robots": [("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL")],
     "tasks": [
         ("acceptance_criteria", "TEXT"),
         ("pm_decisions", "INTEGER DEFAULT 0 NOT NULL"),
         ("feedback", "TEXT"),
+        ("parent_task_id", "INTEGER REFERENCES tasks(id)"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),

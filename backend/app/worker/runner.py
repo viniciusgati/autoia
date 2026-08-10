@@ -13,10 +13,12 @@ Fluxo de decisão por step:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
 import types
+from dataclasses import dataclass, field
 
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -36,6 +38,9 @@ from ..models import (
     TASK_IN_PROGRESS,
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
+    Pipeline,
+    PipelineStep,
+    Repository,
     Robot,
     RunEvent,
     SubTask,
@@ -54,10 +59,55 @@ VERDICT_EXPECTED = {
 }
 
 
+@dataclass
+class EffectiveSettings:
+    """Configurações efetivas para uma task (repo > global)."""
+    max_attempts: int
+    max_pm_decisions: int
+    run_timeout: int
+    task_budget: float
+    cost_per_interaction: float
+    pm_budget_topup: float
+    risky_patterns: list[str]
+    db_rule: str
+    kimi_bin: str
+    log_dir: str
+    workspace_dir: str
+    branch_prefix: str
+    max_identical_calls: int
+
+
+def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
+    """Merge: configurações do repositório sobrescrevem as globais."""
+    patterns = list(settings.risky_patterns)
+    if repo.risky_patterns_extra:
+        try:
+            extra = json.loads(repo.risky_patterns_extra)
+            if isinstance(extra, list):
+                patterns += extra
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return EffectiveSettings(
+        max_attempts=repo.max_attempts if repo.max_attempts is not None else settings.max_attempts,
+        max_pm_decisions=repo.max_pm_decisions if repo.max_pm_decisions is not None else settings.max_pm_decisions,
+        run_timeout=repo.run_timeout if repo.run_timeout is not None else settings.run_timeout,
+        task_budget=repo.task_budget if repo.task_budget is not None else settings.task_budget,
+        cost_per_interaction=repo.cost_per_interaction if repo.cost_per_interaction is not None else settings.cost_per_interaction,
+        pm_budget_topup=settings.pm_budget_topup,
+        risky_patterns=patterns,
+        db_rule=repo.db_rule or settings.db_rule,
+        kimi_bin=settings.kimi_bin,
+        log_dir=settings.log_dir,
+        branch_prefix=settings.branch_prefix,
+        workspace_dir=settings.workspace_dir,
+        max_identical_calls=settings.max_identical_calls,
+    )
+
+
 def recover_stale_steps(session_factory) -> int:
-    """No startup do worker: steps `running` de tasks ativas são órfãos de um
-    restart/crash anterior (worker síncrono e único) — volta para `pending` para
-    re-executar, em vez de travar a task para sempre."""
+    """No startup do worker: steps `running` e subtarefas `implementing`/`verifying`
+    de tasks ativas são órfãos de um restart/crash anterior (worker síncrono e único)
+    — volta para `pending` para re-executar, em vez de travar a task para sempre."""
     with session_factory() as s:
         stale = (
             s.query(TaskStep)
@@ -75,8 +125,40 @@ def recover_stale_steps(session_factory) -> int:
                 s, st, "worker_recovered",
                 {"reason": "step running órfão de restart anterior; re-executando"},
             )
+
+        # Subtarefas órfãs: se o worker caiu durante `_run_one_implement` ou
+        # `_run_one_verify`, a subtarefa fica em `implementing`/`verifying` e
+        # nunca mais é coletada (run_*_subtasks só pega `pending`/`implemented`).
+        stale_subs = (
+            s.query(SubTask)
+            .join(Task)
+            .filter(
+                SubTask.status.in_(["implementing", "verifying"]),
+                Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+            )
+            .all()
+        )
+        for sub in stale_subs:
+            sub.status = "pending"
+            sub.started_at = None
+            sub.error = "worker reiniciado — subtarefa órfã re-enfileirada"
+
         s.commit()
-        return len(stale)
+        return len(stale) + len(stale_subs)
+
+
+def _touch_heartbeat(path: str) -> None:
+    """Grava timestamp no arquivo de heartbeat (cria se não existir)."""
+    try:
+        with open(path, "w") as f:
+            f.write(str(time.time()))
+    except OSError:
+        pass  # silencioso — heartbeat é best-effort
+
+
+def _task_workspace(settings, repo_id: int, task_id: int) -> str:
+    """Diretório de trabalho isolado por tarefa (clone dedicado)."""
+    return os.path.join(settings.workspace_dir, str(repo_id), f"task_{task_id}")
 
 
 def worker_loop(settings: Settings) -> None:
@@ -88,7 +170,9 @@ def worker_loop(settings: Settings) -> None:
     if recovered:
         log.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
     log.info("worker iniciado (dir de trabalho: %s)", settings.workspace_dir)
+    hb_path = os.path.join(settings.workspace_dir, "worker.heartbeat")
     while True:
+        _touch_heartbeat(hb_path)
         try:
             step_id = claim_next(session_factory)
         except Exception:
@@ -218,7 +302,7 @@ def _build_handoff(
 
     # Inclui progresso de subtarefas no handoff, se existirem
     if task.subtasks:
-        sections.append(_subtask_progress_summary(task))
+        sections.append(_subtask_progress_summary(task, post_merge=current_step.post_merge))
 
     current = (
         f"**Fase {current_step.position} — {current_step.robot.name if current_step.robot else '?'} "
@@ -246,18 +330,37 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             return None
         task = step.task
         repo = task.repository
-        checkout = repo.local_path or ""
         base = repo.default_branch
-        branch = task.branch or f"{settings.branch_prefix}/task-{task.id}"
+        branch = task.branch or f"{eff.branch_prefix}/task-{task.id}"
+        eff = _effective(settings, repo)
 
-        if not checkout or not os.path.isdir(checkout):
+        # Workspace isolado por task — cada task tem seu próprio clone, sem conflito
+        checkout = _task_workspace(eff, repo.id, task.id)
+
+        # Fonte do clone: URL do repo ou caminho local cadastrado
+        source = repo.url or repo.local_path or ""
+        if not source:
             step.status = STEP_FAILED
-            step.error = f"checkout ausente: {checkout}"
+            step.error = "repositório sem URL ou caminho local"
             task.status = TASK_FAILED
             task.error = step.error
             _finish(step)
             s.commit()
             return None
+
+        # Garante que o workspace existe e é um clone git
+        git_dir = os.path.join(checkout, ".git")
+        if not os.path.isdir(git_dir):
+            try:
+                gitops.clone(source, checkout)
+            except gitops.GitError as exc:
+                step.status = STEP_FAILED
+                step.error = f"clone falhou: {exc}"
+                task.status = TASK_FAILED
+                task.error = step.error
+                _finish(step)
+                s.commit()
+                return None
 
         try:
             if step.post_merge:
@@ -277,7 +380,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         step_context = _build_step_context(s, task, step, checkout, base, branch)
         project_info = project.detect_project(checkout)
         try:
-            project.ensure_agents_md(checkout, project_info, settings.db_rule)
+            project.ensure_agents_md(checkout, project_info, eff.db_rule)
         except (OSError, gitops.GitError):
             log.warning(
                 "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
@@ -295,7 +398,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         prompt = prompts.build_prompt(
             step.robot, task, step_context, base, project_info=project_info
         )
-        log_path = os.path.join(settings.log_dir, f"step_{step.id}.log")
+        log_path = os.path.join(eff.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
         # Marca o início da tentativa nos eventos: uma fase pode ser re-executada
         # (bounce-back) e os eventos se acumulam no mesmo step — sem esse marcador
@@ -316,11 +419,11 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
     # ── Ramo de subtarefas: implement e verify iteram sobre subtarefas ──
     if has_subtasks and role == "implement":
         return _decide_subtask_implement(
-            settings, session_factory, step_id, checkout, base, branch, project_info
+            eff, session_factory, step_id, checkout, base, branch, project_info
         )
     if has_subtasks and role == "verify":
         return _decide_subtask_verify(
-            settings, session_factory, step_id, checkout, base, branch, project_info
+            eff, session_factory, step_id, checkout, base, branch, project_info
         )
 
     state = {"seq": _event_count(session_factory, step_id), "cost": 0.0}
@@ -353,13 +456,13 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
     outcome = kimi_exec.run_kimi(
         prompt,
         cwd=checkout,
-        kimi_bin=settings.kimi_bin,
+        kimi_bin=eff.kimi_bin,
         log_path=log_path,
-        timeout=settings.run_timeout,
-        max_identical_calls=settings.max_identical_calls,
-        risky_patterns=settings.risky_patterns,
+        timeout=eff.run_timeout,
+        max_identical_calls=eff.max_identical_calls,
+        risky_patterns=eff.risky_patterns,
         checkout_path=checkout,
-        cost_per_interaction=settings.cost_per_interaction,
+        cost_per_interaction=eff.cost_per_interaction,
         on_event=on_event,
     )
 
@@ -369,7 +472,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             return None
         verdict_label = _consume_verdict(s, step, checkout)
         s.commit()
-    return _decide(settings, session_factory, step_id, checkout, outcome, verdict_label)
+    return _decide(eff, session_factory, step_id, checkout, outcome, verdict_label)
 
 
 def _consume_verdict(s: Session, step: TaskStep, checkout: str) -> str | None:
@@ -398,7 +501,7 @@ def _event_count(session_factory, step_id: int) -> int:
         return s.query(func.count(RunEvent.id)).filter(RunEvent.step_id == step_id).scalar() or 0
 
 
-def _decide(settings: Settings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
+def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
         step = s.get(TaskStep, step_id)
@@ -421,15 +524,15 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
                 return {"task_id": task.id, "reason": reason}
 
             if reason.startswith("guardrail"):
-                trigger = _handle_failure(settings, s, step, task, reason, "guardrail_blocked", STEP_GUARDRAIL_BLOCKED)
+                trigger = _handle_failure(eff, s, step, task, reason, "guardrail_blocked", STEP_GUARDRAIL_BLOCKED)
             else:
-                trigger = _handle_failure(settings, s, step, task, reason, "timeout", STEP_FAILED)
+                trigger = _handle_failure(eff, s, step, task, reason, "timeout", STEP_FAILED)
             s.commit()
             return trigger
 
         if outcome.exit_code != 0:
             trigger = _handle_failure(
-                settings, s, step, task,
+                eff, s, step, task,
                 f"kimi saiu com código {outcome.exit_code}", "kimi_exit", STEP_FAILED,
             )
             s.commit()
@@ -440,7 +543,7 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
             expected = VERDICT_EXPECTED[role]
             if verdict_label != expected:
                 trigger = _handle_failure(
-                    settings, s, step, task,
+                    eff, s, step, task,
                     f"veredicto {verdict_label or 'AUSENTE'} (esperado {expected})",
                     "verdict", STEP_FAILED,
                 )
@@ -457,13 +560,25 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
                     except gitops.GitError:
                         pass
             except gitops.GitError as exc:
-                trigger = _handle_failure(settings, s, step, task, f"commit: {exc}", "git_error", STEP_FAILED)
+                trigger = _handle_failure(eff, s, step, task, f"commit: {exc}", "git_error", STEP_FAILED)
                 s.commit()
                 return trigger
 
         # Texto final COMPLETO: é a documentação da fase e vira o histórico no handoff
         # da próxima fase (requisito: nunca truncar conteúdo).
         step.summary = outcome.final_text or ""
+
+        # Alerta de diagnóstico: output muito curto em fase de verificação pode indicar
+        # que o kimi não processou corretamente a fase (ex.: leu o handoff e reproduziu
+        # marcadores em vez de avaliar o deploy real).
+        if role in ("verify", "assess") and len(outcome.final_text or "") < 100:
+            _system_event(
+                s, step, "short_output_warning",
+                {
+                    "final_text_length": len(outcome.final_text or ""),
+                    "interaction_count": outcome.interaction_count,
+                },
+            )
 
         # Papel refine (po): grava a história na task.
         if role == "refine":
@@ -504,6 +619,7 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
             _system_event(s, step, "phase_done", {"next": nxt.position if nxt else None})
             _finish(step)
             s.commit()
+            _spawn_tasks(session_factory, step_id, checkout)
             return None
 
         # Pré-merge: a última fase pré-merge (próxima é pós-merge, ou é a última) integra.
@@ -530,7 +646,7 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
             try:
                 result = gitops.merge_and_push(checkout, task.branch, repo.default_branch)
             except gitops.GitError as exc:
-                trigger = _handle_failure(settings, s, step, task, f"merge/push: {exc}", "merge_error", STEP_FAILED)
+                trigger = _handle_failure(eff, s, step, task, f"merge/push: {exc}", "merge_error", STEP_FAILED)
                 s.commit()
                 return trigger
             if result.ok:
@@ -561,10 +677,11 @@ def _decide(settings: Settings, session_factory, step_id: int, checkout: str, ou
         _system_event(s, step, "phase_done", {"next": nxt.position})
         _finish(step)
         s.commit()
+        _spawn_tasks(session_factory, step_id, checkout)
         return None
 
 
-def _handle_failure(settings: Settings, s: Session, step: TaskStep, task: Task, reason: str, kind: str, step_status: str) -> dict | None:
+def _handle_failure(eff: EffectiveSettings, s: Session, step: TaskStep, task: Task, reason: str, kind: str, step_status: str) -> dict | None:
     """Registra a falha e decide: bounce-back (pré-merge) ou revisão + PM (pós-merge).
 
     Retorna um gatilho de PM quando a task precisa de decisão automática.
@@ -589,7 +706,7 @@ def _handle_failure(settings: Settings, s: Session, step: TaskStep, task: Task, 
         ),
         None,
     )
-    if previous is not None and previous.attempt < settings.max_attempts:
+    if previous is not None and previous.attempt < eff.max_attempts:
         previous.status = STEP_PENDING
         previous.attempt += 1
         previous.error = None
@@ -615,7 +732,7 @@ def _handle_failure(settings: Settings, s: Session, step: TaskStep, task: Task, 
 
 
 def _decide_subtask_implement(
-    settings: Settings,
+    eff: EffectiveSettings,
     session_factory,
     step_id: int,
     checkout: str,
@@ -629,10 +746,10 @@ def _decide_subtask_implement(
         if step is None:
             return None
         task_id = step.task_id
-        log_path = step.log_path or os.path.join(settings.log_dir, f"step_{step_id}.log")
+        log_path = step.log_path or os.path.join(eff.log_dir, f"step_{step_id}.log")
 
     abort_reason = subtask.run_implement_subtasks(
-        settings, session_factory, step,
+        eff, session_factory, step,
         task_id, checkout, base, branch, project_info, log_path,
     )
 
@@ -656,7 +773,7 @@ def _decide_subtask_implement(
 
             # Guardrail / timeout / erro de commit
             trigger = _handle_failure(
-                settings, s, step, task, abort_reason,
+                eff, s, step, task, abort_reason,
                 "guardrail_blocked" if "guardrail" in abort_reason else "error",
                 STEP_FAILED,
             )
@@ -687,7 +804,7 @@ def _decide_subtask_implement(
 
 
 def _decide_subtask_verify(
-    settings: Settings,
+    eff: EffectiveSettings,
     session_factory,
     step_id: int,
     checkout: str,
@@ -701,10 +818,10 @@ def _decide_subtask_verify(
         if step is None:
             return None
         task_id = step.task_id
-        log_path = step.log_path or os.path.join(settings.log_dir, f"step_{step_id}.log")
+        log_path = step.log_path or os.path.join(eff.log_dir, f"step_{step_id}.log")
 
     result = subtask.run_verify_subtasks(
-        settings, session_factory, step,
+        eff, session_factory, step,
         task_id, checkout, base, branch, project_info, log_path,
     )
 
@@ -747,9 +864,9 @@ def _decide_subtask_verify(
                 st.status = "pending"
                 st.verdict = None
                 st.finished_at = None
-                if st.attempt >= settings.max_attempts:
+                if st.attempt >= eff.max_attempts:
                     st.status = "failed"
-                    st.error = f"tentativas excedidas ({settings.max_attempts})"
+                    st.error = f"tentativas excedidas ({eff.max_attempts})"
 
             all_failed = all(s.status == "failed" for s in task.subtasks if s.position in [
                 int(p) for p in result.split(":")[1].split(",")
@@ -807,10 +924,17 @@ def _decide_subtask_verify(
         return {"task_id": task.id, "reason": result}
 
 
-def _subtask_progress_summary(task: Task) -> str:
-    """Resumo legível do progresso das subtarefas para o handoff."""
+def _subtask_progress_summary(task: Task, post_merge: bool = False) -> str:
+    """Resumo legível do progresso das subtarefas para o handoff.
+
+    Em fases pós-merge, mostra apenas subtarefas com status final (done, failed),
+    ocultando intermediárias para não poluir o contexto do deploy-tester.
+    """
     lines = ["## Progresso das subtarefas"]
+    final_statuses = {"done", "failed"}
     for s in sorted(task.subtasks, key=lambda x: x.position):
+        if post_merge and s.status not in final_statuses:
+            continue
         status_icon = {
             "done": "[OK]",
             "implemented": "[IMPLEMENTADA]",
@@ -849,22 +973,31 @@ def _pm_context(s: Session, task: Task) -> str:
     return "\n".join(lines)
 
 
-def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) -> None:
+def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: str) -> None:
     """Roda o PM e aplica a decisão (retry / continuar / escalar). Sempre bound por pm_decisions."""
     with session_factory() as s:
         task = s.get(Task, task_id)
         if task is None:
             return
-        checkout = task.repository.local_path or ""
+        checkout = _task_workspace(eff, task.repository.id, task.id)
         pm_robot = s.query(Robot).filter(Robot.name == "pm").first()
         if pm_robot is None:
             return
         context = _pm_context(s, task)
+
+        # Garante workspace (pode ainda não existir se a task nunca rodou)
+        if not os.path.isdir(os.path.join(checkout, ".git")):
+            source = task.repository.url or task.repository.local_path or ""
+            if source:
+                try:
+                    gitops.clone(source, checkout)
+                except gitops.GitError:
+                    log.warning("PM: clone falhou para %s", checkout, exc_info=True)
+
         project_info = project.detect_project(checkout) if os.path.isdir(checkout) else ""
         if os.path.isdir(checkout):
             try:
-                project.ensure_agents_md(checkout, project_info, settings.db_rule)
-                # handoff com TODAS as fases (o PM é a "fase fantasma" seguinte)
+                project.ensure_agents_md(checkout, project_info, eff.db_rule)
                 last_pos = max((st.position for st in task.steps), default=-1)
                 ghost = types.SimpleNamespace(position=last_pos + 1, robot=None)
                 handoff.write_handoff(
@@ -882,25 +1015,26 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
         prompt = prompts.build_prompt(
             pm_robot, task, context, task.repository.default_branch, project_info=project_info
         )
-        log_path = os.path.join(settings.log_dir, f"pm_task_{task_id}.log")
+        log_path = os.path.join(eff.log_dir, f"pm_task_{task_id}.log")
         task.pm_decisions += 1
         s.commit()
 
+    effective_cwd = checkout if os.path.isdir(checkout) else eff.workspace_dir
     outcome = kimi_exec.run_kimi(
         prompt,
-        cwd=checkout if os.path.isdir(checkout) else settings.workspace_dir,
-        kimi_bin=settings.kimi_bin,
+        cwd=effective_cwd,
+        kimi_bin=eff.kimi_bin,
         log_path=log_path,
-        timeout=settings.run_timeout,
-        max_identical_calls=settings.max_identical_calls,
-        risky_patterns=settings.risky_patterns,
-        checkout_path=checkout if os.path.isdir(checkout) else settings.workspace_dir,
+        timeout=eff.run_timeout,
+        max_identical_calls=eff.max_identical_calls,
+        risky_patterns=eff.risky_patterns,
+        checkout_path=effective_cwd,
         cost_per_interaction=0.0,
         on_event=None,
     )
 
-    raw = verdicts.read_verdict(checkout) if os.path.isdir(checkout) else None
-    verdicts.remove_verdict(checkout) if os.path.isdir(checkout) else None
+    raw = verdicts.read_verdict(effective_cwd)
+    verdicts.remove_verdict(effective_cwd)
     decision = verdicts.parse_pm_decision(raw)
     decision["reason"] = decision["reason"] or outcome.final_text[:300]
 
@@ -920,7 +1054,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                     (st for st in task.steps if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
                     None,
                 )
-            if target is not None and target.attempt < settings.max_attempts:
+            if target is not None and target.attempt < eff.max_attempts:
                 target.status = STEP_PENDING
                 target.attempt += 1
                 target.error = None
@@ -934,7 +1068,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                 task.error = f"PM: retry inválido/limitado ({decision['reason']})"
 
         elif decision["action"] == verdicts.PM_CONTINUE:
-            task.budget_limit = (task.budget_limit or 0.0) + settings.pm_budget_topup
+            task.budget_limit = (task.budget_limit or 0.0) + eff.pm_budget_topup
             task.status = TASK_IN_PROGRESS
             task.error = None
             pending = next((st for st in task.steps if st.status == STEP_PENDING), None)
@@ -960,16 +1094,112 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
         task = s.get(Task, task_id)
         if task is None:
             return
-        if task.pm_decisions >= settings.max_pm_decisions:
+        eff = _effective(settings, task.repository)
+        if task.pm_decisions >= eff.max_pm_decisions:
             anchor = sorted(task.steps, key=lambda x: x.position)[-1] if task.steps else None
             _system_event(
                 s, anchor, "pm_skip",
-                {"reason": f"limite de decisões ({settings.max_pm_decisions}) atingido"},
+                {"reason": f"limite de decisões ({eff.max_pm_decisions}) atingido"},
             )
             s.commit()
             return
     log.info("PM decidindo para a task %s (%s)", task_id, reason)
-    _pm_decide(session_factory, settings, task_id, reason)
+    _pm_decide(session_factory, eff, task_id, reason)
+
+
+def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
+    """Lê autoia_tasks.json do checkout e cria tasks filhas."""
+    tasks_file = os.path.join(checkout, "autoia_tasks.json")
+    if not os.path.isfile(tasks_file):
+        return
+    try:
+        with open(tasks_file, encoding="utf-8") as f:
+            entries = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        log.warning("autoia_tasks.json inválido em %s", checkout, exc_info=True)
+        return
+
+    if not isinstance(entries, list):
+        return
+
+    with session_factory() as s:
+        step = s.get(TaskStep, step_id)
+        if step is None:
+            return
+        task = step.task
+        repo = task.repository
+
+        if not repo.allow_auto_tasks:
+            return  # repo não permite spawn automático
+
+        spawned = 0
+        for entry in entries:
+            title = (entry.get("title") or "").strip()
+            if not title:
+                continue
+            description = entry.get("description", "")
+            kind = entry.get("kind", "feature")
+            target_repo_name = (entry.get("repository") or "").strip()
+
+            # Determina repositório alvo
+            if target_repo_name:
+                target_repo = s.query(Repository).filter(Repository.name == target_repo_name).first()
+                if target_repo is None:
+                    log.warning("repo alvo '%s' não encontrado para spawn", target_repo_name)
+                    continue
+                if not target_repo.allow_external_tasks:
+                    log.warning("repo '%s' não aceita tasks externas", target_repo_name)
+                    continue
+            else:
+                target_repo = repo
+
+            # Pipeline: usa default do repo alvo, ou o mesmo da task pai
+            pipeline_id = target_repo.default_pipeline_id or task.pipeline_id
+
+            child = Task(
+                repository_id=target_repo.id,
+                pipeline_id=pipeline_id,
+                title=title,
+                description=description,
+                kind=kind,
+                status="created",
+                budget_limit=target_repo.task_budget if target_repo.task_budget is not None else task.budget_limit,
+                parent_task_id=task.id,
+            )
+            s.add(child)
+            s.flush()  # para obter child.id
+
+            # Copia steps do pipeline
+            pipeline_steps = (
+                s.query(PipelineStep)
+                .filter(PipelineStep.pipeline_id == pipeline_id)
+                .order_by(PipelineStep.position)
+                .all()
+            )
+            for ps in pipeline_steps:
+                child.steps.append(
+                    TaskStep(
+                        position=ps.position,
+                        robot_id=ps.robot_id,
+                        post_merge=ps.post_merge,
+                        status="created",
+                    )
+                )
+
+            # Task fica como "created" — aguardando aprovação humana
+
+            spawned += 1
+            log.info("task #%d spawnada de #%d: %s (repo: %s)", child.id, task.id, title, target_repo.name)
+
+        if spawned > 0:
+            _system_event(s, step, "task_spawned", {"count": spawned, "titles": [e.get("title") for e in entries[:10]]})
+            s.commit()
+
+    # Remove o arquivo após processar
+    try:
+        os.remove(tasks_file)
+    except OSError:
+        pass
 
 
 def _fail_step_hard(session_factory, step_id: int) -> None:

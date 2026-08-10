@@ -5,6 +5,17 @@ export interface Repository {
   default_branch: string;
   local_path: string | null;
   created_at: string;
+  // Configurações
+  max_attempts: number | null;
+  max_pm_decisions: number | null;
+  run_timeout: number | null;
+  task_budget: number | null;
+  cost_per_interaction: number | null;
+  risky_patterns_extra: string | null;
+  db_rule: string | null;
+  allow_auto_tasks: boolean;
+  allow_external_tasks: boolean;
+  default_pipeline_id: number | null;
 }
 
 export interface Robot {
@@ -83,6 +94,8 @@ export interface Task {
   updated_at: string;
   steps: TaskStep[];
   subtasks: SubTask[];
+  parent_task_id: number | null;
+  children: Task[];
 }
 
 export interface RunEvent {

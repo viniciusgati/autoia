@@ -87,7 +87,7 @@ def retry_subtask(
     st = next((s for s in task.subtasks if s.position == position), None)
     if st is None:
         raise HTTPException(404, "subtarefa não encontrada")
-    if st.status in (SUB_PENDING, "implementing", "verifying"):
+    if st.status == SUB_PENDING:
         raise HTTPException(400, f"subtarefa em andamento (status: {st.status})")
     if st.attempt >= settings.max_attempts:
         raise HTTPException(400, f"tentativas máximas atingidas ({settings.max_attempts})")
@@ -111,6 +111,26 @@ def retry_subtask(
         implement_step.summary = None
         implement_step.finished_at = None
         implement_step.started_at = None
+
+    # Evento de auditoria: quem fez o retry e de qual subtarefa
+    if implement_step:
+        from sqlalchemy import func
+        from ..models import RunEvent
+        max_seq = (
+            session.query(func.max(RunEvent.seq))
+            .filter(RunEvent.step_id == implement_step.id)
+            .scalar() or 0
+        )
+        session.add(RunEvent(
+            step_id=implement_step.id,
+            seq=max_seq + 1,
+            kind="human_subtask_retry",
+            payload={
+                "position": st.position,
+                "title": st.title,
+                "attempt": st.attempt + 1,
+            },
+        ))
 
     task.status = TASK_QUEUED
     task.error = None

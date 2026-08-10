@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from app.models import Task
 from app.worker import runner
 
@@ -80,7 +82,7 @@ def test_happy_path_merges_then_runs_post_merge_on_main(flow, fake_kimi):
     # a fase pós-merge rodou na main: o arquivo da tarefa existe no checkout (main)
     with flow["session_factory"]() as s:
         t = s.get(Task, task["id"])
-        checkout = t.repository.local_path
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
         branch_now = runner_git_branch(checkout)
         assert branch_now == "main"
         # o merge chegou: o commit da task está na main local
@@ -170,7 +172,7 @@ def test_no_commit_in_post_merge_phase(flow, fake_kimi):
 
     with flow["session_factory"]() as s:
         t = s.get(Task, task["id"])
-        checkout = t.repository.local_path
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
     log = runner_git_log(checkout)
     # não há commit adicional da fase pós-merge além do merge
     assert log.count("autoia: merge autoia/") == 1

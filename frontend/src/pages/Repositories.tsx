@@ -35,26 +35,33 @@ export default function Repositories() {
     <div>
       <h2>Repositórios</h2>
       <form className="form-inline" onSubmit={submit}>
-        <input
-          placeholder="nome"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          required
-        />
-        <input
-          placeholder="git@host:user/repo.git (SSH) ou caminho local"
-          value={url}
-          onChange={(e) => setUrl(e.target.value)}
-          required
-          className="wide"
-        />
-        <input
-          placeholder="branch default"
-          value={branch}
-          onChange={(e) => setBranch(e.target.value)}
-          className="short"
-        />
-        <button disabled={busy}>{busy ? "clonando…" : "adicionar"}</button>
+        <div className="form-field">
+          <label className="form-label">Nome</label>
+          <input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            required
+          />
+        </div>
+        <div className="form-field" style={{flex: 1, minWidth: 220}}>
+          <label className="form-label">URL do repositório</label>
+          <input
+            value={url}
+            onChange={(e) => setUrl(e.target.value)}
+            required
+          />
+        </div>
+        <div className="form-field">
+          <label className="form-label">Branch</label>
+          <input
+            value={branch}
+            onChange={(e) => setBranch(e.target.value)}
+            className="short"
+          />
+        </div>
+        <div className="form-actions">
+          <button type="submit" disabled={busy}>{busy ? "clonando…" : "adicionar"}</button>
+        </div>
       </form>
       {error && <p className="error">{error}</p>}
 

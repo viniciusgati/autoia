@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from ..models import (
@@ -17,11 +19,19 @@ from ..models import (
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
     Pipeline,
+    RunEvent,
     SubTask,
     Task,
     TaskStep,
 )
-from ..schemas import FeedbackCreate, RetryRequest, ReviewRequest, TaskCreate, TaskOut
+from ..schemas import (
+    BouncebackRequest,
+    FeedbackCreate,
+    RetryRequest,
+    ReviewRequest,
+    TaskCreate,
+    TaskOut,
+)
 from ..worker.runner import _pm_decide
 from .deps import get_repository_or_404, get_session, get_settings
 
@@ -91,8 +101,14 @@ def create_task(
 
 
 @router.get("", response_model=list[TaskOut])
-def list_tasks(session: Session = Depends(get_session)):
-    return _task_query(session).order_by(Task.id.desc()).limit(100).all()
+def list_tasks(
+    repository_id: int | None = None,
+    session: Session = Depends(get_session),
+):
+    q = _task_query(session)
+    if repository_id is not None:
+        q = q.filter(Task.repository_id == repository_id)
+    return q.order_by(Task.id.desc()).limit(100).all()
 
 
 @router.get("/{task_id}", response_model=TaskOut)
@@ -138,6 +154,98 @@ def review_task(
             if st.status == STEP_PENDING:
                 st.status = STEP_FAILED
                 st.error = task.error
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/bounceback", response_model=TaskOut)
+def bounceback_task(
+    task_id: int,
+    data: BouncebackRequest,
+    session: Session = Depends(get_session),
+    settings=Depends(get_settings),
+):
+    """Retorna o pipeline para uma fase anterior a partir de ``needs_review``.
+
+    Diferente do retry simples (que reabre uma fase só), o bounceback reseta
+    o step alvo **e todos os steps seguintes**, limpando veredictos e sumários.
+    A tarefa volta para ``queued`` e o worker retoma do step alvo.
+
+    Útil quando uma falha pós-merge ou um problema detectado exige reexecutar
+    a partir de uma fase anterior (ex.: voltar ao developer após deploy-tester
+    detectar que a feature não está deployada).
+    """
+    task = _get_task_or_404(session, task_id)
+    if task.status != TASK_NEEDS_REVIEW:
+        raise HTTPException(400, f"tarefa não está aguardando revisão (status: {task.status})")
+
+    target = next((st for st in task.steps if st.position == data.target_position), None)
+    if target is None:
+        raise HTTPException(404, f"fase {data.target_position} não encontrada")
+
+    # Valida que o alvo é anterior ao último step executado
+    max_executed = max(
+        (st.position for st in task.steps if st.status not in (STEP_PENDING,)),
+        default=None,
+    )
+    if max_executed is not None and data.target_position >= max_executed:
+        raise HTTPException(
+            400,
+            f"alvo (posição {data.target_position}) deve ser anterior à última fase "
+            f"executada (posição {max_executed})",
+        )
+
+    if target.attempt >= settings.max_attempts:
+        raise HTTPException(
+            400, f"tentativas máximas atingidas para a fase {data.target_position} "
+            f"({settings.max_attempts})"
+        )
+
+    # Salva nota como feedback da task
+    if data.note:
+        task.feedback = data.note
+
+    # Reseta o step alvo
+    target.attempt += 1
+    target.status = STEP_PENDING
+    target.error = None
+    target.summary = None
+    target.verdict = None
+    target.finished_at = None
+    target.started_at = None
+
+    # Reseta todos os steps seguintes
+    for st in task.steps:
+        if st.position > data.target_position:
+            st.status = STEP_PENDING
+            st.error = None
+            st.summary = None
+            st.verdict = None
+            st.finished_at = None
+            st.started_at = None
+
+    task.status = TASK_QUEUED
+    task.error = None
+
+    # Evento de auditoria
+    max_seq = (
+        session.query(func.max(RunEvent.seq))
+        .filter(RunEvent.step_id == target.id)
+        .scalar() or 0
+    )
+    session.add(RunEvent(
+        step_id=target.id,
+        seq=max_seq + 1,
+        kind="human_bounceback",
+        payload={
+            "target_position": data.target_position,
+            "reviewed_by": data.reviewed_by,
+            "note": data.note,
+            "from_status": TASK_NEEDS_REVIEW,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    ))
+
     session.commit()
     return _get_task_or_404(session, task_id)
 
@@ -199,6 +307,15 @@ def clear_feedback(task_id: int, session: Session = Depends(get_session)):
     task.feedback = None
     session.commit()
     return _get_task_or_404(session, task_id)
+
+
+@router.delete("/{task_id}", status_code=204)
+def delete_task(task_id: int, session: Session = Depends(get_session)):
+    task = _get_task_or_404(session, task_id)
+    if task.status not in ("created",):
+        raise HTTPException(400, f"só é possível excluir tasks com status 'created' (atual: {task.status})")
+    session.delete(task)
+    session.commit()
 
 
 @router.post("/{task_id}/pm/decide", response_model=TaskOut)

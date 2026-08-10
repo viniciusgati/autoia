@@ -77,6 +77,22 @@ export default function Resumo() {
     }
   };
 
+  const quickBounceback = async (task: Task) => {
+    const steps = [...task.steps].sort((a, b) => a.position - b.position);
+    const implement = steps.find((s) => s.robot?.role === "implement" && !s.post_merge);
+    const target = implement ? implement.position : 0;
+    setBusy(task.id);
+    setError("");
+    try {
+      await api.bouncebackTask(task.id, target);
+      await load();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(null);
+    }
+  };
+
   if (error) return <p className="error">{error}</p>;
 
   const ativas = tasks.filter((t) => ATIVOS.includes(t.status));
@@ -173,6 +189,11 @@ export default function Resumo() {
               <StatusBadge status={task.status} />
             </div>
             <PhaseStepper task={task} />
+            {task.subtasks && task.subtasks.length > 0 && (
+              <div className="resumo-line small" style={{marginTop: 4}}>
+                <span>Subtarefas: {task.subtasks.filter((s: any) => s.status === 'done').length}/{task.subtasks.length} concluídas</span>
+              </div>
+            )}
             <div className="resumo-line muted small">
               <span>{etapaAtualLabel(task)}</span>
               <span>
@@ -191,6 +212,12 @@ export default function Resumo() {
                 <div className="review-actions">
                   <button onClick={() => review(task, "approve")} disabled={busy === task.id}>
                     aprovar e continuar
+                  </button>
+                  <button
+                    onClick={() => quickBounceback(task)}
+                    disabled={busy === task.id}
+                  >
+                    retornar ao dev
                   </button>
                   <button
                     className="danger"
@@ -290,6 +317,18 @@ function sessionEventLine(event: RunEvent): string {
       return `fase concluída → próxima ${String(payload.next ?? "?")}`;
     case "budget_hit":
       return `orçamento estourado: ${String(payload.reason ?? "")}`;
+    case "subtask_start":
+      return `🧩 iniciando subtarefa ${Number(payload.position ?? -1) + 1}: ${String(payload.title ?? "?")}`;
+    case "subtask_implemented":
+      return `✅ subtarefa ${Number(payload.position ?? -1) + 1} implementada: ${String(payload.title ?? "?")}`;
+    case "subtask_verified":
+      return `✔️ subtarefa ${Number(payload.position ?? -1) + 1} verificada: ${String(payload.title ?? "?")}`;
+    case "subtask_failed":
+      return `❌ subtarefa ${Number(payload.position ?? -1) + 1} falhou: ${String(payload.reason ?? "")}`;
+    case "subtask_bounce_back":
+      return `↩️ bounce-back de subtarefas: ${String(payload.positions ?? "")}`;
+    case "human_subtask_retry":
+      return `👤 retry manual da subtarefa ${Number(payload.position ?? -1) + 1}: ${String(payload.title ?? "?")}`;
     case "system":
       return String(payload.reason ?? JSON.stringify(payload)).slice(0, 140);
     default:

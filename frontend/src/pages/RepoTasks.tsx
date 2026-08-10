@@ -1,14 +1,15 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import StatusBadge from "../components/StatusBadge";
-import type { Pipeline, Repository, Task } from "../types";
+import type { Pipeline, Task } from "../types";
 
-export default function Tasks() {
+export default function RepoTasks() {
+  const { repoId: repoIdStr } = useParams<{ repoId: string }>();
+  const repoId = Number(repoIdStr);
+
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [repos, setRepos] = useState<Repository[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
-  const [repositoryId, setRepositoryId] = useState("");
   const [pipelineId, setPipelineId] = useState("");
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -16,23 +17,26 @@ export default function Tasks() {
   const [error, setError] = useState("");
 
   const load = () =>
-    Promise.all([api.listTasks(), api.listRepositories(), api.listPipelines()])
-      .then(([t, r, p]) => {
+    Promise.all([api.listTasks(repoId), api.listPipelines()])
+      .then(([t, p]) => {
         setTasks(t);
-        setRepos(r);
         setPipelines(p);
+        setError("");
       })
       .catch((e) => setError(String(e)));
 
   useEffect(() => {
     load();
-  }, []);
+    const timer = setInterval(load, 5000);
+    return () => clearInterval(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [repoId]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     try {
       await api.createTask({
-        repository_id: Number(repositoryId),
+        repository_id: repoId,
         pipeline_id: Number(pipelineId),
         title,
         description,
@@ -57,20 +61,10 @@ export default function Tasks() {
 
   return (
     <div>
-      <h2>Tarefas</h2>
+      <h2>Tarefas do projeto</h2>
+
       <form className="form-stack" onSubmit={submit}>
         <div className="form-inline">
-          <div className="form-field" style={{flex: 1, minWidth: 160}}>
-            <label className="form-label">Repositório</label>
-            <select value={repositoryId} onChange={(e) => setRepositoryId(e.target.value)} required>
-              <option value="">— selecione —</option>
-              {repos.map((repo) => (
-                <option key={repo.id} value={repo.id}>
-                  {repo.name}
-                </option>
-              ))}
-            </select>
-          </div>
           <div className="form-field" style={{flex: 1, minWidth: 160}}>
             <label className="form-label">Pipeline</label>
             <select value={pipelineId} onChange={(e) => setPipelineId(e.target.value)} required>
@@ -94,27 +88,35 @@ export default function Tasks() {
         </div>
         <div className="form-field">
           <label className="form-label">Título da tarefa</label>
-          <input value={title} onChange={(e) => setTitle(e.target.value)} required />
+          <input
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            required
+          />
         </div>
         <div className="form-field">
           <label className="form-label">Descrição</label>
-          <textarea value={description} onChange={(e) => setDescription(e.target.value)} rows={3} />
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={3}
+          />
         </div>
         <div className="form-actions">
           <button type="submit">criar tarefa</button>
         </div>
       </form>
+
       {error && <p className="error">{error}</p>}
 
       {tasks.length === 0 ? (
-        <p className="muted">Nenhuma tarefa.</p>
+        <p className="muted">Nenhuma tarefa neste projeto.</p>
       ) : (
         <table>
           <thead>
             <tr>
               <th>ID</th>
               <th>Título</th>
-              <th>Repo</th>
               <th>Status</th>
               <th>Custo (US$)</th>
               <th></th>
@@ -125,9 +127,8 @@ export default function Tasks() {
               <tr key={task.id}>
                 <td>{task.id}</td>
                 <td>
-                  <Link to={`/tasks/${task.id}`}>{task.title}</Link>
+                  <Link to={`/${repoId}/tasks/${task.id}`}>{task.title}</Link>
                 </td>
-                <td>{task.repository_id}</td>
                 <td>
                   <StatusBadge status={task.status} />
                 </td>

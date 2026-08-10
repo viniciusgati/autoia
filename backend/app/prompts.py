@@ -30,6 +30,35 @@ No seu resumo/final, liste os comandos que executou e as saídas relevantes (tre
 reais). Isso é auditado e usado pelas próximas fases — sem evidência, a fase anterior
 não tem como saber o que de fato aconteceu."""
 
+# Ferramenta de criação de tarefas filhas.
+TASK_SPAWN_TOOL = """### Ferramenta: criar tarefas
+
+Se esta tarefa pode ou deve ser decomposta em tarefas menores (ex.: uma feature complexa
+que naturalmente se divide em várias entregas), crie um arquivo `autoia_tasks.json` na
+raiz do projeto. O sistema lerá este arquivo automaticamente ao final da fase e criará
+as tarefas. Use APENAS se a decomposição for realmente necessária — não crie tarefas
+triviais ou de 1 linha.
+
+Formato do arquivo (JSON array):
+```json
+[
+  {
+    "title": "Título curto e descritivo",
+    "description": "Descrição detalhada do que precisa ser feito",
+    "kind": "feature",
+    "repository": "nome-do-repo"
+  }
+]
+```
+
+- `title` (obrigatório): nome da tarefa, claro e acionável
+- `description` (opcional): detalhes, contexto, critérios de aceite
+- `kind` (opcional, default "feature"): "feature", "bug", "issue" ou "chore"
+- `repository` (opcional): nome de outro repositório cadastrado no autoia. Se omitido,
+  a tarefa é criada neste mesmo repositório. Use para cross-project: ex.: criar task de
+  documentação no repo "docs" quando uma feature é implementada no repo "api".
+"""
+
 # Caderno de trabalho: o worker gera autoia_handoff.md no checkout antes de cada fase
 # com o histórico COMPLETO das fases anteriores + diff + instrução da fase atual.
 HANDOFF_READ = """## Caderno de trabalho (leia antes de começar)
@@ -289,4 +318,5 @@ def build_prompt(
         parts.append(HANDOFF_DOCUMENT)
     parts.append(EVIDENCE)
     parts.append(GUARDRAIL_INSTRUCTIONS)
+    parts.append(TASK_SPAWN_TOOL)
     return "\n\n".join(p for p in parts if p)

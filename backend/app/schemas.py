@@ -14,6 +14,34 @@ class RepositoryCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     url: str = Field(min_length=1, max_length=500)
     default_branch: str = Field(default="main", max_length=100)
+    # Configurações opcionais
+    max_attempts: int | None = None
+    max_pm_decisions: int | None = None
+    run_timeout: int | None = None
+    task_budget: float | None = None
+    cost_per_interaction: float | None = None
+    risky_patterns_extra: str | None = None
+    db_rule: str | None = None
+    allow_auto_tasks: bool = False
+    allow_external_tasks: bool = False
+    default_pipeline_id: int | None = None
+
+
+class RepositoryUpdate(BaseModel):
+    """Edição de configurações de um repositório existente (todos opcionais)."""
+    name: str | None = Field(default=None, min_length=1, max_length=200)
+    url: str | None = Field(default=None, min_length=1, max_length=500)
+    default_branch: str | None = Field(default=None, max_length=100)
+    max_attempts: int | None = None
+    max_pm_decisions: int | None = None
+    run_timeout: int | None = None
+    task_budget: float | None = None
+    cost_per_interaction: float | None = None
+    risky_patterns_extra: str | None = None
+    db_rule: str | None = None
+    allow_auto_tasks: bool | None = None
+    allow_external_tasks: bool | None = None
+    default_pipeline_id: int | None = None
 
 
 class RepositoryOut(BaseModel):
@@ -25,6 +53,17 @@ class RepositoryOut(BaseModel):
     default_branch: str
     local_path: str | None
     created_at: datetime
+    # Configurações
+    max_attempts: int | None = None
+    max_pm_decisions: int | None = None
+    run_timeout: int | None = None
+    task_budget: float | None = None
+    cost_per_interaction: float | None = None
+    risky_patterns_extra: str | None = None
+    db_rule: str | None = None
+    allow_auto_tasks: bool = False
+    allow_external_tasks: bool = False
+    default_pipeline_id: int | None = None
 
 
 # ---------- Robot ----------
@@ -170,8 +209,10 @@ class TaskOut(BaseModel):
     error: str | None
     created_at: datetime
     updated_at: datetime
+    parent_task_id: int | None = None
     steps: list[TaskStepOut] = []
     subtasks: list[SubTaskOut] = []
+    children: list["TaskOut"] = []
 
 
 class FeedbackCreate(BaseModel):
@@ -188,6 +229,12 @@ class ReviewRequest(BaseModel):
     action: Literal["approve", "cancel"]
     extra_budget: float = Field(default=5.0, ge=0)
     note: str | None = None
+
+
+class BouncebackRequest(BaseModel):
+    target_position: int  # posição do step para onde voltar (ex.: 2 = implement)
+    note: str | None = Field(default=None, max_length=2000)
+    reviewed_by: str = "humano"  # identificação de quem confirmou
 
 
 # ---------- Eventos ----------

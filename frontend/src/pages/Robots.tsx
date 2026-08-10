@@ -33,15 +33,22 @@ export default function Robots() {
         <code>{"{task_description}"}</code> e <code>{"{step_context}"}</code>.
       </p>
       <form className="form-stack" onSubmit={submit}>
-        <input placeholder="nome (developer, qa, merger…)" value={name} onChange={(e) => setName(e.target.value)} required />
-        <textarea
-          placeholder="missão / prompt do robô…"
-          value={mission}
-          onChange={(e) => setMission(e.target.value)}
-          rows={4}
-          required
-        />
-        <button>criar robô</button>
+        <div className="form-field">
+          <label className="form-label">Nome do robô</label>
+          <input value={name} onChange={(e) => setName(e.target.value)} required />
+        </div>
+        <div className="form-field">
+          <label className="form-label">Missão / prompt</label>
+          <textarea
+            value={mission}
+            onChange={(e) => setMission(e.target.value)}
+            rows={4}
+            required
+          />
+        </div>
+        <div className="form-actions">
+          <button type="submit">criar robô</button>
+        </div>
       </form>
       {error && <p className="error">{error}</p>}
 

@@ -98,7 +98,8 @@ def test_needs_work_content_reaches_bounce_back(flow, fake_kimi):
     task = flow["task"]
 
     with flow["session_factory"]() as s:
-        checkout = s.get(Task, task["id"]).repository.local_path
+        t = s.get(Task, task["id"])
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
 
     _execute(flow, _run_claim(flow))  # po conclui
     _execute(flow, _run_claim(flow))  # qa NEEDS_WORK
@@ -193,7 +194,8 @@ def test_agents_md_written_and_never_committed(flow, fake_kimi):
     task = flow["task"]
 
     with flow["session_factory"]() as s:
-        checkout = s.get(Task, task["id"]).repository.local_path
+        t = s.get(Task, task["id"])
+        checkout = os.path.join(settings.workspace_dir, str(t.repository.id), f"task_{t.id}")
 
     # roda o fluxo completo (todas as fases + merge + pós-merge)
     while True:

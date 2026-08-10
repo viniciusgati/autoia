@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base, utcnow
@@ -40,6 +40,20 @@ class Repository(Base):
     default_branch: Mapped[str] = mapped_column(String(100), default="main")
     local_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    # Configurações que sobrescrevem os defaults globais (AUTOIA_*)
+    max_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    max_pm_decisions: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    run_timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    task_budget: Mapped[float | None] = mapped_column(Float, nullable=True)
+    cost_per_interaction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risky_patterns_extra: Mapped[str | None] = mapped_column(Text, nullable=True)
+    db_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Controle de features
+    allow_auto_tasks: Mapped[bool] = mapped_column(default=False)
+    allow_external_tasks: Mapped[bool] = mapped_column(default=False)
+    default_pipeline_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("pipelines.id"), nullable=True)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="repository")
 
@@ -103,9 +117,12 @@ class Task(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+    parent_task_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tasks.id"), nullable=True)
 
     repository: Mapped[Repository] = relationship(back_populates="tasks")
     pipeline: Mapped[Pipeline] = relationship()
+    parent: Mapped["Task | None"] = relationship(remote_side="Task.id", back_populates="children")
+    children: Mapped[list["Task"]] = relationship(back_populates="parent")
     steps: Mapped[list["TaskStep"]] = relationship(
         back_populates="task",
         order_by="TaskStep.position",

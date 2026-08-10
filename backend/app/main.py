@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
@@ -211,6 +212,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def health():
         return {"status": "ok"}
 
+    @app.get("/api/worker/status")
+    def worker_status():
+        hb = os.path.join(settings.workspace_dir, "worker.heartbeat")
+        try:
+            mtime = os.path.getmtime(hb)
+            age = time.time() - mtime
+        except OSError:
+            return {"alive": False, "last_heartbeat_sec": None}
+        return {"alive": age < 15, "last_heartbeat_sec": round(age, 1)}
+
     if settings.frontend_dist and os.path.isdir(settings.frontend_dist):
         assets = os.path.join(settings.frontend_dist, "assets")
         if os.path.isdir(assets):
@@ -238,12 +249,29 @@ def run_api() -> None:
 
 
 def run_worker() -> None:
+    import argparse
+    import threading
+
+    parser = argparse.ArgumentParser(description="autoia worker")
+    parser.add_argument("--workers", type=int, default=1, help="número de workers (threads)")
+    args = parser.parse_known_args()[0]  # ignora args desconhecidos (uvicorn pode injetar)
+
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
     settings = Settings()
     settings.ensure_dirs()
-    worker_loop(settings)
+
+    if args.workers <= 1:
+        worker_loop(settings)
+    else:
+        threads = []
+        for i in range(args.workers):
+            t = threading.Thread(target=worker_loop, args=(settings,), daemon=True, name=f"worker-{i}")
+            t.start()
+            threads.append(t)
+        for t in threads:
+            t.join()
 
 
 if __name__ == "__main__":

@@ -1,88 +1,14 @@
 import { FormEvent, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
-import PhaseStepper from "../components/PhaseStepper";
+import PhasePanel from "../components/PhasePanel";
 import StatusBadge from "../components/StatusBadge";
+import Timeline from "../components/Timeline";
 import { formatToolCall } from "../lib/events";
-import Markdown, { inlineMarkdown } from "../lib/markdown";
+import Markdown from "../lib/markdown";
 import type { RunEvent, Task, TaskStep } from "../types";
 
-/** Página de detalhe da task: o pipeline de fases (cards horizontais) no topo; ao
- * clicar numa fase, aparece embaixo "O que aconteceu" (chat com os papéis
- * worker/kimi/ferramenta) + o relatório da fase. Quando aguardando revisão humana,
- * o header fixo avisa e leva ao card. */
-
-const FILTROS = [
-  { id: "todos", label: "todos" },
-  { id: "comandos", label: "comandos" },
-  { id: "textos", label: "textos" },
-  { id: "alertas", label: "alertas" },
-] as const;
-
-type Filtro = (typeof FILTROS)[number]["id"];
-
-const KINDS_COMANDOS = new Set(["tool_call", "tool_result"]);
-const KINDS_ALERTAS = new Set([
-  "guardrail_blocked",
-  "budget_hit",
-  "bounce_back",
-  "pm_decision",
-  "pm_skip",
-  "system",
-  "phase_done",
-  "merged",
-  "merge_failed",
-  "arch_metric",
-  "post_merge_failed",
-  "worker_recovered",
-]);
-
-function matchFiltro(kind: string, filtro: Filtro): boolean {
-  if (filtro === "comandos") return KINDS_COMANDOS.has(kind);
-  if (filtro === "textos") return kind === "assistant_text" || kind === "prompt";
-  if (filtro === "alertas") return KINDS_ALERTAS.has(kind);
-  return true;
-}
-
-function eventSummary(event: RunEvent): string {
-  const payload = event.payload as Record<string, unknown>;
-  switch (event.kind) {
-    case "assistant_text":
-      return String(payload.content ?? "");
-    case "tool_call":
-      return formatToolCall(event);
-    case "tool_result": {
-      const content = String(payload.content ?? "");
-      return content.length > 300 ? content.slice(0, 300) + "…" : content;
-    }
-    case "guardrail_blocked":
-      return `⛔ guardrail: ${String(payload.detail ?? payload.pattern ?? "")}`;
-    case "pm_decision":
-      return `🤖 PM: ${String(payload.action ?? "")} — ${String(payload.reason ?? "")}`;
-    case "bounce_back":
-      return `↩️ voltou da fase ${String(payload.from_position ?? "?")}: ${String(
-        payload.reason ?? "",
-      )}`;
-    case "phase_done":
-      return `✅ fase concluída → próxima ${String(payload.next ?? "?")}`;
-    case "merged":
-      return `🔀 merge realizado: ${String(payload.detail ?? "")}`;
-    case "merge_failed":
-      return `⚠️ merge falhou: ${String(payload.detail ?? "")}`;
-    case "budget_hit":
-      return `💰 orçamento estourado: ${String(payload.reason ?? "")}`;
-    case "arch_metric":
-      return `📐 arquitetura ${String(payload.level ?? "?")} (${String(payload.score ?? "?")}/100)`;
-    case "prompt":
-      return `prompt da fase (${String(payload.robot ?? "robô")})`;
-    default:
-      return JSON.stringify(payload);
-  }
-}
-
-function eventFull(event: RunEvent): string {
-  return JSON.stringify(event.payload, null, 2);
-}
+/** Página de detalhe da task com timeline vertical e painel lateral. */
 
 function faseAtual(task: Task): TaskStep | null {
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
@@ -108,154 +34,25 @@ function etapaAtualLabel(task: Task): string {
   return `Fase ${step.position}/${steps.length} · ${nome} (tentativa ${step.attempt}) · ${estado}`;
 }
 
-interface Tentativa {
-  attempt: number | null;
-  eventos: RunEvent[];
-}
-
-/** Separa os eventos da fase por tentativa de execução, usando os marcadores
- * `attempt_started` gravados pelo worker (bounce-back re-executa o mesmo step). */
-function separarTentativas(eventos: RunEvent[]): Tentativa[] {
-  const tentativas: Tentativa[] = [];
-  let atual: RunEvent[] = [];
-  let attempt: number | null = null;
-  const flush = () => {
-    if (atual.length) tentativas.push({ attempt, eventos: atual });
-    atual = [];
-    attempt = null;
-  };
-  for (const e of eventos) {
-    if (e.kind === "attempt_started") {
-      flush();
-      attempt = (e.payload as { attempt?: number }).attempt ?? null;
-      continue;
-    }
-    atual.push(e);
-  }
-  flush();
-  return tentativas;
-}
-
-/** Uma "mensagem" do chat da etapa: bolha para worker/kimi/ferramenta, linha para marcadores. */
-function ChatMessage({
-  event,
-  isOpen,
-  onToggle,
-}: {
-  event: RunEvent;
-  isOpen: boolean;
-  onToggle: () => void;
-}) {
-  const payload = event.payload as Record<string, unknown>;
-  const hora = new Date(event.ts).toLocaleTimeString();
-
-  if (event.kind === "prompt") {
-    return (
-      <div className="chat-msg">
-        <span className="chat-avatar chat-avatar-worker">w</span>
-        <div className="chat-bubble">
-          <div className="chat-who">
-            worker pede <span className="muted small">· {hora}</span>
-          </div>
-          <details className="chat-prompt">
-            <summary>
-              prompt da fase — {String(payload.robot ?? "robô")} ·{" "}
-              {String(payload.prompt ?? "").length} chars
-            </summary>
-            <pre className="chat-body">{String(payload.prompt ?? "")}</pre>
-          </details>
-        </div>
-      </div>
-    );
-  }
-
-  if (event.kind === "assistant_text") {
-    const conteudo = String(payload.content ?? "");
-    return (
-      <div className="chat-msg">
-        <span className="chat-avatar chat-avatar-kimi">k</span>
-        <div className="chat-bubble chat-bubble-kimi">
-          <div className="chat-who">
-            kimi diz <span className="muted small">· {hora}</span>
-            {event.cost > 0 ? <span className="muted small"> · +{event.cost.toFixed(2)} US$</span> : null}
-          </div>
-          <div className="chat-body">
-            {conteudo ? <Markdown text={conteudo} /> : "(sem texto)"}
-          </div>
-          <button className="link-btn" onClick={onToggle}>
-            {isOpen ? "recolher" : "ver JSON"}
-          </button>
-          {isOpen && <pre className="event-payload">{eventFull(event)}</pre>}
-        </div>
-      </div>
-    );
-  }
-
-  if (event.kind === "tool_call") {
-    return (
-      <div className="chat-msg">
-        <span className="chat-avatar chat-avatar-tool">⌘</span>
-        <div className="chat-bubble">
-          <div className="chat-who">
-            kimi executa <span className="muted small">· {hora}</span>
-            {event.cost > 0 ? <span className="muted small"> · +{event.cost.toFixed(2)} US$</span> : null}
-          </div>
-          <div className="chat-body mono">{formatToolCall(event)}</div>
-          <button className="link-btn" onClick={onToggle}>
-            {isOpen ? "recolher" : "ver JSON"}
-          </button>
-          {isOpen && <pre className="event-payload">{eventFull(event)}</pre>}
-        </div>
-      </div>
-    );
-  }
-
-  if (event.kind === "tool_result") {
-    const content = String(payload.content ?? "");
-    return (
-      <div className="chat-msg">
-        <span className="chat-avatar chat-avatar-tool">→</span>
-        <div className="chat-bubble">
-          <div className="chat-who">
-            resultado <span className="muted small">· {hora}</span>
-          </div>
-          <div className="chat-body chat-body-result">
-            {content.length > 400 ? content.slice(0, 400) + "…" : content || "(vazio)"}
-          </div>
-          <button className="link-btn" onClick={onToggle}>
-            {isOpen ? "recolher" : "ver completo"}
-          </button>
-          {isOpen && <pre className="event-payload">{eventFull(event)}</pre>}
-        </div>
-      </div>
-    );
-  }
-
-  // marcadores (system, phase_done, merged, guardrail, ...)
-  return (
-    <div className={`chat-marker chat-marker-${event.kind}`}>
-      <span className="mono time">{hora}</span> {eventSummary(event)}
-    </div>
-  );
-}
-
 export default function TaskDetail() {
-  const { id } = useParams();
-  const taskId = Number(id);
+  const { repoId, taskId: taskIdStr } = useParams<{ repoId: string; taskId: string }>();
+  const taskId = Number(taskIdStr);
+  const repoIdNum = Number(repoId);
+
   const [task, setTask] = useState<Task | null>(null);
-  const [selected, setSelected] = useState<number | null>(null);
-  const [events, setEvents] = useState<RunEvent[]>([]);
-  const [log, setLog] = useState("");
-  const [view, setView] = useState<"chat" | "transcript">("chat");
-  const [filtro, setFiltro] = useState<Filtro>("todos");
-  const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [panelStep, setPanelStep] = useState<TaskStep | null>(null);
   const [runningToolCall, setRunningToolCall] = useState<RunEvent | null>(null);
+  const [runningSubtask, setRunningSubtask] = useState<{position: number; title: string} | null>(null);
   const [error, setError] = useState("");
   const [extraBudget, setExtraBudget] = useState(5);
-  const [cancelNote, setCancelNote] = useState("");
+  const [cancelNote] = useState("");
   const [feedbackText, setFeedbackText] = useState("");
   const [feedbackBusy, setFeedbackBusy] = useState(false);
   const [pmBusy, setPmBusy] = useState(false);
+  const [bouncebackTarget, setBouncebackTarget] = useState(0);
+  const [bouncebackNote, setBouncebackNote] = useState("");
+  const [reviewedBy, setReviewedBy] = useState("humano");
+  const [bouncebackBusy, setBouncebackBusy] = useState(false);
 
   useEffect(() => {
     const load = () =>
@@ -264,17 +61,33 @@ export default function TaskDetail() {
         .then((t) => {
           setTask(t);
           setFeedbackText((current) => current || t.feedback || "");
-          if (t.steps.length > 0) {
-            setSelected((current) => current ?? t.steps[0].id);
-          }
+          // Só inicializa o alvo na primeira carga
+          setBouncebackTarget((prev) => prev || suggestedBouncebackTarget(t));
           const running = t.steps.find((s) => s.status === "running");
           if (running) {
             api
               .listEvents(running.id, "tool_call", "desc")
               .then((evs) => setRunningToolCall(evs[0] ?? null))
               .catch(() => setRunningToolCall(null));
+            // Subtarefa atual: busca o último evento subtask_start
+            if (t.subtasks && t.subtasks.length > 0) {
+              api
+                .listEvents(running.id, "subtask_start", "desc")
+                .then((evs) => {
+                  if (evs.length > 0) {
+                    const p = evs[0].payload as {position?: number; title?: string};
+                    setRunningSubtask({position: p.position ?? -1, title: p.title ?? "?"});
+                  } else {
+                    setRunningSubtask(null);
+                  }
+                })
+                .catch(() => setRunningSubtask(null));
+            } else {
+              setRunningSubtask(null);
+            }
           } else {
             setRunningToolCall(null);
+            setRunningSubtask(null);
           }
         })
         .catch((e) => setError(String(e)));
@@ -283,22 +96,20 @@ export default function TaskDetail() {
     return () => clearInterval(timer);
   }, [taskId]);
 
-  useEffect(() => {
-    if (selected == null) return;
-    const load = () => {
-      api.listEvents(selected).then(setEvents).catch(() => undefined);
-      api.getLog(selected).then(setLog).catch(() => undefined);
-    };
-    load();
-    const timer = setInterval(load, 1500);
-    return () => clearInterval(timer);
-  }, [selected]);
-
   const refresh = () => api.getTask(taskId).then(setTask).catch((e) => setError(String(e)));
 
   const retry = async (position: number) => {
     try {
       await api.retryStep(taskId, position, feedbackText.trim() || undefined);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const subtaskRetry = async (position: number) => {
+    try {
+      await api.retrySubtask(taskId, position);
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -340,6 +151,38 @@ export default function TaskDetail() {
     }
   };
 
+  /** Sugere a fase alvo para bounceback:
+   *  - Se há step com falha, volta para o step anterior a ele.
+   *  - Se é falha pós-merge, volta para a fase implement (developer).
+   *  - Fallback: primeiro step pré-merge com status done. */
+  function suggestedBouncebackTarget(task: Task): number {
+    const steps = [...task.steps].sort((a, b) => a.position - b.position);
+    const failedStep = steps.find((s) => s.status === "failed" || s.status === "guardrail_blocked");
+    if (failedStep) {
+      const prev = steps.filter((s) => s.position < failedStep.position).pop();
+      return prev ? prev.position : failedStep.position;
+    }
+    // Pós-merge: sugere o implement (developer)
+    const implement = steps.find((s) => s.robot?.role === "implement" && !s.post_merge);
+    if (implement) return implement.position;
+    // Fallback: primeiro step pré-merge com status done
+    const firstDone = steps.find((s) => s.status === "done" && !s.post_merge);
+    return firstDone ? firstDone.position : 0;
+  }
+
+  const bounceback = async (event: FormEvent) => {
+    event.preventDefault();
+    setBouncebackBusy(true);
+    try {
+      await api.bouncebackTask(taskId, bouncebackTarget, bouncebackNote.trim() || undefined, reviewedBy.trim() || "humano");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBouncebackBusy(false);
+    }
+  };
+
   const pmDecide = async () => {
     setPmBusy(true);
     try {
@@ -356,41 +199,43 @@ export default function TaskDetail() {
     document.getElementById("revisao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  const toggleExpanded = (eventId: number) => {
-    setExpanded((current) => {
-      const next = new Set(current);
-      if (next.has(eventId)) next.delete(eventId);
-      else next.add(eventId);
-      return next;
-    });
-  };
-
-  const subtaskRetry = async (position: number) => {
-    try {
-      await api.retrySubtask(taskId, position);
-      await refresh();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   if (error) return <p className="error">{error}</p>;
   if (!task) return <p>Carregando…</p>;
 
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
-  const selectedStep = steps.find((s) => s.id === selected) ?? null;
-  const active = ["queued", "in_progress", "needs_review"].includes(task.status);
-  const pmCandidates = ["failed", "blocked", "needs_review"].includes(task.status);
   const runningStep = steps.find((s) => s.status === "running") ?? null;
-  const eventosVisiveis = events.filter((e) => matchFiltro(e.kind, filtro));
+  const pmCandidates = ["failed", "blocked", "needs_review"].includes(task.status);
+
+  function subtaskAlert(task: Task): {message: string; level: "critical" | "warning"} | null {
+    const subs = task.subtasks || [];
+    const failed = subs.find((s) => s.status === "failed");
+    if (failed) {
+      return {
+        message: `Subtarefa ${failed.position + 1} "${failed.title}" falhou: ${failed.error || "sem detalhes"}`,
+        level: "critical",
+      };
+    }
+    const stuck = subs.find((s) => (s.status === "implementing" || s.status === "verifying") && s.error);
+    if (stuck) {
+      return {
+        message: `Subtarefa ${stuck.position + 1} "${stuck.title}" com erro: ${stuck.error}`,
+        level: "warning",
+      };
+    }
+    return null;
+  }
+
+  const subAlert = subtaskAlert(task);
 
   return (
     <div>
       <p>
-        <Link to="/tasks">← tarefas</Link>
+        <Link to={`/${repoId}`}>← projeto</Link>
+        {" · "}
+        <Link to={`/${repoId}/tasks`}>tarefas</Link>
       </p>
 
-      {/* Header fixo: estado da task sempre visível */}
+      {/* Header fixo */}
       <div className="task-sticky">
         <h2>
           #{task.id} {task.title}
@@ -406,13 +251,44 @@ export default function TaskDetail() {
           </span>
           <span className="muted">decisões PM: {task.pm_decisions}</span>
         </div>
-        <PhaseStepper task={task} />
+        {task.subtasks && task.subtasks.length > 0 && (
+          <div className="meta" style={{ marginTop: 4 }}>
+            <span>
+              Subtarefas:{" "}
+              <strong>
+                {task.subtasks.filter((s) => s.status === "done").length}/{task.subtasks.length}
+              </strong>{" "}
+              concluídas
+            </span>
+            {(() => {
+              const counts: Record<string, number> = {};
+              for (const s of task.subtasks) {
+                if (s.status !== "done") {
+                  counts[s.status] = (counts[s.status] || 0) + 1;
+                }
+              }
+              return Object.entries(counts).map(([status, n]) => (
+                <span key={status} className="muted small">
+                  {n} <StatusBadge status={status} />
+                </span>
+              ));
+            })()}
+          </div>
+        )}
         {runningStep && (
           <div className="task-live">
             <div>
               <span className="session-label">Etapa atual</span>
               <span className="task-live-value">{etapaAtualLabel(task)}</span>
             </div>
+            {runningSubtask && (
+              <div>
+                <span className="session-label">Subtarefa atual</span>
+                <span className="task-live-value">
+                  {runningSubtask.position + 1}/{task.subtasks?.length ?? "?"} · {runningSubtask.title}
+                </span>
+              </div>
+            )}
             <div>
               <span className="session-label">Comando atual</span>
               <span className="task-live-value mono">
@@ -427,48 +303,132 @@ export default function TaskDetail() {
             <button onClick={scrollToReview}>ir para a revisão ↓</button>
           </div>
         )}
+        {subAlert && (
+          <div className={`sticky-alert ${subAlert.level === "critical" ? "sticky-alert-critical" : ""}`}>
+            <span>{subAlert.level === "critical" ? "⛔" : "⚠"} {subAlert.message}</span>
+          </div>
+        )}
       </div>
 
       {task.error && <div className="error">{task.error}</div>}
 
-      {task.status === "needs_review" && (
+      {/* Timeline vertical das fases */}
+      <h3>Pipeline</h3>
+      <Timeline
+        steps={steps}
+        selectedId={panelStep?.id ?? null}
+        onSelect={(id) => {
+          const step = steps.find((s) => s.id === id) ?? null;
+          setPanelStep(step);
+        }}
+        onRetry={retry}
+      />
+
+      {/* Painel lateral */}
+      <PhasePanel
+        step={panelStep}
+        repoId={repoIdNum}
+        taskId={taskId}
+        taskStatus={task.status}
+        onClose={() => setPanelStep(null)}
+        onRetry={retry}
+      />
+
+      {/* Revisão humana */}
+      {task.status === "needs_review" && (() => {
+        const sorted = [...task.steps].sort((a, b) => a.position - b.position);
+        const lastExecuted = sorted.filter((s) => s.status !== "pending").pop();
+        const maxPos = lastExecuted ? lastExecuted.position : sorted.length - 1;
+        // Candidatos: fases anteriores à última executada (exclui pós-merge se falha foi nelas)
+        const candidates = sorted.filter(
+          (s) => s.position < maxPos && !(lastExecuted?.post_merge && s.post_merge)
+        );
+        return (
         <div className="card warn" id="revisao-humana">
           <div className="card-title">
-            <strong>Aguardando revisão humana</strong>
+            <strong>⚠ Aguardando revisão humana</strong>
           </div>
-          <p className="muted small prewrap">
-            O pipeline parou e precisa de você. <strong>Aprovar</strong> continua a
-            execução (a próxima fase pendente roda; adicione orçamento se o limite estiver
-            perto). <strong>Cancelar</strong> encerra a tarefa. Se o erro for de uma fase
-            específica, use "repetir fase" abaixo.
-          </p>
-          <form className="form-inline" onSubmit={(e) => review(e, "approve")}>
-            <label>
-              + orçamento (US$):{" "}
-              <input
-                type="number"
-                min={0}
-                step={0.5}
-                value={extraBudget}
-                onChange={(e) => setExtraBudget(Number(e.target.value))}
-                className="short"
-              />
-            </label>
-            <button type="submit">aprovar e continuar</button>
-          </form>
-          <form className="form-inline" onSubmit={(e) => review(e, "cancel")}>
-            <input
-              placeholder="motivo da recusa (opcional)"
-              value={cancelNote}
-              onChange={(e) => setCancelNote(e.target.value)}
-            />
-            <button type="submit" className="danger">
-              cancelar tarefa
-            </button>
-          </form>
-        </div>
-      )}
+          {task.error && (
+            <div style={{ marginBottom: 12 }}>
+              <div className="form-label">Motivo da parada</div>
+              <pre className="review-error">{task.error}</pre>
+            </div>
+          )}
 
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12, marginBottom: 12 }}>
+            <div className="form-label" style={{ marginBottom: 4 }}>
+              ▸ Retornar pipeline para a fase:
+            </div>
+            <form onSubmit={bounceback}>
+              <div className="form-field" style={{ marginBottom: 8 }}>
+                <select
+                  value={bouncebackTarget}
+                  onChange={(e) => setBouncebackTarget(Number(e.target.value))}
+                >
+                  {candidates.map((s) => (
+                    <option key={s.position} value={s.position}>
+                      F{s.position} · {s.robot?.name ?? "?"} ({s.robot?.role ?? "?"})
+                      {s.attempt > 1 ? ` · tent. ${s.attempt}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="form-inline" style={{ gap: 8, marginBottom: 8 }}>
+                <div className="form-field" style={{ flex: 1 }}>
+                  <label className="form-label">Nota (opcional)</label>
+                  <input
+                    value={bouncebackNote}
+                    onChange={(e) => setBouncebackNote(e.target.value)}
+                    placeholder="ex.: feature não foi deployada, revisar implementação"
+                  />
+                </div>
+                <div className="form-field" style={{ maxWidth: 160 }}>
+                  <label className="form-label">Revisado por</label>
+                  <input
+                    value={reviewedBy}
+                    onChange={(e) => setReviewedBy(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div className="form-inline" style={{ gap: 8 }}>
+                <button type="submit" disabled={bouncebackBusy}>
+                  {bouncebackBusy ? "retornando…" : "confirmar retorno"}
+                </button>
+                <button
+                  type="button"
+                  className="danger"
+                  onClick={(e) => review(e as unknown as FormEvent, "cancel")}
+                >
+                  cancelar tarefa
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
+            <div className="form-label" style={{ marginBottom: 4 }}>
+              — ou —
+            </div>
+            <form className="form-inline" onSubmit={(e) => review(e, "approve")}>
+              <div className="form-field">
+                <label className="form-label">Orçamento extra (US$)</label>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.5}
+                  value={extraBudget}
+                  onChange={(e) => setExtraBudget(Number(e.target.value))}
+                  className="short"
+                />
+              </div>
+              <button type="submit">aprovar e continuar</button>
+            </form>
+          </div>
+        </div>
+        );
+      })()}
+
+      {/* PM decide */}
       {pmCandidates && (
         <div className="card">
           <div className="card-title">
@@ -481,55 +441,8 @@ export default function TaskDetail() {
         </div>
       )}
 
-      {/* Pipeline de fases: cards horizontais clicáveis */}
-      <h3>Fases do pipeline</h3>
-      <div className="phase-cards">
-        {steps.map((step) => {
-          const estado =
-            step.status === "running"
-              ? "running"
-              : step.status === "failed" || step.status === "guardrail_blocked"
-                ? "failed"
-                : step.status === "done"
-                  ? "done"
-                  : "pending";
-          return (
-            <button
-              key={step.id}
-              className={`phase-card phase-card-${estado} ${selected === step.id ? "phase-card-selected" : ""}`}
-              onClick={() => setSelected(step.id)}
-              title={`Fase ${step.position} · ${step.robot?.name ?? "?"} · ${step.status} · tentativa ${step.attempt}`}
-            >
-              <span className="phase-card-pos">{step.position}</span>
-              <span className="phase-card-robot">{step.robot?.name ?? "?"}</span>
-              <StatusBadge status={step.status} />
-              <span className="phase-card-meta">
-                tentativa {step.attempt}
-                {step.verdict ? ` · ${step.verdict}` : ""}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {selectedStep && (
-        <>
-          {(selectedStep.status === "failed" || selectedStep.status === "guardrail_blocked") && (
-            <button className="danger" onClick={() => retry(selectedStep.position)}>
-              repetir fase {selectedStep.position}
-            </button>
-          )}
-          {task.status !== "created" && selectedStep.status === "done" && (
-            <button className="warn-btn" onClick={() => retry(selectedStep.position)}>
-              ← voltar para esta fase
-            </button>
-          )}
-        </>
-      )}
-
-      {/* Subtarefas: mostradas quando a task tem subtarefas e a fase selecionada é implement/verify */}
-      {task.subtasks && task.subtasks.length > 0 && selectedStep &&
-       (selectedStep.robot?.role === "implement" || selectedStep.robot?.role === "verify") && (
+      {/* Subtarefas */}
+      {task.subtasks && task.subtasks.length > 0 && (
         <>
           <h3>Subtarefas</h3>
           <div className="subtask-list">
@@ -543,9 +456,7 @@ export default function TaskDetail() {
                     <span className="muted small">tentativa {st.attempt}</span>
                     {st.verdict && <span className="muted small">· veredicto: {st.verdict}</span>}
                   </div>
-                  {st.description && (
-                    <p className="muted small">{st.description}</p>
-                  )}
+                  {st.description && <p className="muted small">{st.description}</p>}
                   {st.summary && (
                     <details className="subtask-summary">
                       <summary>resumo da fase</summary>
@@ -554,14 +465,14 @@ export default function TaskDetail() {
                   )}
                   {st.error && <div className="error small">{st.error}</div>}
                   {st.acceptance_criteria && (
-                    <details className="muted small" style={{marginTop: 4}}>
+                    <details className="muted small" style={{ marginTop: 4 }}>
                       <summary>critérios ({st.acceptance_criteria.length} chars)</summary>
                       <pre className="step-error">{st.acceptance_criteria}</pre>
                     </details>
                   )}
                 </div>
                 <div className="subtask-actions">
-                  {(st.status === "failed" || (st.status === "pending" && st.attempt > 1)) && (
+                  {(st.status === "failed" || st.status === "implementing" || st.status === "verifying" || (st.status === "pending" && st.attempt > 1)) && (
                     <button className="danger small" onClick={() => subtaskRetry(st.position)}>
                       repetir
                     </button>
@@ -573,135 +484,65 @@ export default function TaskDetail() {
         </>
       )}
 
-      {/* O que aconteceu: chat da fase selecionada */}
-      <div className="task-section-head">
-        <h3>
-          O que aconteceu
-          {selectedStep ? (
-            <span className="muted">
-              {" "}
-              — fase {selectedStep.position} · {selectedStep.robot?.name ?? "?"} · tentativa
-              atual {selectedStep.attempt} · {selectedStep.status}
-              {selectedStep.verdict ? ` · veredicto: ${selectedStep.verdict}` : ""}
-            </span>
-          ) : null}
-        </h3>
-      </div>
-
-      {selectedStep && (
+      {/* Tasks filhas / pai */}
+      {(task.children && task.children.length > 0) || task.parent_task_id ? (
         <>
-          <div className="meta">
-            <span className="muted small">
-              cada tentativa aparece separada abaixo · os filtros valem para o chat
-            </span>
-            <div className="view-toggle">
-              <button
-                className={view === "chat" ? "view-active" : ""}
-                onClick={() => setView("chat")}
+          <h3>Relações</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+            {task.parent_task_id && (
+              <div className="muted small">
+                ← tarefa pai:{" "}
+                <Link to={`/${repoId}/tasks/${task.parent_task_id}`}>
+                  #{task.parent_task_id}
+                </Link>
+              </div>
+            )}
+            {task.children && task.children.length > 0 && task.children.map((child) => (
+              <div
+                key={child.id}
+                className="resumo-card"
+                style={{ margin: 0, padding: "10px 14px" }}
               >
-                chat
-              </button>
-              <button
-                className={view === "transcript" ? "view-active" : ""}
-                onClick={() => setView("transcript")}
-              >
-                transcript completo
-              </button>
-            </div>
-          </div>
-
-          <div className="view-toggle">
-            {FILTROS.map((f) => (
-              <button
-                key={f.id}
-                className={filtro === f.id ? "view-active" : ""}
-                onClick={() => setFiltro(f.id)}
-              >
-                {f.label}
-              </button>
+                <div className="resumo-line">
+                  <span className="resumo-title">
+                    {child.status === "created" && "📝 "}
+                    #{child.id} {child.title}
+                  </span>
+                  <StatusBadge status={child.status} />
+                </div>
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  {child.repository_id !== task.repository_id && (
+                    <span>repo #{child.repository_id} · </span>
+                  )}
+                  {child.kind} · {child.cost_spent.toFixed(2)} US$
+                </div>
+                {child.status === "created" && (
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button
+                      onClick={async () => {
+                        try { await api.startTask(child.id); await refresh(); }
+                        catch (e) { setError(String(e)); }
+                      }}
+                    >
+                      aprovar e iniciar
+                    </button>
+                    <button
+                      className="danger"
+                      onClick={async () => {
+                        if (!confirm(`Recusar tarefa #${child.id} "${child.title}"?`)) return;
+                        try { await api.deleteTask(child.id); await refresh(); }
+                        catch (e) { setError(String(e)); }
+                      }}
+                    >
+                      recusar
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
           </div>
-
-          {view === "chat" && (
-            <div className="chat">
-              {separarTentativas(events).map((tent, ti) => {
-                const visiveis = tent.eventos.filter((e) => matchFiltro(e.kind, filtro));
-                if (visiveis.length === 0) return null;
-                return (
-                  <div key={ti} className="tentativa">
-                    <div className="tentativa-head">
-                      <span className="tentativa-n">tentativa {tent.attempt ?? "?"}</span>
-                      <span className="muted small">
-                        fase {selectedStep.position} · {selectedStep.robot?.name ?? "?"}
-                      </span>
-                    </div>
-                    {visiveis.map((e) => (
-                      <ChatMessage
-                        key={e.id}
-                        event={e}
-                        isOpen={expanded.has(e.id)}
-                        onToggle={() => toggleExpanded(e.id)}
-                      />
-                    ))}
-                  </div>
-                );
-              })}
-              {eventosVisiveis.length === 0 && (
-                <p className="muted">
-                  Sem eventos neste filtro
-                  {active ? " — aguardando execução…" : ""}.
-                </p>
-              )}
-            </div>
-          )}
-
-          {view === "transcript" && (
-            <div className="transcript">
-              {eventosVisiveis.map((event) => (
-                <div key={event.id} className={`transcript-block transcript-${event.kind}`}>
-                  <div className="mono time">
-                    [{event.seq}] {new Date(event.ts).toLocaleTimeString()} · {event.kind}
-                    {event.cost > 0 ? ` · +${event.cost.toFixed(2)} US$` : ""}
-                  </div>
-                  <pre className="transcript-body">{eventFull(event)}</pre>
-                </div>
-              ))}
-              {eventosVisiveis.length === 0 && (
-                <p className="muted">
-                  Sem eventos neste filtro
-                  {active ? " — aguardando execução…" : ""}.
-                </p>
-              )}
-            </div>
-          )}
-
-          <details className="raw-log-box">
-            <summary>log bruto da fase (últimas ~5000 linhas)</summary>
-            <pre className="raw-log">{log || "(vazio)"}</pre>
-          </details>
-
-          {selectedStep.summary && (
-            <>
-              <h3>Relatório da fase {selectedStep.position}</h3>
-              <div className="card">
-                <Markdown text={selectedStep.summary} />
-              </div>
-            </>
-          )}
-          {selectedStep.diff_stat && (
-            <>
-              <h3>Alterações da fase {selectedStep.position}</h3>
-              <pre className="diff-stat">{selectedStep.diff_stat}</pre>
-            </>
-          )}
-          {selectedStep.error && (
-            <>
-              <h3>Erro da fase {selectedStep.position}</h3>
-              <pre className="step-error">{selectedStep.error}</pre>
-            </>
-          )}
         </>
-      )}
+      ) : null}
 
       {/* História */}
       <h3>História</h3>
@@ -713,48 +554,28 @@ export default function TaskDetail() {
           <Markdown text={task.description} />
         </div>
       )}
-      {task.acceptance_criteria && (
-        <div className="card">
-          <div className="card-title">
-            <strong>Critérios de aceite</strong>
-          </div>
-          <ul className="criteria">
-            {task.acceptance_criteria.split("\n").map((line, i) => {
-              const match = line.match(/^\s*-?\s*\[( |x|X)\]\s*(.*)$/);
-              if (!match) {
-                return <li key={i}>{inlineMarkdown(line, `c${i}`)}</li>;
-              }
-              return (
-                <li key={i}>
-                  <span className={match[1] !== " " ? "criteria-done" : ""}>
-                    {match[1] !== " " ? "☑" : "☐"}{" "}
-                    {inlineMarkdown(match[2], `c${i}`)}
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </div>
-      )}
 
       {/* Feedback externo */}
       <h3>Feedback externo</h3>
       <div className="feedback-box">
-        <textarea
-          className="feedback-input"
-          rows={3}
-          placeholder="Erro de deploy, pedido de ajuste, info do ambiente… (entra no handoff das próximas fases)"
-          value={feedbackText}
-          onChange={(e) => setFeedbackText(e.target.value)}
-        />
-        <div className="form-inline">
+        <div className="form-field">
+          <label className="form-label">Nota de feedback</label>
+          <textarea
+            className="feedback-input"
+            rows={3}
+            placeholder="Erro de deploy, pedido de ajuste, info do ambiente… (entra no handoff das próximas fases)"
+            value={feedbackText}
+            onChange={(e) => setFeedbackText(e.target.value)}
+          />
+        </div>
+        <div className="form-actions">
           <button disabled={feedbackBusy || !feedbackText.trim()} onClick={saveFeedback}>
             salvar nota
           </button>
           <button className="danger" disabled={feedbackBusy || !task.feedback} onClick={clearFeedback}>
             limpar
           </button>
-          <span className="muted small">
+          <span className="muted small" style={{ alignSelf: "center" }}>
             {task.feedback ? "a nota entra no handoff das próximas fases" : "sem nota ativa"}
           </span>
         </div>

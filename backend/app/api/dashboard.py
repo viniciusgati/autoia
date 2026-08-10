@@ -154,29 +154,58 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 
 
 @router.get("", response_model=DashboardOut)
-def dashboard(session: Session = Depends(get_session)):
+def dashboard(
+    repository_id: int | None = None,
+    session: Session = Depends(get_session),
+):
+    # base query para Task, opcionalmente filtrada por repositório
+    task_q = session.query(Task)
+    if repository_id is not None:
+        task_q = task_q.filter(Task.repository_id == repository_id)
+
     rows = (
-        session.query(Task.status, func.count(Task.id))
+        task_q.with_entities(Task.status, func.count(Task.id))
         .group_by(Task.status)
         .all()
     )
     tasks_by_status = {status: count for status, count in rows}
-    total_cost = (
-        session.query(func.sum(RunEvent.cost)).scalar() or 0.0
+
+    # custo total: filtra eventos cuja task pertence ao repositório
+    cost_q = session.query(func.sum(RunEvent.cost))
+    if repository_id is not None:
+        cost_q = (
+            cost_q.join(TaskStep, RunEvent.step_id == TaskStep.id)
+            .join(Task, TaskStep.task_id == Task.id)
+            .filter(Task.repository_id == repository_id)
+        )
+    total_cost = cost_q.scalar() or 0.0
+
+    # guardrail events
+    guard_q = session.query(func.count(RunEvent.id)).filter(
+        RunEvent.kind == "guardrail_blocked"
     )
-    guardrail_events = (
-        session.query(func.count(RunEvent.id))
-        .filter(RunEvent.kind == "guardrail_blocked")
-        .scalar()
-        or 0
-    )
-    recent_guardrails = (
+    if repository_id is not None:
+        guard_q = (
+            guard_q.join(TaskStep, RunEvent.step_id == TaskStep.id)
+            .join(Task, TaskStep.task_id == Task.id)
+            .filter(Task.repository_id == repository_id)
+        )
+    guardrail_events = guard_q.scalar() or 0
+
+    recent_guardrails_q = (
         session.query(RunEvent)
         .filter(RunEvent.kind == "guardrail_blocked")
-        .order_by(RunEvent.id.desc())
-        .limit(10)
-        .all()
     )
+    if repository_id is not None:
+        recent_guardrails_q = (
+            recent_guardrails_q.join(TaskStep, RunEvent.step_id == TaskStep.id)
+            .join(Task, TaskStep.task_id == Task.id)
+            .filter(Task.repository_id == repository_id)
+        )
+    recent_guardrails = (
+        recent_guardrails_q.order_by(RunEvent.id.desc()).limit(10).all()
+    )
+
     total_tasks = sum(tasks_by_status.values())
     return DashboardOut(
         tasks_by_status=tasks_by_status,

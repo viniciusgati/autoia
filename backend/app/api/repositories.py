@@ -1,4 +1,4 @@
-"""Endpoints de repositórios (registro + clone)."""
+"""Endpoints de repositórios (registro + clone + config)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..models import Repository
-from ..schemas import RepositoryCreate, RepositoryOut
+from ..schemas import RepositoryCreate, RepositoryOut, RepositoryUpdate
 from ..worker import gitops
 from .deps import get_repository_or_404, get_session, get_settings
 
@@ -33,6 +33,16 @@ def create_repository(
         url=data.url,
         default_branch=data.default_branch,
         local_path=None,
+        max_attempts=data.max_attempts,
+        max_pm_decisions=data.max_pm_decisions,
+        run_timeout=data.run_timeout,
+        task_budget=data.task_budget,
+        cost_per_interaction=data.cost_per_interaction,
+        risky_patterns_extra=data.risky_patterns_extra,
+        db_rule=data.db_rule,
+        allow_auto_tasks=data.allow_auto_tasks,
+        allow_external_tasks=data.allow_external_tasks,
+        default_pipeline_id=data.default_pipeline_id,
     )
     session.add(repo)
     session.commit()
@@ -61,6 +71,20 @@ def create_repository(
 @router.get("", response_model=list[RepositoryOut])
 def list_repositories(session: Session = Depends(get_session)):
     return session.query(Repository).order_by(Repository.id.desc()).all()
+
+
+@router.put("/{repo_id}", response_model=RepositoryOut)
+def update_repository(
+    repo_id: int,
+    data: RepositoryUpdate,
+    session: Session = Depends(get_session),
+):
+    repo = get_repository_or_404(session, repo_id)
+    for field, value in data.model_dump(exclude_unset=True).items():
+        setattr(repo, field, value)
+    session.commit()
+    session.refresh(repo)
+    return repo
 
 
 @router.delete("/{repo_id}", status_code=204)
