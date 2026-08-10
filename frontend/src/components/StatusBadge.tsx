@@ -6,6 +6,7 @@ const LABELS: Record<string, { label: string; cls: string }> = {
   failed: { label: "falhou", cls: "badge-err" },
   blocked: { label: "bloqueada", cls: "badge-err" },
   needs_review: { label: "revisão humana", cls: "badge-warn" },
+  waiting_approval: { label: "aprovação humana", cls: "badge-warn" },
   pending: { label: "pendente", cls: "badge-muted" },
   running: { label: "rodando", cls: "badge-run" },
   guardrail_blocked: { label: "guardrail", cls: "badge-err" },

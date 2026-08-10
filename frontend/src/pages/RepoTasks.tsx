@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link, useParams } from "react-router-dom";
+import { useParams } from "react-router-dom";
 import { api } from "../api";
-import StatusBadge from "../components/StatusBadge";
+import { TaskCardGrid } from "../components/TaskCard";
 import type { Pipeline, Task } from "../types";
 
 export default function RepoTasks() {
@@ -14,10 +14,11 @@ export default function RepoTasks() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("issue");
+  const [executor, setExecutor] = useState("kimi");
   const [error, setError] = useState("");
 
   const load = () =>
-    Promise.all([api.listTasks(repoId), api.listPipelines()])
+    Promise.all([api.listTasks(repoId), api.listPipelines(repoId)])
       .then(([t, p]) => {
         setTasks(t);
         setPipelines(p);
@@ -41,18 +42,10 @@ export default function RepoTasks() {
         title,
         description,
         kind,
+        executor,
       });
       setTitle("");
       setDescription("");
-      await load();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const start = async (id: number) => {
-    try {
-      await api.startTask(id);
       await load();
     } catch (e) {
       setError(String(e));
@@ -72,6 +65,7 @@ export default function RepoTasks() {
               {pipelines.map((pipeline) => (
                 <option key={pipeline.id} value={pipeline.id}>
                   {pipeline.name}
+                  {pipeline.repository_id == null ? " (global)" : ""}
                 </option>
               ))}
             </select>
@@ -83,6 +77,13 @@ export default function RepoTasks() {
               <option value="bug">bug</option>
               <option value="feature">feature</option>
               <option value="chore">chore</option>
+            </select>
+          </div>
+          <div className="form-field">
+            <label className="form-label">Executor</label>
+            <select value={executor} onChange={(e) => setExecutor(e.target.value)}>
+              <option value="kimi">kimi code</option>
+              <option value="opencode">opencode</option>
             </select>
           </div>
         </div>
@@ -112,36 +113,12 @@ export default function RepoTasks() {
       {tasks.length === 0 ? (
         <p className="muted">Nenhuma tarefa neste projeto.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Título</th>
-              <th>Status</th>
-              <th>Custo (US$)</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {tasks.map((task) => (
-              <tr key={task.id}>
-                <td>{task.id}</td>
-                <td>
-                  <Link to={`/${repoId}/tasks/${task.id}`}>{task.title}</Link>
-                </td>
-                <td>
-                  <StatusBadge status={task.status} />
-                </td>
-                <td>{task.cost_spent.toFixed(2)}</td>
-                <td>
-                  {task.status === "created" && (
-                    <button onClick={() => start(task.id)}>iniciar</button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <TaskCardGrid
+          tasks={tasks}
+          detailPath={`/${repoId}/tasks`}
+          onChanged={load}
+          onError={setError}
+        />
       )}
     </div>
   );

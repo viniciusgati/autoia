@@ -53,6 +53,16 @@ def create_repository(
     shutil.rmtree(dest, ignore_errors=True)
     try:
         gitops.clone(data.url, dest)
+        if gitops.repo_is_empty(dest):
+            # remote recém-criado sem branch (ex.: repo novo no GitHub): cria
+            # branch default com README básico e commit inicial, depois segue.
+            gitops.bootstrap_empty_repo(
+                dest,
+                data.default_branch or "main",
+                data.name,
+                settings.git_user_name,
+                settings.git_user_email,
+            )
         default_branch = gitops.resolve_default_branch(dest, data.default_branch)
     except (gitops.GitError, OSError) as exc:
         session.delete(repo)

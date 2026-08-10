@@ -1,7 +1,6 @@
 import { FormEvent, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api";
-import StatusBadge from "../components/StatusBadge";
+import { TaskCardGrid } from "../components/TaskCard";
 import type { Pipeline, Repository, Task } from "../types";
 
 export default function Tasks() {
@@ -13,6 +12,7 @@ export default function Tasks() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("issue");
+  const [executor, setExecutor] = useState("kimi");
   const [error, setError] = useState("");
 
   const load = () =>
@@ -37,18 +37,10 @@ export default function Tasks() {
         title,
         description,
         kind,
+        executor,
       });
       setTitle("");
       setDescription("");
-      await load();
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
-  const start = async (id: number) => {
-    try {
-      await api.startTask(id);
       await load();
     } catch (e) {
       setError(String(e));
@@ -91,6 +83,13 @@ export default function Tasks() {
               <option value="chore">chore</option>
             </select>
           </div>
+          <div className="form-field">
+            <label className="form-label">Executor</label>
+            <select value={executor} onChange={(e) => setExecutor(e.target.value)}>
+              <option value="kimi">kimi code</option>
+              <option value="opencode">opencode</option>
+            </select>
+          </div>
         </div>
         <div className="form-field">
           <label className="form-label">Título da tarefa</label>
@@ -109,38 +108,13 @@ export default function Tasks() {
       {tasks.length === 0 ? (
         <p className="muted">Nenhuma tarefa.</p>
       ) : (
-        <table>
-          <thead>
-            <tr>
-              <th>ID</th>
-              <th>Título</th>
-              <th>Repo</th>
-              <th>Status</th>
-              <th>Custo (US$)</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            {tasks.map((task) => (
-              <tr key={task.id}>
-                <td>{task.id}</td>
-                <td>
-                  <Link to={`/tasks/${task.id}`}>{task.title}</Link>
-                </td>
-                <td>{task.repository_id}</td>
-                <td>
-                  <StatusBadge status={task.status} />
-                </td>
-                <td>{task.cost_spent.toFixed(2)}</td>
-                <td>
-                  {task.status === "created" && (
-                    <button onClick={() => start(task.id)}>iniciar</button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <TaskCardGrid
+          tasks={tasks}
+          detailPath="/tasks"
+          repoNames={Object.fromEntries(repos.map((r) => [r.id, r.name]))}
+          onChanged={load}
+          onError={setError}
+        />
       )}
     </div>
   );

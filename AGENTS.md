@@ -21,7 +21,7 @@ chama APIs de LLM diretamente.
 | Worker | **síncrono, thread-based** (`subprocess`), um único processo |
 | Frontend | React 18 + Vite + TypeScript (estrito), react-router, `vite-plugin-pwa` |
 | Testes | pytest (`httpx` p/ TestClient) |
-| Execução dos robôs | `kimi -p --output-format stream-json` (JSONL no stdout) |
+| Execução dos robôs | por **task**: `kimi -p --output-format stream-json` (JSONL no stdout) **ou** `opencode run --format json` (campo `Task.executor`: `kimi` \| `opencode`, default `kimi`) |
 
 ## Estrutura
 
@@ -39,7 +39,9 @@ backend/app/            # pacote `app`
   api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard)
   worker/
     runner.py           # loop do worker: claim -> executa -> decide (bounce-back/PM)
-    kimi_exec.py        # subprocess do kimi, streaming JSONL, timeout, kill
+    exec_common.py      # ExecOutcome + kill por grupo/watchdog (compartilhado)
+    kimi_exec.py        # subprocess do kimi (stream-json): streaming JSONL, timeout, kill
+    opencode_exec.py    # subprocess do opencode (--format json): tool_use, custo REAL
     gitops.py           # clone/branch/commit/merge/push/checkout_default/diff
     project.py          # detecção de ecossistema + AGENTS.md gerado no checkout
     arch_metric.py      # métrica de mudança de arquitetura/deploy (evento arch_metric)
@@ -72,7 +74,7 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   Parse tolerante a preâmbulo (marcador como palavra isolada em qualquer linha) em
   `verdicts.py` — não restrinja à primeira linha.
 - **Handoff entre fases** (`autoia_handoff.md`, em `worker/handoff.py`): o worker gera,
-  **antes de cada execução do kimi** (steps e PM), um documento **não versionado** na
+  **antes de cada execução do robô** (steps e PM), um documento **não versionado** na
   raiz do checkout com o histórico **COMPLETO** das fases anteriores (resumos integrais
   + veredictos) + diff atual + instrução da fase atual. Os robôs são instruídos no
   prompt a **ler o arquivo antes de começar** (`HANDOFF_READ`) e a documentar o trabalho
@@ -87,13 +89,19 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 - **PM** (`pm`): decide `retry <pos>` / `continuar` (top-up de orçamento) / `escalar`
   (default seguro). Limite por task: `AUTOIA_MAX_PM_DECISIONS` (default 2). Decisão
   inválida/ausente → **escalar**.
-- **Orçamento**: custo estimado por interação (`AUTOIA_COST_PER_INTERACTION`); estourou
-  → `needs_review`. `RunEvent.cost` acumula em `Task.cost_spent`.
-- **Guardrails** (em `kimi_exec` + `guardrails.py`): cada `tool_call` é inspecionada no
-  stream; comando arriscado (`rm -rf`, `sudo`, `curl`, `git push`, `git checkout main`…)
-  ou caminho fora do checkout → **mata o processo** (SIGTERM no grupo) e grava
-  `guardrail_blocked`. Loop: mesma tool call N vezes (`max_identical_calls`) → kill.
-  Timeout por fase (`AUTOIA_RUN_TIMEOUT`).
+- **Executor por task**: `Task.executor` (`kimi` \| `opencode`, default `kimi`) define o
+  CLI que roda cada fase e o PM (escolhido na criação da tarefa; tasks filhas herdam).
+  `kimi_exec` estima custo por interação; `opencode_exec` usa o **custo real** do
+  `step_finish` do `opencode run --format json` (tool_use com nome+input+output).
+  Ambos compartilham `exec_common.ExecOutcome` e os guardrails; `_run_executor` no runner
+  faz o dispatch.
+- **Orçamento**: custo por interação (`AUTOIA_COST_PER_INTERACTION`, kimi) ou custo real
+  (opencode); estourou → `needs_review`. `RunEvent.cost` acumula em `Task.cost_spent`.
+- **Guardrails** (em `kimi_exec`/`opencode_exec` + `guardrails.py`): cada `tool_call` é
+  inspecionada no stream; comando arriscado (`rm -rf`, `sudo`, `curl`, `git push`,
+  `git checkout main`…) ou caminho fora do checkout → **mata o processo** (SIGTERM no
+  grupo) e grava `guardrail_blocked`. Loop: mesma tool call N vezes
+  (`max_identical_calls`) → kill. Timeout por fase (`AUTOIA_RUN_TIMEOUT`).
 - **Observabilidade**: **toda** interação vira `RunEvent` (assistant_text, tool_call,
   tool_result, system, guardrail…) com payload **completo, sem truncar**. Log bruto em
   `data/logs/<step_id>.log`.
@@ -135,10 +143,11 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 
 ## Padrões de desenvolvimento (testes)
 
-- **Nunca rodar o kimi real nos testes**: use a fixture `fake_kimi` (conftest) que emite
-  JSONL determinístico e opcionalmente escreve `autoia_verdict.txt` via regras
-  (`VERDICT_RULES`: `ready_pass`, `fail`, `needs_work`, `pm_*`). Para criar arquivos no
-  checkout, use `write_file=...`.
+- **Nunca rodar o kimi/opencode real nos testes**: use a fixture `fake_kimi` (conftest)
+  que emite JSONL determinístico (formatos kimi `-p` **e** opencode `run <prompt>`)
+  e opcionalmente escreve `autoia_verdict.txt` via regras (`VERDICT_RULES`:
+  `ready_pass`, `fail`, `needs_work`, `pm_*`). Para criar arquivos no checkout, use
+  `write_file=...`.
 - Git real é permitido em `tmp_path` (fixture `bare_repo` — repo bare com commit inicial).
 - `flow` fixture: app + session_factory + repo + task iniciada. `settings` fixture tem
   `max_pm_decisions=0` por padrão (PM desligado; ative nos testes de PM).

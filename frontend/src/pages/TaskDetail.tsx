@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import PhasePanel from "../components/PhasePanel";
@@ -54,6 +54,17 @@ export default function TaskDetail() {
   const [reviewedBy, setReviewedBy] = useState("humano");
   const [bouncebackBusy, setBouncebackBusy] = useState(false);
 
+  // Aprovação humana (gate do pipeline)
+  const [approvalNote, setApprovalNote] = useState("");
+  const [approvalBusy, setApprovalBusy] = useState(false);
+  const [voltarTarget, setVoltarTarget] = useState(0);
+  // Edição da história (só em waiting_approval)
+  const [storyDesc, setStoryDesc] = useState("");
+  const [storyCriteria, setStoryCriteria] = useState("");
+  const [storyBusy, setStoryBusy] = useState(false);
+  const storyInit = useRef(false);
+  const prevStatus = useRef<string | null>(null);
+
   useEffect(() => {
     const load = () =>
       api
@@ -63,6 +74,23 @@ export default function TaskDetail() {
           setFeedbackText((current) => current || t.feedback || "");
           // Só inicializa o alvo na primeira carga
           setBouncebackTarget((prev) => prev || suggestedBouncebackTarget(t));
+          // História: inicializa na primeira carga e ao ENTRAR em waiting_approval
+          const gated = t.steps.find((s) => s.status === "pending" && s.pause_before);
+          if (
+            !storyInit.current ||
+            (t.status === "waiting_approval" && prevStatus.current !== "waiting_approval")
+          ) {
+            setStoryDesc(t.description ?? "");
+            setStoryCriteria(t.acceptance_criteria ?? "");
+            storyInit.current = true;
+            if (gated) {
+              const prev = [...t.steps]
+                .filter((s) => s.position < gated.position)
+                .sort((a, b) => b.position - a.position)[0];
+              setVoltarTarget(prev ? prev.position : 0);
+            }
+          }
+          prevStatus.current = t.status;
           const running = t.steps.find((s) => s.status === "running");
           if (running) {
             api
@@ -195,6 +223,51 @@ export default function TaskDetail() {
     }
   };
 
+  const approveGate = async (position: number) => {
+    setApprovalBusy(true);
+    try {
+      await api.approveStep(taskId, position, approvalNote.trim() || undefined);
+      setApprovalNote("");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
+  const voltarFase = async (position: number) => {
+    setApprovalBusy(true);
+    try {
+      await api.retryStep(taskId, position, approvalNote.trim() || undefined);
+      setApprovalNote("");
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setApprovalBusy(false);
+    }
+  };
+
+  const saveStory = async () => {
+    setStoryBusy(true);
+    try {
+      await api.updateTaskStory(taskId, {
+        description: storyDesc,
+        acceptance_criteria: storyCriteria,
+      });
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setStoryBusy(false);
+    }
+  };
+
+  const scrollToApproval = () => {
+    document.getElementById("aprovacao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
   const scrollToReview = () => {
     document.getElementById("revisao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
@@ -242,6 +315,9 @@ export default function TaskDetail() {
         </h2>
         <div className="meta">
           <StatusBadge status={task.status} />
+          <span className="task-detail-executor">
+            executor: {task.executor === "opencode" ? "opencode" : "kimi code"}
+          </span>
           <span>
             branch: <code>{task.branch ?? "—"}</code>
           </span>
@@ -301,6 +377,12 @@ export default function TaskDetail() {
           <div className="sticky-alert">
             <span>⚠ Aguardando revisão humana — o pipeline parou</span>
             <button onClick={scrollToReview}>ir para a revisão ↓</button>
+          </div>
+        )}
+        {task.status === "waiting_approval" && (
+          <div className="sticky-alert">
+            <span>⚠ Aguardando aprovação humana — o pipeline parou na fase {etapaAtualLabel(task)}</span>
+            <button onClick={scrollToApproval}>ir para a aprovação ↓</button>
           </div>
         )}
         {subAlert && (
@@ -428,6 +510,75 @@ export default function TaskDetail() {
         );
       })()}
 
+      {/* Aprovação humana (gate do pipeline) */}
+      {task.status === "waiting_approval" && (() => {
+        const gated = steps.find((s) => s.status === "pending" && s.pause_before) ?? null;
+        const anteriores = gated
+          ? steps.filter((s) => s.position < gated.position)
+          : [];
+        return (
+          <div className="card warn" id="aprovacao-humana">
+            <div className="card-title">
+              <strong>⏸ Aguardando aprovação humana</strong>
+              {gated && (
+                <span className="badge badge-warn">
+                  F{gated.position} · {gated.robot?.name ?? "?"} ({gated.robot?.role ?? "?"})
+                </span>
+              )}
+            </div>
+            <p className="muted">
+              O pipeline parou antes da fase acima (gate configurado no pipeline).
+              Revise o trabalho das fases anteriores na timeline/painel ao lado e
+              decida: aprovar para liberar o robô, ou voltar uma fase para refazer
+              com ajustes. Você também pode editar a história abaixo.
+            </p>
+            <div className="form-field" style={{ marginBottom: 10 }}>
+              <label className="form-label">Nota / instruções para a fase aprovada (opcional)</label>
+              <textarea
+                rows={2}
+                value={approvalNote}
+                onChange={(e) => setApprovalNote(e.target.value)}
+                placeholder="ex.: confirmar nomenclatura das rotas antes de implementar…"
+              />
+            </div>
+            <div className="form-inline" style={{ gap: 8 }}>
+              <button
+                disabled={approvalBusy || !gated}
+                onClick={() => gated && approveGate(gated.position)}
+              >
+                {approvalBusy ? "liberando…" : "aprovar e liberar o robô"}
+              </button>
+              {anteriores.length > 0 && (
+                <>
+                  <select
+                    value={voltarTarget}
+                    onChange={(e) => setVoltarTarget(Number(e.target.value))}
+                    style={{ maxWidth: 260 }}
+                  >
+                    {anteriores.map((s) => (
+                      <option key={s.position} value={s.position}>
+                        F{s.position} · {s.robot?.name ?? "?"} ({s.robot?.role ?? "?"})
+                        {s.attempt > 1 ? ` · tent. ${s.attempt}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    className="warn-btn"
+                    disabled={approvalBusy}
+                    onClick={() => voltarFase(voltarTarget)}
+                  >
+                    voltar para fase anterior
+                  </button>
+                </>
+              )}
+            </div>
+            <p className="muted small" style={{ marginTop: 8 }}>
+              Nota preenchida entra no feedback da task e vai no handoff das próximas fases.
+            </p>
+          </div>
+        );
+      })()}
+
       {/* PM decide */}
       {pmCandidates && (
         <div className="card">
@@ -546,13 +697,56 @@ export default function TaskDetail() {
 
       {/* História */}
       <h3>História</h3>
-      {task.description && (
+      {task.status === "waiting_approval" ? (
         <div className="card">
           <div className="card-title">
-            <strong>Descrição</strong>
+            <strong>Editar história antes de aprovar</strong>
+            <span className="muted small">descrição e critérios de aceite (refinado pelo PO/QA)</span>
           </div>
-          <Markdown text={task.description} />
+          <div className="form-stack">
+            <div className="form-field">
+              <label className="form-label">Descrição</label>
+              <textarea
+                rows={5}
+                value={storyDesc}
+                onChange={(e) => setStoryDesc(e.target.value)}
+              />
+            </div>
+            <div className="form-field">
+              <label className="form-label">Critérios de aceite</label>
+              <textarea
+                rows={4}
+                value={storyCriteria}
+                onChange={(e) => setStoryCriteria(e.target.value)}
+              />
+            </div>
+            <div className="form-actions">
+              <button disabled={storyBusy} onClick={saveStory}>
+                {storyBusy ? "salvando…" : "salvar alterações"}
+              </button>
+            </div>
+          </div>
         </div>
+      ) : (
+        <>
+        {task.description && (
+          <div className="card">
+            <div className="card-title">
+              <strong>Descrição</strong>
+            </div>
+            <Markdown text={task.description} />
+          </div>
+        )}
+
+        {task.acceptance_criteria && (
+          <div className="card">
+            <div className="card-title">
+              <strong>Critérios de aceite</strong>
+            </div>
+            <Markdown text={task.acceptance_criteria} />
+          </div>
+        )}
+        </>
       )}
 
       {/* Feedback externo */}

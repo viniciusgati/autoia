@@ -20,6 +20,7 @@ export interface Repository {
 
 export interface Robot {
   id: number;
+  repository_id: number | null;
   name: string;
   mission: string;
   role: string;
@@ -33,11 +34,13 @@ export interface PipelineStep {
   position: number;
   robot_id: number;
   post_merge: boolean;
+  pause_before: boolean;
   robot: Robot | null;
 }
 
 export interface Pipeline {
   id: number;
+  repository_id: number | null;
   name: string;
   steps: PipelineStep[];
   created_at: string;
@@ -51,6 +54,7 @@ export interface TaskStep {
   attempt: number;
   verdict: string | null;
   post_merge: boolean;
+  pause_before: boolean;
   log_path: string | null;
   summary: string | null;
   diff_stat: string | null;
@@ -91,6 +95,7 @@ export interface Task {
   description: string;
   kind: string;
   status: string;
+  executor: string;
   current_step: number;
   branch: string | null;
   acceptance_criteria: string | null;

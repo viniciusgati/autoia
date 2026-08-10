@@ -112,6 +112,42 @@ def test_clone_failure_allows_retry(app_client, bare_repo, settings):
     assert os.path.isdir(os.path.join(settings.workspace_dir, "1"))
 
 
+def test_register_empty_repository_creates_readme_and_commit(app_client, tmp_path):
+    """Repo recém-criado no remote (sem branch): a autoia cria README + commit
+    inicial na default e registra o repositório normalmente."""
+    import subprocess
+
+    src = tmp_path / "vazio"
+    src.mkdir()
+    subprocess.run(["git", "init", "-b", "main", str(src)], check=True, capture_output=True)
+    empty_bare = tmp_path / "vazio.git"
+    subprocess.run(
+        ["git", "clone", "--bare", str(src), str(empty_bare)], check=True, capture_output=True
+    )
+
+    response = app_client.post(
+        "/api/repositories",
+        json={"name": "r-vazio", "url": str(empty_bare), "default_branch": "main"},
+    )
+    assert response.status_code == 201, response.text
+    repo = response.json()
+    assert repo["default_branch"] == "main"
+
+    # o bare agora tem a branch com README (visto via novo clone)
+    dest = tmp_path / "clone"
+    subprocess.run(["git", "clone", str(empty_bare), str(dest)], check=True, capture_output=True)
+    tree = subprocess.run(
+        ["git", "-C", str(dest), "ls-tree", "-r", "--name-only", "origin/main"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "README.md" in tree
+    head = subprocess.run(
+        ["git", "-C", str(dest), "log", "--oneline", "-1", "origin/main"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "commit inicial" in head
+
+
 def test_register_repository_relative_workspace(bare_repo, tmp_path, monkeypatch):
     """Com workspace_dir relativo, o checkout é criado no lugar certo (não aninhado)."""
     monkeypatch.chdir(tmp_path)
@@ -264,6 +300,80 @@ def test_dashboard_notices(app_client, registered_repo):
 
 
 # ---------- Fluxo do worker (kimi fake) ----------
+
+OPENCODE_LINES = [
+    {"type": "step_start", "part": {"type": "step-start"}},
+    {
+        "type": "tool_use",
+        "part": {
+            "type": "tool",
+            "tool": "bash",
+            "state": {"status": "completed", "input": {"command": "ls"}, "output": "ok"},
+        },
+    },
+    {
+        "type": "tool_use",
+        "part": {
+            "type": "tool",
+            "tool": "read",
+            "state": {"status": "completed", "input": {"filePath": "README.md"}, "output": "# repo"},
+        },
+    },
+    {"type": "text", "part": {"type": "text", "text": "tarefa concluída com sucesso"}},
+    {"type": "step_finish", "part": {"type": "step-finish", "reason": "stop", "cost": 0.001}},
+]
+
+
+def test_worker_opencode_executor_runs_pipeline(settings, bare_repo, fake_kimi):
+    """Task com executor=opencode roda todo o pipeline via opencode CLI fake,
+    com tool calls, texto final e custo real vindo do step_finish."""
+    settings.opencode_bin = fake_kimi(OPENCODE_LINES, verdict="ready_pass")
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "t-opencode",
+            "description": "d",
+            "kind": "feature",
+            "executor": "opencode",
+        },
+    ).json()
+    assert task["executor"] == "opencode"
+    client.post(f"/api/tasks/{task['id']}/start")
+
+    # task sem executor explícito → default kimi
+    default_task = client.post(
+        "/api/tasks",
+        json={"repository_id": 1, "pipeline_id": 1, "title": "t-kimi", "description": "d", "kind": "feature"},
+    ).json()
+    assert default_task["executor"] == "kimi"
+
+    for _ in range(PIPELINE_STEPS + 2):
+        claimed = runner.claim_next(session_factory)
+        if claimed is None:
+            break
+        runner.execute_step(settings, session_factory, claimed)
+
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "done"
+        assert all(st.status == "done" for st in t.steps)
+        # eventos de tool call do opencode registrados, e custo real acumulado
+        kinds = {e.kind for st in t.steps for e in st.events}
+        assert "tool_call" in kinds
+        assert "tool_result" in kinds
+        assert t.cost_spent > 0
+
 
 def test_worker_advances_phases_and_merges(settings, bare_repo, tmp_path, fake_kimi):
     """po -> qa -> developer -> tester -> avaliador -> merger (merge+push) -> deploy-tester."""

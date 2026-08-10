@@ -144,6 +144,7 @@ export default function Home() {
               : 0;
             const attentionCount = counts
               ? (counts.byStatus["needs_review"] || 0) +
+                (counts.byStatus["waiting_approval"] || 0) +
                 (counts.byStatus["blocked"] || 0)
               : 0;
             const recentTasks = repoTasks.slice(0, 3);
@@ -179,6 +180,7 @@ export default function Home() {
                         : "—";
                       const isAttention =
                         task.status === "needs_review" ||
+                        task.status === "waiting_approval" ||
                         task.status === "blocked" ||
                         (task.steps.some(
                           (s) => s.status === "guardrail_blocked",
@@ -186,7 +188,7 @@ export default function Home() {
                           task.status !== "done" &&
                           task.status !== "failed");
                       const rowClass = isAttention
-                        ? task.status === "needs_review"
+                        ? task.status === "needs_review" || task.status === "waiting_approval"
                           ? " project-task-row-warn"
                           : " project-task-row-err"
                         : "";

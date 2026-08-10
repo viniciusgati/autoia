@@ -38,6 +38,7 @@ from ..models import (
     TASK_IN_PROGRESS,
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
+    TASK_WAITING_APPROVAL,
     Pipeline,
     PipelineStep,
     Repository,
@@ -48,7 +49,7 @@ from ..models import (
     Task,
     TaskStep,
 )
-from . import arch_metric, gitops, handoff, kimi_exec, project, subtask
+from . import arch_metric, gitops, handoff, kimi_exec, opencode_exec, project, subtask
 
 log = logging.getLogger("autoia.worker")
 
@@ -72,6 +73,7 @@ class EffectiveSettings:
     risky_patterns: list[str]
     db_rule: str
     kimi_bin: str
+    opencode_bin: str
     log_dir: str
     workspace_dir: str
     branch_prefix: str
@@ -98,6 +100,7 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         risky_patterns=patterns,
         db_rule=repo.db_rule or settings.db_rule,
         kimi_bin=settings.kimi_bin,
+        opencode_bin=settings.opencode_bin,
         log_dir=settings.log_dir,
         branch_prefix=settings.branch_prefix,
         workspace_dir=settings.workspace_dir,
@@ -194,7 +197,13 @@ def worker_loop(settings: Settings) -> None:
 
 
 def claim_next(session_factory) -> int | None:
-    """Reivindica o próximo step pendente de uma task ativa (claim atômico)."""
+    """Reivindica o próximo step pendente de uma task ativa (claim atômico).
+
+    Steps com `pause_before` (gate de aprovação humana configurado no pipeline)
+    NUNCA são reclamados: a task é marcada como `waiting_approval` e o step fica
+    `pending` aguardando o humano aprovar (POST /api/tasks/{id}/approve-step).
+    Como a task sai do filtro `queued/in_progress`, a transição acontece uma só vez.
+    """
     with session_factory() as s:
         step = (
             s.query(TaskStep)
@@ -207,6 +216,18 @@ def claim_next(session_factory) -> int | None:
             .first()
         )
         if step is None:
+            return None
+        if step.pause_before:
+            step.task.status = TASK_WAITING_APPROVAL
+            _system_event(
+                s, step, "human_gate",
+                {
+                    "position": step.position,
+                    "robot": step.robot.name if step.robot else None,
+                    "reason": "aguardando aprovação humana (pause_before no pipeline)",
+                },
+            )
+            s.commit()
             return None
         result = s.execute(
             update(TaskStep)
@@ -323,6 +344,49 @@ def _build_handoff(
     )
 
 
+def _run_executor(
+    eff: EffectiveSettings,
+    executor: str,
+    prompt: str,
+    *,
+    cwd: str,
+    log_path: str,
+    model: str | None = None,
+    on_event=None,
+    kimi_cost_per_interaction: float | None = None,
+):
+    """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`."""
+    if executor == "opencode":
+        return opencode_exec.run_opencode(
+            prompt,
+            cwd=cwd,
+            opencode_bin=eff.opencode_bin,
+            log_path=log_path,
+            timeout=eff.run_timeout,
+            max_identical_calls=eff.max_identical_calls,
+            risky_patterns=eff.risky_patterns,
+            checkout_path=cwd,
+            model=model,
+            on_event=on_event,
+        )
+    return kimi_exec.run_kimi(
+        prompt,
+        cwd=cwd,
+        kimi_bin=eff.kimi_bin,
+        log_path=log_path,
+        timeout=eff.run_timeout,
+        max_identical_calls=eff.max_identical_calls,
+        risky_patterns=eff.risky_patterns,
+        checkout_path=cwd,
+        cost_per_interaction=(
+            kimi_cost_per_interaction
+            if kimi_cost_per_interaction is not None
+            else eff.cost_per_interaction
+        ),
+        on_event=on_event,
+    )
+
+
 def execute_step(settings: Settings, session_factory, step_id: int) -> dict | None:
     """Executa o step. Retorna um gatilho de PM ({task_id, reason}) quando aplicável."""
     with session_factory() as s:
@@ -391,6 +455,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
                 checkout, _build_handoff(s, task, step, checkout, base, branch)
             )
             project.exclude_local(checkout, "autoia_screenshots/")
+            project.exclude_local(checkout, "autoia_tasks.json")
         except (OSError, gitops.GitError):
             log.warning(
                 "não foi possível escrever autoia_handoff.md no checkout %s",
@@ -455,16 +520,13 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
                 )
         return None
 
-    outcome = kimi_exec.run_kimi(
+    outcome = _run_executor(
+        eff,
+        task.executor,
         prompt,
         cwd=checkout,
-        kimi_bin=eff.kimi_bin,
         log_path=log_path,
-        timeout=eff.run_timeout,
-        max_identical_calls=eff.max_identical_calls,
-        risky_patterns=eff.risky_patterns,
-        checkout_path=checkout,
-        cost_per_interaction=eff.cost_per_interaction,
+        model=step.robot.model if step.robot else None,
         on_event=on_event,
     )
 
@@ -563,7 +625,8 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         if outcome.exit_code != 0:
             trigger = _handle_failure(
                 eff, s, step, task,
-                f"kimi saiu com código {outcome.exit_code}", "kimi_exit", STEP_FAILED,
+                f"executor ({task.executor}) saiu com código {outcome.exit_code}",
+                "exec_exit", STEP_FAILED,
             )
             s.commit()
             return trigger
@@ -705,6 +768,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                     task.error = result.detail
             _finish(step)
             s.commit()
+            _spawn_tasks(session_factory, step_id, checkout)
             return None
 
         step.status = STEP_DONE
@@ -836,6 +900,7 @@ def _decide_subtask_implement(
         _system_event(s, step, "phase_done", {"next": nxt.position if nxt else None, "subtasks": True})
         _finish(step)
         s.commit()
+    _spawn_tasks(session_factory, step_id, checkout)
     return None
 
 
@@ -888,6 +953,7 @@ def _decide_subtask_verify(
             )
             _finish(step)
             s.commit()
+            _spawn_tasks(session_factory, step_id, checkout)
             return None
 
         if result.startswith("sub:"):
@@ -1016,7 +1082,11 @@ def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: s
         if task is None:
             return
         checkout = _task_workspace(eff, task.repository.id, task.id)
-        pm_robot = s.query(Robot).filter(Robot.name == "pm").first()
+        pm_robot = (
+            s.query(Robot)
+            .filter(Robot.name == "pm", Robot.repository_id.is_(None))
+            .first()
+        )
         if pm_robot is None:
             return
         context = _pm_context(s, task)
@@ -1056,17 +1126,15 @@ def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: s
         s.commit()
 
     effective_cwd = checkout if os.path.isdir(checkout) else eff.workspace_dir
-    outcome = kimi_exec.run_kimi(
+    outcome = _run_executor(
+        eff,
+        task.executor,
         prompt,
         cwd=effective_cwd,
-        kimi_bin=eff.kimi_bin,
         log_path=log_path,
-        timeout=eff.run_timeout,
-        max_identical_calls=eff.max_identical_calls,
-        risky_patterns=eff.risky_patterns,
-        checkout_path=effective_cwd,
-        cost_per_interaction=0.0,
+        model=pm_robot.model if pm_robot else None,
         on_event=None,
+        kimi_cost_per_interaction=0.0,
     )
 
     raw = verdicts.read_verdict(effective_cwd)
@@ -1199,6 +1267,7 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
                 description=description,
                 kind=kind,
                 status="created",
+                executor=task.executor,
                 budget_limit=target_repo.task_budget if target_repo.task_budget is not None else task.budget_limit,
                 parent_task_id=task.id,
             )
@@ -1218,6 +1287,7 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
                         position=ps.position,
                         robot_id=ps.robot_id,
                         post_merge=ps.post_merge,
+                        pause_before=ps.pause_before,
                         status="created",
                     )
                 )

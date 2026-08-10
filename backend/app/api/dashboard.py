@@ -12,6 +12,7 @@ from ..models import (
     TASK_IN_PROGRESS,
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
+    TASK_WAITING_APPROVAL,
     RunEvent,
     Task,
     TaskStep,
@@ -68,6 +69,34 @@ def _build_notices(session: Session) -> list[NoticeOut]:
                 level="warning",
                 kind="needs_review",
                 message=task.error or "aguardando revisão",
+                ts=task.updated_at,
+            )
+        )
+
+    # tasks paradas em gate de aprovação humana (pause_before no pipeline)
+    gate_tasks = (
+        session.query(Task)
+        .filter(Task.status == TASK_WAITING_APPROVAL)
+        .order_by(Task.updated_at.desc())
+        .limit(10)
+        .all()
+    )
+    for task in gate_tasks:
+        gated = next(
+            (st for st in sorted(task.steps, key=lambda x: x.position)
+             if st.status == "pending" and st.pause_before),
+            None,
+        )
+        robot = gated.robot.name if gated and gated.robot else "?"
+        notices.append(
+            NoticeOut(
+                task_id=task.id,
+                task_title=task.title,
+                task_status=task.status,
+                level="warning",
+                kind="human_gate",
+                message=f"aguardando aprovação para executar a fase "
+                        f"F{gated.position if gated else '?'} · {robot}",
                 ts=task.updated_at,
             )
         )

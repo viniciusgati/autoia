@@ -128,6 +128,56 @@ NÃO modifique nem commite arquivos: aqui só se valida. Emita o veredicto obrig
 decidir o próximo passo de uma tarefa travada, analisando o contexto (status, falhas,
 orçamento, tentativas) e emitindo a decisão no formato obrigatório.""",
     ),
+    (
+        "browser-tester",
+        "verify",
+        """Você é o robô BROWSER TESTER — teste visual e funcional REAL da aplicação após deploy.
+
+Título: {task_title}
+Descrição: {task_description}
+
+Sua missão é validar a aplicação em execução REAL: abra o navegador, interaja com a UI,
+verifique visualmente cada critério de aceite que envolva interface. Você é o ÚNICO que
+testa com um navegador de verdade — o tester tradicional só roda testes automatizados.
+
+### Ferramentas disponíveis
+- **kimi-webbridge (MCP)** — use como ferramenta PRINCIPAL. Controle o navegador real para
+  abrir páginas, clicar, preencher formulários, verificar textos e elementos visíveis.
+  Tire screenshots de cada tela/fluxo testado.
+- **Playwright** — use como FALLBACK quando precisar de automação mais complexa
+  (múltiplas abas, testes de API + UI combinados, verificações de rede).
+
+### O que testar
+1. Abra a aplicação (se for web, use a URL de desenvolvimento ou staging; se o projeto
+   tiver um script de start, rode-o primeiro).
+2. Para CADA critério de aceite da história que envolva UI, faça o teste visual:
+   - Navegue até a tela relevante
+   - Interaja com os elementos (clique, preencha, submeta)
+   - Verifique se o comportamento está correto
+   - Tire um screenshot para cada passo crítico
+3. Teste também o caminho feliz E pelo menos 1 cenário de erro (ex.: formulário vazio,
+   credenciais inválidas, campo obrigatório não preenchido).
+
+### Screenshots (OBRIGATÓRIO)
+Salve TODOS os screenshots no diretório `autoia_screenshots/step_<id>` na raiz do
+checkout (o ID da fase está no autoia_handoff.md). Use nomes descritivos:
+`login-sucesso.png`, `dashboard-vazio.png`, `form-erro-validacao.png`, etc.
+
+Documente CADA screenshot no seu SUMMARY com:
+- O que foi testado
+- Se passou ou falhou
+- Qualquer observação relevante
+
+Os screenshots serão exibidos automaticamente na interface do autoia como galeria de
+artifacts — são a evidência visual do seu trabalho.
+
+### Veredicto
+Após testar tudo, escreva `autoia_verdict.txt`:
+- PASS: todos os critérios visuais atendidos, sem regressões
+- FAIL: qualquer tela/quebra ou comportamento incorreto, com relatório detalhado
+
+NÃO modifique código — apenas TESTE e REPORTE.""",
+    ),
 ]
 
 SEED_PIPELINES = [
@@ -147,12 +197,28 @@ SEED_PIPELINES = [
         "po-qa-dev-tester-avaliador-merge",
         ["po", "qa", "developer", "tester", "avaliador", "merger"],
     ),
+    (
+        "po-qa-dev-tester-avaliador-deploytest-browser",
+        [
+            ("po", False),
+            ("qa", False),
+            ("developer", False),
+            ("tester", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),   # pós-merge: valida deploy na default integrada
+            ("browser-tester", True),  # pós-merge: smoke test visual com navegador real
+        ],
+    ),
 ]
 
 
 def seed(session_factory) -> None:
     with session_factory() as s:
-        robots = {r.name: r for r in s.query(Robot).all()}
+        robots = {
+            r.name: r
+            for r in s.query(Robot).filter(Robot.repository_id.is_(None)).all()
+        }
         for name, role, mission in SEED_ROBOTS:
             robot = robots.get(name)
             if robot is None:
@@ -165,21 +231,41 @@ def seed(session_factory) -> None:
         s.commit()
 
         for pipeline_name, steps_spec in SEED_PIPELINES:
-            if s.query(Pipeline).filter(Pipeline.name == pipeline_name).first():
-                continue
-            pipeline = Pipeline(name=pipeline_name)
+            pipeline = (
+                s.query(Pipeline)
+                .filter(
+                    Pipeline.name == pipeline_name,
+                    Pipeline.repository_id.is_(None),
+                )
+                .first()
+            )
+            if pipeline is None:
+                pipeline = Pipeline(name=pipeline_name)
+                s.add(pipeline)
+            existing = {(ps.position, ps.robot_id): ps for ps in pipeline.steps}
+            existing_robots = {ps.robot.name: ps for ps in pipeline.steps if ps.robot}
             for position, spec in enumerate(steps_spec):
                 robot_name, post_merge = spec if isinstance(spec, tuple) else (spec, False)
-                robot = s.query(Robot).filter(Robot.name == robot_name).first()
-                if robot:
-                    pipeline.steps.append(
-                        PipelineStep(
-                            position=position,
-                            robot_id=robot.id,
-                            post_merge=post_merge,
-                        )
+                robot = (
+                    s.query(Robot)
+                    .filter(Robot.name == robot_name, Robot.repository_id.is_(None))
+                    .first()
+                )
+                if not robot:
+                    continue
+                # Pipeline existente: adiciona apenas fases do seed que não existem
+                # (por robô), preservando personalizações e posições já criadas.
+                if robot.name in existing_robots:
+                    continue
+                if (position, robot.id) in existing:
+                    continue
+                pipeline.steps.append(
+                    PipelineStep(
+                        position=position,
+                        robot_id=robot.id,
+                        post_merge=post_merge,
                     )
-            s.add(pipeline)
+                )
         s.commit()
         log.info("seed concluído (robôs: %s; pipelines: %s)",
                  ", ".join(r[0] for r in SEED_ROBOTS),

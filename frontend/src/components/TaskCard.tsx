@@ -1,0 +1,210 @@
+import { useState } from "react";
+import { Link } from "react-router-dom";
+import { api } from "../api";
+import PhaseStepper from "./PhaseStepper";
+import StatusBadge from "./StatusBadge";
+import type { Task, TaskStep } from "../types";
+
+/** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
+function faseAtual(task: Task): TaskStep | null {
+  const steps = [...task.steps].sort((a, b) => a.position - b.position);
+  return (
+    steps.find((s) => s.status === "running") ??
+    steps.find((s) => s.status === "pending") ??
+    steps[task.current_step] ??
+    null
+  );
+}
+
+/** Tarefa que precisa de ação humana (revisão/aprovação/bloqueio). */
+function precisaHumano(task: Task): string | null {
+  if (task.status === "needs_review") return "aguardando revisão humana";
+  if (task.status === "waiting_approval") return "aguardando aprovação humana";
+  if (task.status === "blocked") return "bloqueada — requer atenção";
+  if (
+    task.status !== "done" &&
+    task.status !== "failed" &&
+    task.steps.some((s) => s.status === "guardrail_blocked")
+  ) {
+    return "guardrail bloqueou execução";
+  }
+  return null;
+}
+
+export default function TaskCard({
+  task,
+  detailPath,
+  repoName,
+  onChanged,
+  onError,
+}: {
+  task: Task;
+  /** Caminho base do detalhe (ex.: `/tasks` ou `/:repoId/tasks`). */
+  detailPath: string;
+  repoName?: string;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+
+  const alert = precisaHumano(task);
+  const hasGuardrail = task.steps.some((s) => s.status === "guardrail_blocked");
+  const isErr = task.status === "blocked" || (hasGuardrail && !alert?.includes("revisão"));
+  const step = faseAtual(task);
+  const etapa = step
+    ? `F${step.position} · ${step.robot?.name ?? "?"}${step.post_merge ? " · pós-merge" : ""}`
+    : task.status === "done"
+      ? "concluída"
+      : "—";
+  const costPct = task.budget_limit > 0 ? task.cost_spent / task.budget_limit : 0;
+  const costHigh = costPct >= 0.8 && task.status !== "done";
+
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await action();
+      onChanged();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retornarAoDev = () => {
+    const steps = [...task.steps].sort((a, b) => a.position - b.position);
+    const implement = steps.find((s) => s.robot?.role === "implement" && !s.post_merge);
+    return api.bouncebackTask(task.id, implement ? implement.position : 0);
+  };
+
+  return (
+    <div className={`task-card${alert ? (isErr ? " task-card-err" : " task-card-warn") : ""}`}>
+      <div className="task-card-head">
+        <Link to={`${detailPath}/${task.id}`} className="task-card-title">
+          #{task.id} {task.title}
+        </Link>
+        <StatusBadge status={task.status} />
+      </div>
+
+      {alert && (
+        <div className={`task-card-alert${isErr ? " task-card-alert-err" : ""}`}>
+          ⚠ {alert}
+        </div>
+      )}
+
+      <div className="task-card-stage">
+        <span className="muted small">etapa atual</span>
+        <span className="task-card-stage-name">{etapa}</span>
+      </div>
+
+      <PhaseStepper task={task} muted />
+
+      <div className="task-card-meta">
+        {repoName && <span className="muted">{repoName}</span>}
+        <span className="task-card-executor" title={`executor: ${task.executor}`}>
+          {task.executor === "opencode" ? "opencode" : "kimi"}
+        </span>
+        <span className={`mono small${costHigh ? " task-card-cost-warn" : " muted"}`}>
+          {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
+        </span>
+      </div>
+
+      <div className="task-card-actions">
+        {task.status === "created" && (
+          <button onClick={() => run(() => api.startTask(task.id))} disabled={busy}>
+            iniciar
+          </button>
+        )}
+        {task.status === "needs_review" && (
+          <>
+            <button
+              onClick={() => run(() => api.reviewTask(task.id, { action: "approve", extra_budget: 0 }))}
+              disabled={busy}
+            >
+              aprovar
+            </button>
+            <button
+              className="warn-btn"
+              onClick={() => run(retornarAoDev)}
+              disabled={busy}
+            >
+              retornar ao dev
+            </button>
+          </>
+        )}
+        <Link to={`${detailPath}/${task.id}`} className="link-btn">
+          ver detalhes →
+        </Link>
+      </div>
+    </div>
+  );
+}
+
+/** Opções de filtro por status/grupo de status. */
+const FILTROS: { value: string; label: string; match: (t: Task) => boolean }[] = [
+  { value: "todas", label: "todas", match: () => true },
+  {
+    value: "ativas",
+    label: "em andamento",
+    match: (t) => t.status === "queued" || t.status === "in_progress",
+  },
+  { value: "humano", label: "precisam de humano", match: (t) => precisaHumano(t) !== null },
+  { value: "criadas", label: "criadas", match: (t) => t.status === "created" },
+  { value: "concluidas", label: "concluídas", match: (t) => t.status === "done" },
+  { value: "falharam", label: "falharam", match: (t) => t.status === "failed" },
+];
+
+export function TaskCardGrid({
+  tasks,
+  detailPath,
+  repoNames,
+  onChanged,
+  onError,
+}: {
+  tasks: Task[];
+  detailPath: string;
+  repoNames?: Record<number, string>;
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const [filtro, setFiltro] = useState("todas");
+  if (tasks.length === 0) return null;
+  const sorted = [...tasks].sort((a, b) => b.id - a.id);
+  const ativo = FILTROS.find((f) => f.value === filtro) ?? FILTROS[0];
+  const filtrados = sorted.filter(ativo.match);
+  return (
+    <>
+      <div className="task-filters">
+        {FILTROS.map((f) => {
+          const count = sorted.filter(f.match).length;
+          const selected = f.value === ativo.value;
+          return (
+            <button
+              key={f.value}
+              className={`task-filter${selected ? " task-filter-active" : ""}`}
+              onClick={() => setFiltro(f.value)}
+            >
+              {f.label} <span className="task-filter-count">{count}</span>
+            </button>
+          );
+        })}
+      </div>
+      {filtrados.length === 0 ? (
+        <p className="muted">Nenhuma tarefa neste filtro.</p>
+      ) : (
+        <div className="task-grid">
+          {filtrados.map((task) => (
+            <TaskCard
+              key={task.id}
+              task={task}
+              detailPath={detailPath}
+              repoName={repoNames?.[task.repository_id]}
+              onChanged={onChanged}
+              onError={onError}
+            />
+          ))}
+        </div>
+      )}
+    </>
+  );
+}

@@ -18,6 +18,7 @@ from ..models import (
     TASK_IN_PROGRESS,
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
+    TASK_WAITING_APPROVAL,
     Pipeline,
     RunEvent,
     SubTask,
@@ -25,12 +26,14 @@ from ..models import (
     TaskStep,
 )
 from ..schemas import (
+    ApproveStepRequest,
     BouncebackRequest,
     FeedbackCreate,
     RetryRequest,
     ReviewRequest,
     TaskCreate,
     TaskOut,
+    TaskUpdateRequest,
 )
 from ..worker.runner import _pm_decide
 from .deps import get_repository_or_404, get_session, get_settings
@@ -67,6 +70,8 @@ def create_task(
     pipeline = session.get(Pipeline, data.pipeline_id)
     if pipeline is None:
         raise HTTPException(404, "pipeline não encontrado")
+    if pipeline.repository_id not in (None, data.repository_id):
+        raise HTTPException(400, "pipeline não pertence a este projeto")
     if not pipeline.steps:
         raise HTTPException(400, "pipeline sem fases")
 
@@ -76,6 +81,7 @@ def create_task(
         title=data.title,
         description=data.description,
         kind=data.kind,
+        executor=data.executor,
         budget_limit=data.budget_limit if data.budget_limit is not None else settings.task_budget,
     )
     for step in sorted(pipeline.steps, key=lambda x: x.position):
@@ -84,6 +90,7 @@ def create_task(
                 position=step.position,
                 robot_id=step.robot_id,
                 post_merge=step.post_merge,
+                pause_before=step.pause_before,
             )
         )
     for i, st_data in enumerate(data.subtasks):
@@ -285,6 +292,86 @@ def retry_step(
     step.started_at = None
     task.status = TASK_QUEUED
     task.error = None
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/approve-step", response_model=TaskOut)
+def approve_step(
+    task_id: int,
+    data: ApproveStepRequest,
+    session: Session = Depends(get_session),
+):
+    """Aprovação humana de uma fase com `pause_before` (gate no pipeline).
+
+    A task está em `waiting_approval` com a fase pendente; aprovar libera a fase
+    para o worker executar. A `note` opcional vira feedback externo da task e
+    entra no handoff da fase aprovada.
+    """
+    task = _get_task_or_404(session, task_id)
+    if task.status != TASK_WAITING_APPROVAL:
+        raise HTTPException(
+            400,
+            f"tarefa não está aguardando aprovação (status atual: {task.status})",
+        )
+    step = next((st for st in task.steps if st.position == data.position), None)
+    if step is None:
+        raise HTTPException(404, f"fase {data.position} não encontrada")
+    if not step.pause_before:
+        raise HTTPException(400, f"fase {data.position} não tem gate de aprovação")
+    if step.status != STEP_PENDING:
+        raise HTTPException(400, f"fase {data.position} não está pendente (status: {step.status})")
+
+    if data.note:
+        task.feedback = data.note
+    # O gate é one-shot: consumido na aprovação, senão o claim re-pausaria a task.
+    step.pause_before = False
+    task.status = TASK_QUEUED
+    task.error = None
+
+    max_seq = (
+        session.query(func.max(RunEvent.seq))
+        .filter(RunEvent.step_id == step.id)
+        .scalar() or 0
+    )
+    session.add(RunEvent(
+        step_id=step.id,
+        seq=max_seq + 1,
+        kind="human_gate_approved",
+        payload={
+            "position": step.position,
+            "note": data.note,
+            "from_status": TASK_WAITING_APPROVAL,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    ))
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.patch("/{task_id}", response_model=TaskOut)
+def update_task(
+    task_id: int,
+    data: TaskUpdateRequest,
+    session: Session = Depends(get_session),
+):
+    """Edição humana da história (descrição + critérios de aceite).
+
+    Permitida apenas antes do fluxo (created) ou durante uma parada por
+    aprovação humana (waiting_approval) — nunca no meio da execução, para não
+    divergir do que o PO refinou.
+    """
+    task = _get_task_or_404(session, task_id)
+    if task.status not in ("created", TASK_WAITING_APPROVAL):
+        raise HTTPException(
+            400,
+            f"editar história só é permitido em 'created' ou 'waiting_approval' "
+            f"(status atual: {task.status})",
+        )
+    if data.description is not None:
+        task.description = data.description
+    if data.acceptance_criteria is not None:
+        task.acceptance_criteria = data.acceptance_criteria
     session.commit()
     return _get_task_or_404(session, task_id)
 

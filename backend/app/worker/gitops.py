@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 _GIT_TIMEOUT = 300
 
@@ -61,6 +62,34 @@ def resolve_default_branch(path: str, fallback: str) -> str:
 
 def branch_exists(path: str, branch: str) -> bool:
     return run_git(path, "rev-parse", "--verify", "--quiet", branch, check=False).returncode == 0
+
+
+def repo_is_empty(path: str) -> bool:
+    """True se o checkout não tem nenhum commit (remote recém-criado, sem branch)."""
+    return run_git(path, "rev-parse", "--verify", "HEAD", check=False).returncode != 0
+
+
+def bootstrap_empty_repo(
+    path: str, branch: str, repo_name: str, user_name: str, user_email: str
+) -> None:
+    """Cria a branch default num repo vazio: README básico + commit inicial + push.
+
+    Usado quando o remote acabou de ser criado (ex.: GitHub) e ainda não tem branch.
+    Configura identidade git local (só neste checkout) para o commit funcionar.
+    """
+    run_git(path, "config", "user.name", user_name)
+    run_git(path, "config", "user.email", user_email)
+    (Path(path) / "README.md").write_text(
+        f"# {repo_name}\n\nRepositório inicializado automaticamente pela autoia.\n",
+        encoding="utf-8",
+    )
+    run_git(path, "add", "-A")
+    run_git(path, "commit", "-m", f"autoia: commit inicial com README básico ({repo_name})")
+    run_git(path, "branch", "-M", branch)
+    run_git(path, "push", "-u", "origin", branch)
+    # remotes locais (ex.: git init --bare) podem ter HEAD apontando para um
+    # ref inexistente; alinha o origin/HEAD local (best-effort, sem tocar o remote).
+    run_git(path, "remote", "set-head", "origin", branch, check=False)
 
 
 def is_tracked(path: str, name: str) -> bool:

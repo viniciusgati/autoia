@@ -22,6 +22,26 @@ def test_clone_and_resolve_branch(bare_repo, tmp_path):
     assert gitops.resolve_default_branch(dest, "main") == "main"
 
 
+def test_bootstrap_empty_repo(tmp_path):
+    """Remote vazio (sem branch): bootstrap cria README + commit inicial e faz push."""
+    empty = tmp_path / "vazio.git"
+    _git(tmp_path, "init", "--bare", str(empty))
+    dest = str(tmp_path / "clone")
+    gitops.clone(str(empty), dest)
+    assert gitops.repo_is_empty(dest)
+
+    gitops.bootstrap_empty_repo(dest, "main", "meu-repo", "autoia", "autoia@local")
+
+    assert not gitops.repo_is_empty(dest)
+    assert (tmp_path / "clone" / "README.md").exists()
+    assert gitops.resolve_default_branch(dest, "main") == "main"
+    # o push chegou no bare (a branch origin/main tem o README num novo clone)
+    dest2 = str(tmp_path / "clone2")
+    gitops.clone(str(empty), dest2)
+    files = _git(dest2, "ls-tree", "-r", "--name-only", "origin/main").stdout
+    assert "README.md" in files
+
+
 def test_branch_commit_merge_push(bare_repo, tmp_path):
     dest = str(tmp_path / "clone")
     gitops.clone(bare_repo, dest)

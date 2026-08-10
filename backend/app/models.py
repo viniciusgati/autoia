@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base, utcnow
@@ -16,6 +16,7 @@ TASK_DONE = "done"
 TASK_FAILED = "failed"
 TASK_BLOCKED = "blocked"
 TASK_NEEDS_REVIEW = "needs_review"
+TASK_WAITING_APPROVAL = "waiting_approval"
 
 STEP_PENDING = "pending"
 STEP_RUNNING = "running"
@@ -60,9 +61,13 @@ class Repository(Base):
 
 class Robot(Base):
     __tablename__ = "robots"
+    __table_args__ = (
+        UniqueConstraint("repository_id", "name", name="uq_robot_scope_name"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(100), unique=True)
+    repository_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("repositories.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(100))
     mission: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(30), default="implement")
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
@@ -72,9 +77,13 @@ class Robot(Base):
 
 class Pipeline(Base):
     __tablename__ = "pipelines"
+    __table_args__ = (
+        UniqueConstraint("repository_id", "name", name="uq_pipeline_scope_name"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    name: Mapped[str] = mapped_column(String(200), unique=True)
+    repository_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("repositories.id"), nullable=True)
+    name: Mapped[str] = mapped_column(String(200))
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     steps: Mapped[list["PipelineStep"]] = relationship(
@@ -92,6 +101,7 @@ class PipelineStep(Base):
     position: Mapped[int] = mapped_column(Integer)
     robot_id: Mapped[int] = mapped_column(ForeignKey("robots.id"))
     post_merge: Mapped[bool] = mapped_column(default=False)
+    pause_before: Mapped[bool] = mapped_column(default=False)
 
     pipeline: Mapped[Pipeline] = relationship(back_populates="steps")
     robot: Mapped[Robot] = relationship()
@@ -107,6 +117,8 @@ class Task(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     kind: Mapped[str] = mapped_column(String(50), default="issue")
     status: Mapped[str] = mapped_column(String(30), default="created")
+    # Executor das fases: "kimi" (kimi-code CLI) ou "opencode" (opencode CLI).
+    executor: Mapped[str] = mapped_column(String(20), default="kimi")
     current_step: Mapped[int] = mapped_column(Integer, default=0)
     branch: Mapped[str | None] = mapped_column(String(300), nullable=True)
     acceptance_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -146,6 +158,7 @@ class TaskStep(Base):
     attempt: Mapped[int] = mapped_column(Integer, default=1)
     verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)
     post_merge: Mapped[bool] = mapped_column(default=False)
+    pause_before: Mapped[bool] = mapped_column(default=False)
     log_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     diff_stat: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -213,7 +213,7 @@ export default function PhaseDetail() {
   const [error, setError] = useState("");
 
   const step = task?.steps.find((s) => s.id === stepId) ?? null;
-  const active = task ? ["queued", "in_progress", "needs_review", "blocked"].includes(task.status) : false;
+  const active = task ? ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"].includes(task.status) : false;
 
   useEffect(() => {
     api.getTask(taskId)

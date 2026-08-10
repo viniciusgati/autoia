@@ -53,7 +53,8 @@ def extract_file_path(arguments: str) -> str | None:
         return None
     if not isinstance(data, dict):
         return None
-    for key in ("path", "file_path", "target_path"):
+    # aceita snake_case (kimi) e camelCase (opencode: filePath)
+    for key in ("path", "file_path", "target_path", "filePath", "targetPath"):
         value = data.get(key)
         if isinstance(value, str) and value:
             return value

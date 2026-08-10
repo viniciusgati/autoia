@@ -74,9 +74,16 @@ def fake_kimi(tmp_path):
         verdict_code = ""
         if verdict:
             rule = VERDICT_RULES[verdict]
+        verdict_code = ""
+        if verdict:
+            rule = VERDICT_RULES[verdict]
             verdict_code = (
                 "import os\n"
-                "prompt = sys.argv[sys.argv.index('-p') + 1] if '-p' in sys.argv else ''\n"
+                "prompt = ''\n"
+                "if '-p' in sys.argv:\n"
+                "    prompt = sys.argv[sys.argv.index('-p') + 1]\n"
+                "elif len(sys.argv) > 1 and sys.argv[1] == 'run':\n"
+                "    prompt = sys.argv[2]\n"
                 + rule
                 + "\nif v:\n    with open('autoia_verdict.txt', 'w') as f:\n        f.write(v)\n"
             )

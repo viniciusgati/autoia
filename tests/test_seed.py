@@ -21,8 +21,9 @@ def test_seed_roles_and_pipeline(settings):
         assert roles["merger"] == "merge"
         assert roles["deploy-tester"] == "verify"
         assert roles["pm"] == "pm"
+        assert roles["browser-tester"] == "verify"
 
-        assert s.query(Pipeline).count() == 2
+        assert s.query(Pipeline).count() == 3
 
         # com deploy: avaliador pré-merge + deploy-tester pós-merge (7 fases)
         deploy = (
@@ -34,6 +35,17 @@ def test_seed_roles_and_pipeline(settings):
         assert order == ["po", "qa", "developer", "tester", "avaliador", "merger", "deploy-tester"]
         post = [st.post_merge for st in sorted(deploy.steps, key=lambda x: x.position)]
         assert post == [False, False, False, False, False, False, True]
+
+        # com deploy + browser: deploy-tester e browser-tester pós-merge (8 fases)
+        browser = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "po-qa-dev-tester-avaliador-deploytest-browser")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(browser.steps, key=lambda x: x.position)]
+        assert order == ["po", "qa", "developer", "tester", "avaliador", "merger", "deploy-tester", "browser-tester"]
+        post = [st.post_merge for st in sorted(browser.steps, key=lambda x: x.position)]
+        assert post == [False, False, False, False, False, False, True, True]
 
         # sem deploy: termina no merger (6 fases, todas pré-merge)
         sem_deploy = (
@@ -48,5 +60,5 @@ def test_seed_roles_and_pipeline(settings):
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
-        assert s.query(Robot).count() == 8
-        assert s.query(Pipeline).count() == 2
+        assert s.query(Robot).count() == 9
+        assert s.query(Pipeline).count() == 3

@@ -73,6 +73,7 @@ class RobotCreate(BaseModel):
     mission: str = Field(min_length=1)
     role: str = Field(default="implement", max_length=30)
     model: str | None = None
+    repository_id: int | None = None
 
 
 class RobotUpdate(BaseModel):
@@ -86,6 +87,7 @@ class RobotOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    repository_id: int | None = None
     name: str
     mission: str
     role: str
@@ -100,11 +102,13 @@ class PipelineStepIn(BaseModel):
     position: int = Field(ge=0)
     robot_id: int
     post_merge: bool = False
+    pause_before: bool = False
 
 
 class PipelineCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
     steps: list[PipelineStepIn] = Field(min_length=1)
+    repository_id: int | None = None
 
 
 class PipelineStepOut(BaseModel):
@@ -114,6 +118,7 @@ class PipelineStepOut(BaseModel):
     position: int
     robot_id: int
     post_merge: bool
+    pause_before: bool = False
     robot: RobotOut | None = None
 
 
@@ -121,6 +126,7 @@ class PipelineOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    repository_id: int | None = None
     name: str
     steps: list[PipelineStepOut]
     created_at: datetime
@@ -167,6 +173,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
     kind: Literal["issue", "bug", "feature", "chore"] = "issue"
+    executor: Literal["kimi", "opencode"] = "kimi"
     budget_limit: float | None = Field(default=None, gt=0)
     subtasks: list[SubTaskIn] = []
 
@@ -181,6 +188,7 @@ class TaskStepOut(BaseModel):
     attempt: int
     verdict: str | None
     post_merge: bool
+    pause_before: bool = False
     log_path: str | None
     summary: str | None
     diff_stat: str | None = None
@@ -200,6 +208,7 @@ class TaskOut(BaseModel):
     description: str
     kind: str
     status: str
+    executor: str = "kimi"
     current_step: int
     branch: str | None
     acceptance_criteria: str | None
@@ -236,6 +245,21 @@ class BouncebackRequest(BaseModel):
     target_position: int  # posição do step para onde voltar (ex.: 2 = implement)
     note: str | None = Field(default=None, max_length=2000)
     reviewed_by: str = "humano"  # identificação de quem confirmou
+
+
+class ApproveStepRequest(BaseModel):
+    """Aprovação humana de uma fase com `pause_before` (gate)."""
+
+    position: int  # posição do step aguardando aprovação
+    note: str | None = Field(default=None, max_length=10000)
+
+
+class TaskUpdateRequest(BaseModel):
+    """Edição humana da história (descrição/critérios) — permitida em `created` e
+    `waiting_approval`."""
+
+    description: str | None = None
+    acceptance_criteria: str | None = None
 
 
 # ---------- Eventos ----------

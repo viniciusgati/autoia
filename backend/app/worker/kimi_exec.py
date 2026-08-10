@@ -13,14 +13,16 @@ o guardrail detecta e para a execução. A primeira linha de defesa é o isolame
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
 import threading
-import time
-from dataclasses import dataclass
 
 from .. import guardrails
+from .exec_common import (
+    ExecOutcome,
+    drain_stderr,
+    kill_group,
+    make_watchdog,
+)
 
 # Tipos de evento emitidos para o callback.
 EVENT_TOOL_CALL = "tool_call"
@@ -29,40 +31,7 @@ EVENT_ASSISTANT_TEXT = "assistant_text"
 EVENT_GUARDRAIL_BLOCKED = "guardrail_blocked"
 EVENT_SYSTEM = "system"
 
-
-@dataclass
-class KimiOutcome:
-    exit_code: int | None = None
-    final_text: str = ""
-    interaction_count: int = 0
-    aborted: bool = False
-    timed_out: bool = False
-    abort_reason: str | None = None
-
-
-def _kill_group(proc: subprocess.Popen) -> None:
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=10)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        proc.wait()
-
-
-def _drain_stderr(pipe, logf, lock) -> None:
-    try:
-        for line in pipe:
-            with lock:
-                logf.write(f"[stderr] {line}")
-                logf.flush()
-    except ValueError:
-        pass  # arquivo fechado (processo abortado)
+KimiOutcome = ExecOutcome  # alias para compatibilidade
 
 
 def run_kimi(
@@ -99,20 +68,11 @@ def run_kimi(
         )
 
         stderr_thread = threading.Thread(
-            target=_drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
+            target=drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
         )
         stderr_thread.start()
 
-        timed_out = threading.Event()
-
-        def _watchdog() -> None:
-            time.sleep(timeout)
-            timed_out.set()
-            _kill_group(proc)
-
-        watchdog = threading.Timer(timeout, _watchdog)
-        watchdog.daemon = True
-        watchdog.start()
+        watchdog, timed_out = make_watchdog(timeout, proc)
 
         seq = 0
         interactions = 0
@@ -133,7 +93,7 @@ def run_kimi(
                 _persist(EVENT_GUARDRAIL_BLOCKED, log_violation)
             outcome.aborted = True
             outcome.abort_reason = reason
-            _kill_group(proc)
+            kill_group(proc)
             stderr_thread.join(timeout=5)
             return outcome
 

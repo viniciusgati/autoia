@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Route, Routes, useLocation } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { api } from "./api";
 import { DashboardIcon, PipelinesIcon, ProjectsIcon, RobotsIcon, TasksIcon } from "./components/Icons";
 import Home from "./pages/Home";
@@ -22,14 +22,23 @@ function useRepoId(): number | null {
   return null;
 }
 
+/** Renderiza Robots/Pipelines no escopo de um projeto (repoId do path). */
+function RepoScoped({ route }: { route: "/robots" | "/pipelines" }) {
+  const { repoId: repoIdStr } = useParams<{ repoId: string }>();
+  const repoId = Number(repoIdStr);
+  if (route === "/robots") return <Robots repoId={repoId} />;
+  return <Pipelines repoId={repoId} />;
+}
+
 export default function App() {
   const repoId = useRepoId();
+  const location = useLocation();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [workerAlive, setWorkerAlive] = useState<boolean | null>(null);
 
   useEffect(() => {
     api.listRepositories().then(setRepos).catch(() => {});
-  }, []);
+  }, [location.pathname]);
 
   useEffect(() => {
     const check = () => {
@@ -44,6 +53,15 @@ export default function App() {
 
   const currentRepo = repoId != null ? repos.find((r) => r.id === repoId) : null;
 
+  /** Se o path atual pertence ao projeto (ex.: /1, /1/tasks, /1/robots). */
+  const inRepo = (id: number) => {
+    const prefix = `/${id}`;
+    return (
+      location.pathname === prefix ||
+      location.pathname.startsWith(`${prefix}/`)
+    );
+  };
+
   return (
     <div className="layout">
       <nav className="sidebar">
@@ -54,6 +72,20 @@ export default function App() {
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
             <ProjectsIcon size={16} /> Todos os projetos
           </NavLink>
+
+          <div className="sidebar-projects">
+            {repos.map((repo) => (
+              <NavLink
+                key={repo.id}
+                to={`/${repo.id}`}
+                title={repo.name}
+                className={inRepo(repo.id) ? "active" : ""}
+              >
+                <span className="sidebar-project-dot" />
+                <span className="sidebar-project-link-name">{repo.name}</span>
+              </NavLink>
+            ))}
+          </div>
 
           {currentRepo && (
             <div className="sidebar-sub">
@@ -70,6 +102,18 @@ export default function App() {
                 className={({ isActive }) => (isActive ? "active" : "")}
               >
                 <TasksIcon size={16} /> Tarefas
+              </NavLink>
+              <NavLink
+                to={`/${currentRepo.id}/robots`}
+                className={({ isActive }) => (isActive ? "active" : "")}
+              >
+                <RobotsIcon size={16} /> Robôs
+              </NavLink>
+              <NavLink
+                to={`/${currentRepo.id}/pipelines`}
+                className={({ isActive }) => (isActive ? "active" : "")}
+              >
+                <PipelinesIcon size={16} /> Pipelines
               </NavLink>
             </div>
           )}
@@ -105,6 +149,14 @@ export default function App() {
           <Route path="/:repoId/tasks" element={<RepoTasks />} />
           <Route path="/:repoId/tasks/:taskId" element={<TaskDetail />} />
           <Route path="/:repoId/tasks/:taskId/phase/:stepId" element={<PhaseDetail />} />
+          <Route
+            path="/:repoId/robots"
+            element={<RepoScoped route="/robots" />}
+          />
+          <Route
+            path="/:repoId/pipelines"
+            element={<RepoScoped route="/pipelines" />}
+          />
         </Routes>
       </main>
     </div>

@@ -6,7 +6,7 @@ import PhaseStepper from "../components/PhaseStepper";
 import StatusBadge from "../components/StatusBadge";
 import type { Pipeline, Repository, Task, TaskStep } from "../types";
 
-const ATIVOS = ["queued", "in_progress", "needs_review", "blocked"];
+const ATIVOS = ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"];
 
 export default function RepoDashboard() {
   const { repoId: repoIdStr } = useParams<{ repoId: string }>();
@@ -43,7 +43,7 @@ export default function RepoDashboard() {
       const r = repos.find((r) => r.id === repoId) ?? null;
       setRepo(r);
     }).catch(() => {});
-    api.listPipelines().then(setPipelines).catch(() => {});
+    api.listPipelines(repoId).then(setPipelines).catch(() => {});
   }, [repoId]);
 
   const review = async (task: Task, action: "approve" | "cancel") => {
@@ -141,7 +141,7 @@ export default function RepoDashboard() {
 
       {/* Configurações do projeto */}
       {repo && (
-        <details style={{ marginTop: 28 }} open>
+        <details style={{ marginTop: 28 }}>
           <summary style={{ cursor: "pointer", color: "var(--accent)", fontWeight: 600, fontSize: 15, padding: "8px 0" }}>
             ⚙ Configurações do projeto
           </summary>
@@ -244,7 +244,10 @@ export default function RepoDashboard() {
                 >
                   <option value="">— global (escolher na criação) —</option>
                   {pipelines.map((p) => (
-                    <option key={p.id} value={p.id}>{p.name}</option>
+                    <option key={p.id} value={p.id}>
+                      {p.name}
+                      {p.repository_id == null ? " (global)" : ""}
+                    </option>
                   ))}
                 </select>
               </div>

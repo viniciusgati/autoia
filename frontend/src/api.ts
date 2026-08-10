@@ -45,16 +45,26 @@ export const api = {
     }),
 
   // robots
-  listRobots: () => request<Robot[]>("/api/robots"),
-  createRobot: (data: { name: string; mission: string; model?: string }) =>
+  listRobots: (repositoryId?: number) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<Robot[]>(`/api/robots${params}`);
+  },
+  createRobot: (data: { name: string; mission: string; role?: string; model?: string; repository_id?: number | null }) =>
     request<Robot>("/api/robots", { method: "POST", body: JSON.stringify(data) }),
   updateRobot: (id: number, data: Partial<Robot>) =>
     request<Robot>(`/api/robots/${id}`, { method: "PUT", body: JSON.stringify(data) }),
+  deleteRobot: (id: number) =>
+    request<void>(`/api/robots/${id}`, { method: "DELETE" }),
 
   // pipelines
-  listPipelines: () => request<Pipeline[]>("/api/pipelines"),
-  createPipeline: (data: { name: string; steps: { position: number; robot_id: number }[] }) =>
+  listPipelines: (repositoryId?: number) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<Pipeline[]>(`/api/pipelines${params}`);
+  },
+  createPipeline: (data: { name: string; steps: { position: number; robot_id: number; post_merge?: boolean; pause_before?: boolean }[]; repository_id?: number | null }) =>
     request<Pipeline>("/api/pipelines", { method: "POST", body: JSON.stringify(data) }),
+  deletePipeline: (id: number) =>
+    request<void>(`/api/pipelines/${id}`, { method: "DELETE" }),
 
   // tasks
   listTasks: (repositoryId?: number) => {
@@ -68,6 +78,7 @@ export const api = {
     title: string;
     description: string;
     kind: string;
+    executor?: string;
     budget_limit?: number;
   }) => request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(data) }),
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
@@ -93,6 +104,16 @@ export const api = {
     request<Task>(`/api/tasks/${taskId}/bounceback`, {
       method: "POST",
       body: JSON.stringify({ target_position: targetPosition, note, reviewed_by: reviewedBy || "humano" }),
+    }),
+  approveStep: (taskId: number, position: number, note?: string) =>
+    request<Task>(`/api/tasks/${taskId}/approve-step`, {
+      method: "POST",
+      body: JSON.stringify({ position, note }),
+    }),
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null }) =>
+    request<Task>(`/api/tasks/${taskId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
     }),
 
   // subtasks

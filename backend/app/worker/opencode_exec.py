@@ -1,0 +1,246 @@
+"""Execução do opencode CLI em modo não-interativo (--format json) com guardrails.
+
+O worker consome o stdout do `opencode run <prompt> --format json --dir <cwd>` linha
+a linha. Cada linha é um evento JSON: `step_start`, `tool_use` (tool + state.input /
+state.output), `text`, `step_finish` (com custo REAL do provedor em `cost`) e `error`.
+
+Diferenças vs. kimi:
+- O custo real vem do `step_finish` (a estimativa por interação do kimi não se aplica).
+- A `tool_use` também chega DEPOIS da execução (mesma limitação v1 do kimi): o
+  guardrail detecta e mata o processo; isolamento do checkout é a primeira defesa.
+"""
+
+from __future__ import annotations
+
+import json
+import subprocess
+import threading
+
+from .. import guardrails
+from .exec_common import ExecOutcome, drain_stderr, kill_group, make_watchdog
+
+# Tipos de evento emitidos para o callback (mesmos do kimi_exec).
+EVENT_TOOL_CALL = "tool_call"
+EVENT_TOOL_RESULT = "tool_result"
+EVENT_ASSISTANT_TEXT = "assistant_text"
+EVENT_GUARDRAIL_BLOCKED = "guardrail_blocked"
+EVENT_SYSTEM = "system"
+
+# Ferramentas do opencode (minúsculas) -> nomes usados pelo guardrails.
+_TOOL_NAME_MAP = {
+    "bash": "Bash",
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "multiedit": "MultiEdit",
+    "glob": "Glob",
+    "grep": "Grep",
+    "webfetch": "WebFetch",
+    "agent": "Agent",
+}
+
+_JSONL_SKIP_TYPES = {"step_start", "event", "shell", "session_start", "session_finish"}
+
+
+def _tool_call_part(part: dict) -> dict | None:
+    """Normaliza uma tool_use do opencode para o formato do guardrails."""
+    tool = part.get("tool")
+    if not tool:
+        return None
+    name = _TOOL_NAME_MAP.get(str(tool), str(tool))
+    args = part.get("state", {}).get("input", {})
+    return {
+        "tool": str(tool),
+        "name": name,
+        "arguments": json.dumps(args, ensure_ascii=False),
+    }
+
+
+def run_opencode(
+    prompt: str,
+    *,
+    cwd: str,
+    opencode_bin: str,
+    log_path: str,
+    timeout: int,
+    max_identical_calls: int,
+    risky_patterns: list[str],
+    checkout_path: str,
+    model: str | None = None,
+    on_event,
+) -> ExecOutcome:
+    """Roda o opencode e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
+
+    Se `on_event` retornar uma string (ex.: orçamento estourado), o run é abortado.
+    Síncrono: chamar de um thread/processo dedicado.
+    """
+    cmd = [opencode_bin, "run", prompt, "--format", "json", "--dir", cwd]
+    if model:
+        cmd += ["-m", model]
+    outcome = ExecOutcome()
+    log_lock = threading.Lock()
+
+    with open(log_path, "w", encoding="utf-8") as logf:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+
+        stderr_thread = threading.Thread(
+            target=drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
+        )
+        stderr_thread.start()
+
+        watchdog, timed_out = make_watchdog(timeout, proc)
+
+        seq = 0
+        interactions = 0
+        final_text = ""
+        last_call_key: tuple | None = None
+        identical_count = 0
+
+        def _persist(kind: str, payload: dict, cost: float = 0.0) -> str | None:
+            nonlocal seq
+            seq += 1
+            with log_lock:
+                logf.write(f"[{kind}] {json.dumps(payload, ensure_ascii=False)}\n")
+                logf.flush()
+            return on_event(kind, payload, cost) if on_event else None
+
+        def _abort(reason: str, log_violation: dict | None = None) -> ExecOutcome:
+            if log_violation:
+                _persist(EVENT_GUARDRAIL_BLOCKED, log_violation)
+            outcome.aborted = True
+            outcome.abort_reason = reason
+            kill_group(proc)
+            stderr_thread.join(timeout=5)
+            return outcome
+
+        try:
+            for line in proc.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except json.JSONDecodeError:
+                    with log_lock:
+                        logf.write(line + "\n")
+                    continue
+
+                event_type = obj.get("type")
+                part = obj.get("part") or {}
+
+                if event_type == "tool_use":
+                    tc = _tool_call_part(part)
+                    if tc is None:
+                        continue
+                    interactions += 1
+
+                    key = (tc["tool"], tc["arguments"])
+                    if key == last_call_key:
+                        identical_count += 1
+                    else:
+                        last_call_key = key
+                        identical_count = 1
+
+                    violation = guardrails.check_tool_call(
+                        {"function": {"name": tc["name"], "arguments": tc["arguments"]}},
+                        risky_patterns,
+                        checkout_path,
+                    )
+                    if violation is None and identical_count >= max_identical_calls:
+                        violation = guardrails.GuardrailViolation(
+                            pattern="identical-calls",
+                            detail=f"{tc['tool']} repetido {identical_count}x seguidas",
+                        )
+
+                    abort_reason = _persist(
+                        EVENT_TOOL_CALL,
+                        {
+                            "tool": tc["tool"],
+                            "input": part.get("state", {}).get("input"),
+                            "violation": violation.detail if violation else None,
+                        },
+                    )
+                    if violation:
+                        return _abort(
+                            f"guardrail: {violation.pattern}: {violation.detail}",
+                            {"pattern": violation.pattern, "detail": violation.detail},
+                        )
+                    if abort_reason:
+                        return _abort(abort_reason)
+
+                    state = part.get("state", {})
+                    _persist(
+                        EVENT_TOOL_RESULT,
+                        {
+                            "tool": tc["tool"],
+                            "status": state.get("status"),
+                            "error": state.get("error"),
+                            "output": state.get("output", ""),
+                        },
+                    )
+
+                elif event_type == "text":
+                    text = part.get("text", "")
+                    if text:
+                        final_text = text
+                        interactions += 1
+                        abort_reason = _persist(
+                            EVENT_ASSISTANT_TEXT, {"content": text}
+                        )
+                        if abort_reason:
+                            return _abort(abort_reason)
+
+                elif event_type == "step_finish":
+                    # custo REAL do provedor (soma parcial; o worker acumula e
+                    # avalia o orçamento a cada evento)
+                    cost = float(part.get("cost") or 0.0)
+                    abort_reason = _persist(
+                        EVENT_SYSTEM,
+                        {
+                            "opencode_step": {
+                                "reason": part.get("reason"),
+                                "tokens": part.get("tokens"),
+                                "cost": cost,
+                            }
+                        },
+                        cost,
+                    )
+                    if abort_reason:
+                        return _abort(abort_reason)
+
+                elif event_type == "error":
+                    reason = str(part.get("message") or obj.get("error") or "erro do opencode")
+                    _persist(EVENT_SYSTEM, {"error": reason})
+                    outcome.aborted = True
+                    outcome.abort_reason = f"opencode: {reason}"
+                    kill_group(proc)
+                    stderr_thread.join(timeout=5)
+                    return outcome
+
+                else:
+                    if event_type not in _JSONL_SKIP_TYPES:
+                        with log_lock:
+                            logf.write(line + "\n")
+        finally:
+            watchdog.cancel()
+
+        proc.wait()
+        stderr_thread.join(timeout=10)
+
+    if timed_out.is_set() and not outcome.aborted:
+        outcome.aborted = True
+        outcome.timed_out = True
+        outcome.abort_reason = f"timeout após {timeout}s"
+
+    outcome.exit_code = proc.returncode
+    outcome.final_text = final_text
+    outcome.interaction_count = interactions
+    return outcome

@@ -21,7 +21,7 @@ interface SessionData {
   events: RunEvent[]; // mais recentes primeiro
 }
 
-const ATIVOS = ["queued", "in_progress", "needs_review"];
+const ATIVOS = ["queued", "in_progress", "needs_review", "waiting_approval"];
 
 export default function Resumo() {
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -179,7 +179,7 @@ export default function Resumo() {
       )}
 
       {listaAtivas.map((task) => {
-        const needsReview = task.status === "needs_review";
+        const needsReview = task.status === "needs_review" || task.status === "waiting_approval";
         return (
           <div className={`resumo-card ${needsReview ? "resumo-card-review" : ""}`} key={task.id}>
             <div className="resumo-line">

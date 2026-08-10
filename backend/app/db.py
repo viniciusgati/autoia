@@ -53,19 +53,28 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("allow_external_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
     ],
-    "robots": [("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL")],
+    "robots": [
+        ("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL"),
+        ("repository_id", "INTEGER REFERENCES repositories(id)"),
+    ],
+    "pipelines": [("repository_id", "INTEGER REFERENCES repositories(id)")],
     "tasks": [
         ("acceptance_criteria", "TEXT"),
         ("pm_decisions", "INTEGER DEFAULT 0 NOT NULL"),
         ("feedback", "TEXT"),
         ("parent_task_id", "INTEGER REFERENCES tasks(id)"),
+        ("executor", "VARCHAR(20) DEFAULT 'kimi' NOT NULL"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("diff_stat", "TEXT"),
+        ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
-    "pipeline_steps": [("post_merge", "BOOLEAN DEFAULT 0 NOT NULL")],
+    "pipeline_steps": [
+        ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
+    ],
     "step_artifacts": [],
 }
 
