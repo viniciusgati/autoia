@@ -263,6 +263,41 @@ def test_read_sessions_kimi_permitido(tmp_path, monkeypatch):
     )
 
 
+def test_read_docs_das_skills_do_agente_permitido(tmp_path, monkeypatch):
+    """O CLI do agente lê a documentação das próprias skills/plugins
+    (~/.kimi-code/plugins/.../references/*.md, SKILL.md) — sem isso, usar uma skill
+    dispara path-outside-workspace. Só `.md`; configs/binários seguem bloqueados."""
+    from app import guardrails
+
+    # raízes fora do tempdir (senão /tmp mascara o teste)
+    plugins = "/home/test/kimi-code/plugins"
+    monkeypatch.setattr(guardrails, "_AGENT_DOC_ROOTS", (plugins,))
+    checkout = "/w/checkout"
+
+    # leitura da referência da skill kimi-webbridge (caso real que travou a task 23)
+    ops = f"{plugins}/managed/kimi-webbridge/skills/kimi-webbridge/references/operations.md"
+    assert (
+        check_tool_call({"function": {"name": "Read", "arguments": f'{{"path":"{ops}"}}'}}, [], checkout)
+        is None
+    )
+    skill = f"{plugins}/managed/kimi-datasource/SKILL.md"
+    assert (
+        check_tool_call({"function": {"name": "Grep", "arguments": f'{{"path":"{skill}"}}'}}, [], checkout)
+        is None
+    )
+    # arquivo NÃO-markdown do plugin (ex.: config/binário) continua bloqueado
+    conf = f"{plugins}/managed/kimi-datasource/kimi.plugin.json"
+    assert (
+        check_tool_call({"function": {"name": "Read", "arguments": f'{{"path":"{conf}"}}'}}, [], checkout)
+        is not None
+    )
+    # escrita na área de docs continua bloqueada
+    assert (
+        check_tool_call({"function": {"name": "Write", "arguments": f'{{"path":"{ops}"}}'}}, [], checkout)
+        is not None
+    )
+
+
 def test_read_agents_md_fora_do_checkout_permitido(tmp_path):
     """O runtime do agente manda ler AGENTS.md que cobrem caminhos tocados (o
     workspace fica dentro do repo da autoia) — Read/Grep de AGENTS.md/CLAUDE.md

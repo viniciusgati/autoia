@@ -28,6 +28,17 @@ _READABLE_EXTRA_ROOTS = (
     "/var/tmp",
 )
 
+# Diretórios onde o CLI do agente guarda as skills/plugins que ele lê para se
+# instruir (ex.: `~/.kimi-code/plugins/managed/kimi-webbridge/skills/.../references/operations.md`,
+# `SKILL.md`). É documentação benigna — leitura não vaza código do projeto nem
+# permite escrita (que segue sempre bloqueada). Restrita a arquivos `.md` para
+# não expor configs/binários dos plugins (que podem conter segredos).
+_AGENT_DOC_ROOTS = (
+    os.path.join(os.path.expanduser("~"), ".kimi-code", "skills"),
+    os.path.join(os.path.expanduser("~"), ".kimi-code", "plugins"),
+    os.path.join(os.path.expanduser("~"), ".config", "opencode", "skills"),
+)
+
 # Arquivos de instrução (AGENTS.md/CLAUDE.md) cuja LEITURA é permitida de qualquer
 # lugar. O runtime do agente instrui ler AGENTS.md que cobrem caminhos tocados por
 # tool calls (ex.: ao rodar `./gradlew` que toca `~/.gradle`, ele manda ler os
@@ -93,6 +104,25 @@ def _read_allowed_instruction(path: str) -> bool:
     qualquer lugar: o runtime do agente manda ler os que cobrem os caminhos que
     ele toca (o workspace fica dentro do repo da autoia). Escrita nunca."""
     return os.path.basename(os.path.realpath(path)) in _INSTRUCTION_FILENAMES
+
+
+def _read_allowed_agent_docs(path: str) -> bool:
+    """Leitura da documentação das skills do próprio CLI (SKILL.md, references/*.md).
+
+    O runtime do agente lê esses arquivos para se instruir ao usar uma skill
+    (ex.: kimi-webbridge) — sem isso qualquer uso de skill com referências fora
+    do checkout é bloqueado como path-outside-workspace. Restrito a `.md`.
+    """
+    if not os.path.isabs(path):
+        return False
+    if not os.path.realpath(path).lower().endswith((".md", ".markdown")):
+        return False
+    real = os.path.realpath(path)
+    return any(
+        real == os.path.realpath(root) or real.startswith(os.path.realpath(root) + os.sep)
+        for root in _AGENT_DOC_ROOTS
+        if root
+    )
 
 
 # Ferramentas de inspeção SOMENTE-LEITURA: o termo procurado nunca é executado
@@ -193,7 +223,9 @@ def check_tool_call(
             # Leitura de logs do próprio kimi/temporários é permitida (o robô precisa
             # inspecionar a saída de comandos que ele mesmo executou); escrita não.
             if name in ("Read", "Grep") and (
-                _read_allowed_extra(path) or _read_allowed_instruction(path)
+                _read_allowed_extra(path)
+                or _read_allowed_instruction(path)
+                or _read_allowed_agent_docs(path)
             ):
                 return None
             return GuardrailViolation(
