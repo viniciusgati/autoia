@@ -169,6 +169,9 @@ export default function TaskCard({
             </button>
           </>
         )}
+        <Link to={`${detailPath}/${task.id}/workspace`} className="link-btn">
+          workspace ↗
+        </Link>
         <Link to={`${detailPath}/${task.id}`} className="link-btn">
           ver detalhes →
         </Link>

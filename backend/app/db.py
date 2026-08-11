@@ -70,12 +70,14 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("block_reason_type", "VARCHAR(50)"),
         ("block_reason", "TEXT"),
         ("block_question", "TEXT"),
+        ("block_options", "JSON"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("diff_stat", "TEXT"),
         ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("goal", "TEXT"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),

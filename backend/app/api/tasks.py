@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
+import re
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
@@ -12,7 +14,9 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 from ..models import (
     STEP_BLOCKED,
     STEP_FAILED,
+    STEP_GUARDRAIL_BLOCKED,
     STEP_PENDING,
+    STEP_RUNNING,
     TASK_BLOCKED,
     TASK_CANCELLED,
     TASK_DONE,
@@ -25,6 +29,7 @@ from ..models import (
     Pipeline,
     Repository,
     RunEvent,
+    StepSummary,
     SubTask,
     Task,
     TaskProposal,
@@ -35,8 +40,10 @@ from ..schemas import (
     BlockedContinueRequest,
     BouncebackRequest,
     FeedbackCreate,
+    InstructionRequest,
     RetryRequest,
     ReviewRequest,
+    StepDiffOut,
     TaskCreate,
     TaskListItem,
     TaskOut,
@@ -45,9 +52,12 @@ from ..schemas import (
     TaskSummaryOut,
     TaskUpdateRequest,
     TimelineEventOut,
+    WorkspaceOccurrenceOut,
+    WorkspaceOut,
 )
-from ..timeline import derive_task_timeline
-from ..worker.runner import _pm_decide, _system_event, create_child_task
+from ..timeline import derive_task_occurrences, derive_task_timeline
+from ..worker import gitops
+from ..worker.runner import _effective, _pm_decide, _system_event, _task_workspace, create_child_task
 from ..worker.summarizer import summarize_task
 from .deps import get_repository_or_404, get_session, get_settings
 from .etag import conditional
@@ -715,6 +725,10 @@ def continue_blocked(
     task.resume_instruction = data.instruction
     task.error = None
     task.status = TASK_QUEUED
+    task.block_reason_type = None
+    task.block_reason = None
+    task.block_question = None
+    task.block_options = []
 
     # Reabre a fase exata onde o desenvolvimento parou, preservando o histórico.
     step.status = STEP_PENDING
@@ -748,3 +762,323 @@ def continue_blocked(
     })
     session.commit()
     return _get_task_or_404(session, task_id)
+
+
+# ---------- Workspace (tela de trabalho) e interação por instrução ----------
+
+
+def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
+    """Reexecuta a partir de `target`: reabre o alvo e reseta os steps seguintes.
+
+    O histórico (RunEvent) nunca é apagado — novas execuções viram novas ocorrências
+    na timeline. Compartilhado pelo bounceback manual e pelo envio de instrução.
+    """
+    target.attempt += 1
+    target.status = STEP_PENDING
+    target.error = None
+    target.summary = None
+    target.verdict = None
+    target.finished_at = None
+    target.started_at = None
+    for st in task.steps:
+        if st.position > target.position:
+            st.status = STEP_PENDING
+            st.error = None
+            st.summary = None
+            st.verdict = None
+            st.finished_at = None
+            st.started_at = None
+    task.status = TASK_QUEUED
+    task.error = None
+
+
+def _reopen_step(step: TaskStep) -> None:
+    """Reabre UMA fase para re-execução (mantém a próxima inalterada)."""
+    step.attempt += 1
+    step.status = STEP_PENDING
+    step.error = None
+    step.started_at = None
+    step.finished_at = None
+
+
+def _emit_user_event(session: Session, step: TaskStep, instruction: str, blocked_step: int | None = None) -> None:
+    max_seq = (
+        session.query(func.max(RunEvent.seq))
+        .filter(RunEvent.step_id == step.id)
+        .scalar() or 0
+    )
+    session.add(RunEvent(
+        step_id=step.id,
+        seq=max_seq + 1,
+        kind="user_intervention",
+        payload={
+            "instruction": instruction,
+            "blocked_step": blocked_step,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    ))
+    max_seq = (
+        session.query(func.max(RunEvent.seq))
+        .filter(RunEvent.step_id == step.id)
+        .scalar() or 0
+    )
+    session.add(RunEvent(
+        step_id=step.id,
+        seq=max_seq + 1,
+        kind="execution_resumed",
+        payload={
+            "step": step.position,
+            "instruction": instruction,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    ))
+
+
+def _step_by_id(task: Task) -> dict[int, TaskStep]:
+    return {st.id: st for st in task.steps}
+
+
+def _count_tests(pattern: str, text: str) -> int | None:
+    m = re.search(pattern, text, re.IGNORECASE)
+    return int(m.group(1)) if m else None
+
+
+def _derive_tests(step: TaskStep, occ: dict) -> dict | None:
+    """Resultado de testes de fases verify (best-effort do texto real do robô)."""
+    if step is None or not step.robot or step.robot.role != "verify":
+        return None
+    text = f"{occ.get('delivered_text') or ''}\n{step.summary or ''}"
+    passed = _count_tests(r"(\d+)\s*testes?\s+passaram", text) or _count_tests(r"(\d+)\s+passed", text)
+    failed = _count_tests(r"(\d+)\s*testes?\s+f[áa]lharam", text) or _count_tests(r"(\d+)\s+failed", text)
+    return {
+        "passed": passed,
+        "failed": failed,
+        "verdict": step.verdict or occ.get("status"),
+    }
+
+
+@router.get("/{task_id}/workspace", response_model=WorkspaceOut)
+def task_workspace(
+    task_id: int,
+    settings=Depends(get_settings),
+    session: Session = Depends(get_session),
+):
+    """Tela de trabalho: task + timeline cronológica de execuções de fase.
+
+    Cada execução (tentativa) vira uma ocorrência — o histórico é imutável e
+    re-execuções aparecem como novas ocorrências, não substituem as anteriores.
+    """
+    task = _get_task_or_404(session, task_id)
+    occurrences = derive_task_occurrences(session, task)
+    step_summaries = {
+        (ss.step_id, ss.attempt): ss
+        for ss in session.query(StepSummary)
+        .filter(StepSummary.task_id == task_id)
+        .all()
+    }
+    proposals_by_step: dict[int | None, list[TaskProposal]] = {}
+    for p in task.proposals:
+        proposals_by_step.setdefault(p.step_id, []).append(p)
+    steps_by_id = _step_by_id(task)
+
+    # Diff real (git) por fase: computa UMA vez por posição (commit da fase é imutável).
+    files_by_position: dict[int, list[str]] = {}
+    checkout: str | None = None
+    repo = task.repository
+    if repo:
+        eff = _effective(settings, repo)
+        checkout = _task_workspace(eff, repo.id, task.id)
+        if os.path.isdir(os.path.join(checkout, ".git")):
+            for st in task.steps:
+                if st.status in (STEP_PENDING, STEP_RUNNING):
+                    continue
+                try:
+                    info = gitops.diff_for_step(checkout, st.position)
+                except Exception:
+                    continue
+                files_by_position[st.position] = info.get("files") or []
+
+    out_occurrences: list[WorkspaceOccurrenceOut] = []
+    for occ in occurrences:
+        sid = occ["step_id"]
+        step = steps_by_id.get(sid)
+        delivered = step_summaries.get((sid, occ["attempt"]))
+        out_occurrences.append(WorkspaceOccurrenceOut(
+            step_id=sid,
+            position=occ["position"],
+            robot=occ["robot"],
+            attempt=occ["attempt"],
+            status=occ["status"],
+            goal=occ["goal"],
+            started_at=occ["started_at"],
+            finished_at=occ["finished_at"],
+            last_activity=occ["last_activity"],
+            delivered_text=occ["delivered_text"],
+            delivered=delivered,
+            stop=occ["stop"],
+            proposals=proposals_by_step.get(sid, []),
+            files=files_by_position.get(occ["position"], []),
+            file_count=len(files_by_position.get(occ["position"], [])),
+            tests=_derive_tests(step, occ),
+            system_activity=occ["system_activity"],
+            events=occ["events"],
+        ))
+
+    decisions: list[dict] = []
+    if task.status == TASK_BLOCKED and task.block_reason_type == "decision_request":
+        decisions.append({
+            "question": task.block_reason,
+            "options": task.block_options or [],
+            "context": task.block_question or "",
+        })
+
+    return WorkspaceOut(
+        task=task,
+        summary=task.summary,
+        occurrences=out_occurrences,
+        decisions=decisions,
+    )
+
+
+@router.get("/{task_id}/steps/{position}/diff", response_model=StepDiffOut)
+def step_diff(
+    task_id: int,
+    position: int,
+    settings=Depends(get_settings),
+    session: Session = Depends(get_session),
+):
+    """Diff real (git) do commit da fase — o git é a fonte de verdade da alteração."""
+    task = _get_task_or_404(session, task_id)
+    step = next((st for st in task.steps if st.position == position), None)
+    if step is None:
+        raise HTTPException(404, f"fase {position} não encontrada")
+    repo = task.repository
+    eff = _effective(settings, repo)
+    checkout = _task_workspace(eff, repo.id, task.id)
+    if not os.path.isdir(os.path.join(checkout, ".git")):
+        return StepDiffOut()
+    try:
+        info = gitops.diff_for_step(checkout, position)
+    except Exception:
+        log.warning("diff da fase %s (task %s) falhou", position, task_id, exc_info=True)
+        info = {"stat": "", "diff": "", "files": [], "commit": None}
+    return StepDiffOut(
+        stat=info["stat"],
+        diff=info["diff"],
+        files=info["files"],
+        commit=info["commit"],
+    )
+
+
+@router.post("/{task_id}/instruction", response_model=TaskOut)
+def send_instruction(
+    task_id: int,
+    data: InstructionRequest,
+    session: Session = Depends(get_session),
+):
+    """Canal de trabalho do workspace: envia uma instrução ao agente e continua.
+
+    Sem `position`: retoma o ponto de parada natural do status atual (bloqueio,
+    pausa, revisão, falha). Com `position`: reexecuta a partir daquela fase
+    (nova execução — o histórico anterior permanece intacto).
+    """
+    task = _get_task_or_404(session, task_id)
+    if task.status == "created":
+        raise HTTPException(400, "tarefa ainda não foi iniciada")
+    instruction = data.instruction.strip()
+    target = None
+    if data.position is not None:
+        target = next((st for st in task.steps if st.position == data.position), None)
+        if target is None:
+            raise HTTPException(404, f"fase {data.position} não encontrada")
+        max_executed = max(
+            (st.position for st in task.steps if st.status != STEP_PENDING),
+            default=-1,
+        )
+        if data.position > max_executed and task.status != TASK_DONE:
+            raise HTTPException(
+                400,
+                f"não é possível continuar da fase {data.position} "
+                f"(última fase executada: {max_executed})",
+            )
+
+    task.resume_instruction = instruction
+    task.error = None
+    task.block_reason_type = None
+    task.block_reason = None
+    task.block_question = None
+    task.block_options = []
+    anchor: TaskStep | None = None
+    blocked_step: int | None = None
+
+    if target is not None:
+        # Reexecuta a partir da fase escolhida (voltar para etapa anterior).
+        if task.status == TASK_WAITING_APPROVAL:
+            gated = next((st for st in task.steps if st.pause_before), None)
+            if gated is not None:
+                gated.pause_before = False
+        _rewind_pipeline(session, task, target)
+        anchor = target
+    elif task.status == TASK_BLOCKED:
+        blocked_steps = [st for st in task.steps if st.status == STEP_BLOCKED]
+        if not blocked_steps:
+            raise HTTPException(400, "nenhuma fase bloqueada aguardando instrução")
+        step = max(blocked_steps, key=lambda st: st.position)
+        _reopen_step(step)
+        blocked_step = step.position
+        anchor = step
+        task.status = TASK_QUEUED
+    elif task.status == TASK_PAUSED:
+        task.status = TASK_QUEUED
+        anchor = _pick_anchor(task)
+    elif task.status == TASK_WAITING_APPROVAL:
+        gated = next((st for st in task.steps if st.pause_before), None)
+        if gated is not None:
+            gated.pause_before = False
+        anchor = gated or _pick_anchor(task)
+        task.status = TASK_QUEUED
+    elif task.status in (TASK_NEEDS_REVIEW, TASK_FAILED):
+        pending = next((st for st in task.steps if st.status == STEP_PENDING), None)
+        if pending is not None:
+            anchor = pending
+        else:
+            failed = next(
+                (st for st in task.steps if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
+                None,
+            )
+            if failed is None:
+                raise HTTPException(400, "nenhuma fase pendente ou falha para continuar")
+            _reopen_step(failed)
+            anchor = failed
+        task.status = TASK_QUEUED
+    elif task.status == TASK_DONE:
+        last = max(task.steps, key=lambda st: st.position)
+        _reopen_step(last)
+        anchor = last
+        task.status = TASK_QUEUED
+    elif task.status in (TASK_QUEUED, TASK_IN_PROGRESS):
+        anchor = _pick_anchor(task)
+        # instrução entra no handoff das próximas fases (sem rewind).
+    else:
+        raise HTTPException(
+            400, f"não é possível enviar instrução no status {task.status}"
+        )
+
+    if anchor is not None:
+        _emit_user_event(session, anchor, instruction, blocked_step)
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+def _pick_anchor(task: Task) -> TaskStep | None:
+    """Fase âncora para eventos (a mais relevante no estado atual)."""
+    if not task.steps:
+        return None
+    running = next((st for st in task.steps if st.status == STEP_RUNNING), None)
+    if running:
+        return running
+    active = next(
+        (st for st in task.steps if st.status in (STEP_PENDING, STEP_FAILED, STEP_BLOCKED)),
+        None,
+    )
+    return active or sorted(task.steps, key=lambda st: st.position)[-1]

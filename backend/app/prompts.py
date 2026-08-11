@@ -365,6 +365,33 @@ repositório com esta estrutura:
   e o retoma a partir daqui quando o usuário fornecer uma instrução. Isso NÃO é falha:
   é um pedido legítimo de intervenção."""
 
+# Ferramenta: pedir decisão ao usuário. Diferente do bloqueio (não consegue continuar),
+# aqui o agente CONSEGUE seguir mas precisa de uma escolha do usuário para continuar
+# com a melhor abordagem (ex.: validar no serviço A ou B, mudar uma regra de negócio).
+DECISION_TOOL = """## Ferramenta: pedir decisão ao usuário
+
+Se houver uma decisão que o usuário precisa tomar (ex.: duas abordagens possíveis e
+nenhuma é claramente superior, mudança de regra de negócio, definição de escopo) e a
+sua escolha mudaria o resultado, NÃO adivinhe. Escreva o arquivo `autoia_decision.json`
+na raiz do repositório com esta estrutura:
+
+```json
+{
+  "question": "pergunta direta e objetiva ao usuário",
+  "options": ["A — <opção 1>", "B — <opção 2>"],
+  "context": "breve contexto técnico para o usuário decidir"
+}
+```
+
+- `question` (obrigatório): a pergunta que o usuário deve responder.
+- `options` (opcional): até 8 alternativas possíveis (ex.: "A — validar no OrderService").
+- `context` (opcional): contexto curto que ajude a decisão.
+- Use APENAS quando a decisão realmente mudar o rumo do trabalho. Para dúvidas que você
+  pode resolver com bom senso, resolva e documente. NÃO use para interromper sem motivo.
+- NÃO faça commit deste arquivo. O sistema pausa a execução e mostra a pergunta ao
+  usuário; a resposta dele retoma daqui."""
+
+
 # Resumo estruturado do desenvolvimento (LLM dedicada — só interpreta, nunca desenvolve).
 CONTRACT_SUMMARY = """## Sua função: RESUMIR, não desenvolver
 Você é uma LLM dedicada a RESUMIR um desenvolvimento já executado. NÃO altere código,
@@ -393,6 +420,33 @@ Regras:
 - `changes`, `issues` e `files` são arrays (podem ser vazios).
 - Seja concreto: evite frases genéricas ("melhorias gerais", "refatorações").
 - `issues` só com algo relevante; caso contrário, array vazio.
+- NÃO faça commit deste arquivo."""
+
+# Resumo de UMA fase concluída ("O que foi entregue") — LLM dedicada a resumo.
+CONTRACT_STEP_SUMMARY = """## Sua função: RESUMIR uma fase, não desenvolver
+Você é uma LLM dedicada a resumir a execução de UMA fase do pipeline autoia. NÃO altere
+código nem corrija nada: apenas INTERPRETE o contexto desta fase e produza um resumo
+curto e objetivo, que permita a uma pessoa entender o que foi entregue sem abrir logs.
+
+## Formato de saída OBRIGATÓRIO (arquivo)
+Escreva o arquivo `autoia_step_summary.json` na raiz do repositório com EXATAMENTE esta
+estrutura JSON:
+
+```json
+{
+  "summary": "O que foi feito nesta fase, qual o resultado e as mudanças importantes (2-4 frases, sem frases genéricas).",
+  "changes": ["Alteração importante 1"],
+  "files": ["arquivo relevante"],
+  "issues": ["Limitação ou pendência relevante"],
+  "result": "completed"
+}
+```
+
+Regras:
+- `summary`: responda o que foi feito, o resultado, mudanças importantes, limitações,
+  arquivos relevantes e se houve testes. Evite "Desenvolvimento realizado com sucesso".
+- `result` é um de: `completed`, `partial`, `failed`, `pending`.
+- `changes`, `issues` e `files` são arrays (podem ser vazios).
 - NÃO faça commit deste arquivo."""
 
 # Relatório obrigatório do merger: a fase mais crítica da integração. Toda decisão
@@ -503,5 +557,6 @@ def build_prompt(
     # Todo agente pode declarar bloqueio pedindo intervenção do usuário.
     if robot.role not in ("refine", "pm", "summary"):
         parts.append(BLOCKED_TOOL)
+        parts.append(DECISION_TOOL)
     parts.append(TASK_SPAWN_TOOL)
     return "\n\n".join(p for p in parts if p)

@@ -6,12 +6,14 @@ import type {
   Repository,
   Robot,
   RunEvent,
+  StepDiff,
   SubTask,
   Task,
   TaskListItem,
   TaskProposal,
   TaskSummary,
   TimelineEvent,
+  Workspace,
 } from "./types";
 
 /** Cache de ETag/body em memória: reenvia If-None-Match e reaproveita o corpo em 304. */
@@ -150,6 +152,17 @@ export const api = {
   // timeline cronológica da execução
   getTaskTimeline: (taskId: number, signal?: AbortSignal) =>
     request<TimelineEvent[]>(`/api/tasks/${taskId}/timeline`, { signal }),
+
+  // workspace (tela de trabalho)
+  getWorkspace: (taskId: number, signal?: AbortSignal) =>
+    request<Workspace>(`/api/tasks/${taskId}/workspace`, { signal }),
+  getStepDiff: (taskId: number, position: number) =>
+    request<StepDiff>(`/api/tasks/${taskId}/steps/${position}/diff`),
+  sendInstruction: (taskId: number, data: { instruction: string; position?: number }) =>
+    request<Task>(`/api/tasks/${taskId}/instruction`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
 
   // bloqueio + retomada por instrução
   continueBlocked: (taskId: number, instruction: string) =>

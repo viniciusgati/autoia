@@ -1,0 +1,574 @@
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useParams } from "react-router-dom";
+import { api } from "../api";
+import DiffView from "../components/DiffView";
+import { usePolling } from "../lib/polling";
+import Markdown from "../lib/markdown";
+import type { StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
+
+/** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
+function statusMeta(status: string): { label: string; cls: string } {
+  switch (status) {
+    case "created":
+      return { label: "Não iniciada", cls: "badge-muted" };
+    case "queued":
+    case "in_progress":
+      return { label: "Em execução", cls: "badge-run" };
+    case "paused":
+      return { label: "Pausada", cls: "badge-warn" };
+    case "waiting_approval":
+    case "needs_review":
+      return { label: "Aguardando decisão", cls: "badge-warn" };
+    case "blocked":
+      return { label: "Bloqueada", cls: "badge-err" };
+    case "failed":
+      return { label: "Erro", cls: "badge-err" };
+    case "done":
+      return { label: "Concluída", cls: "badge-ok" };
+    case "cancelled":
+      return { label: "Cancelada", cls: "badge-err" };
+    default:
+      return { label: status, cls: "badge-muted" };
+  }
+}
+
+function occStatusMeta(status: string): { label: string; cls: string } {
+  switch (status) {
+    case "done":
+      return { label: "Concluído", cls: "badge-ok" };
+    case "failed":
+      return { label: "Falhou", cls: "badge-err" };
+    case "blocked":
+      return { label: "Parado", cls: "badge-warn" };
+    case "guardrail_blocked":
+      return { label: "Guardrail", cls: "badge-err" };
+    case "running":
+      return { label: "Em andamento", cls: "badge-run" };
+    default:
+      return { label: "Interrompido", cls: "badge-warn" };
+  }
+}
+
+const fmtCost = (v: number) => `R$ ${(v ?? 0).toFixed(2).replace(".", ",")}`;
+
+function fmtTime(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+
+/** Seletor de "continuar a partir de" (fases já executadas ou todas). */
+function availablePositions(task: Task): { position: number; label: string }[] {
+  const sorted = [...task.steps].sort((a, b) => a.position - b.position);
+  const maxExecuted = Math.max(
+    ...sorted.filter((s) => s.status !== "pending").map((s) => s.position),
+    -1,
+  );
+  const include = task.status === "done" ? sorted : sorted.filter((s) => s.position <= maxExecuted);
+  return include.map((s) => ({
+    position: s.position,
+    label: `Fase ${s.position + 1} · ${s.robot?.name ?? "?"}`,
+  }));
+}
+
+function ProposalRow({ proposal, onChanged, onError }: {
+  proposal: TaskProposal;
+  onChanged: () => void;
+  onError: (msg: string) => void;
+}) {
+  const [busy, setBusy] = useState(false);
+  const run = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await action();
+      onChanged();
+    } catch (e) {
+      onError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="ws-proposal">
+      <div className="ws-proposal-title">{proposal.title}</div>
+      {proposal.description && <div className="ws-proposal-desc">{proposal.description}</div>}
+      {proposal.status === "pending" ? (
+        <div className="ws-proposal-actions">
+          <button disabled={busy} onClick={() => run(() => api.acceptProposal(proposal.task_id, proposal.id))}>
+            {busy ? "…" : "Aceitar"}
+          </button>
+          <button className="danger" disabled={busy} onClick={() => run(() => api.rejectProposal(proposal.task_id, proposal.id))}>
+            Recusar
+          </button>
+        </div>
+      ) : (
+        <span className={`ws-proposal-status ${proposal.status === "accepted" ? "ws-ok" : "ws-err"}`}>
+          {proposal.status === "accepted" ? "✓ Tarefa aceita" : "✕ Tarefa recusada"}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function DiffModal({ taskId, position, onClose }: {
+  taskId: number;
+  position: number;
+  onClose: () => void;
+}) {
+  const [diff, setDiff] = useState<StepDiff | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    api
+      .getStepDiff(taskId, position)
+      .then((d) => active && setDiff(d))
+      .catch((e) => active && setError(String(e)));
+    return () => {
+      active = false;
+    };
+  }, [taskId, position]);
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal ws-diff-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <span>Diff da fase {position + 1}</span>
+          <button className="link-btn" onClick={onClose}>fechar</button>
+        </div>
+        <div className="modal-body">
+          {error && <div className="step-error">{error}</div>}
+          {!diff && !error && <div className="muted">carregando diff…</div>}
+          {diff && diff.diff ? (
+            <DiffView code={diff.diff} />
+          ) : diff ? (
+            <div className="muted">Sem diff para esta fase (nenhum commit com alterações encontrado).</div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function OccurrenceCard({ occ, onChanged, onError, onOpenDiff }: {
+  occ: WorkspaceOccurrence;
+  onChanged: () => void;
+  onError: (msg: string) => void;
+  onOpenDiff: (position: number) => void;
+}) {
+  const meta = occStatusMeta(occ.status);
+  const running = occ.status === "running";
+  const deliveredText = occ.delivered?.summary || occ.delivered_text;
+
+  return (
+    <article className={`ws-occ ws-occ-${occ.status}`}>
+      {running && (
+        <div className="ws-occ-running-banner">
+          <span className="ws-pulse" /> ETAPA EM EXECUÇÃO — {occ.robot?.name} · Fase {occ.position + 1}
+        </div>
+      )}
+      <header className="ws-occ-head">
+        <span className="ws-occ-pos">FASE {occ.position + 1}</span>
+        <span className="ws-occ-robot">{occ.robot?.name ?? "?"}</span>
+        {occ.attempt > 1 && (
+          <span className="badge badge-warn" title="Nova execução da mesma fase — o histórico anterior foi preservado">
+            ↻ Nova execução · tentativa {occ.attempt}
+          </span>
+        )}
+        <span className={`badge ${meta.cls}`}>{meta.label}</span>
+        <span className="ws-occ-time">
+          {fmtTime(occ.started_at)} {occ.finished_at ? `→ ${fmtTime(occ.finished_at)}` : ""}
+        </span>
+      </header>
+
+      {occ.goal && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">O que será feito</h4>
+          <p className="ws-goal">{occ.goal}</p>
+        </section>
+      )}
+
+      {running && occ.last_activity && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">Em andamento</h4>
+          <p className="ws-live">
+            <span className="ws-pulse" /> {occ.last_activity}
+          </p>
+        </section>
+      )}
+
+      {!running && deliveredText && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">
+            O que foi entregue
+            {occ.delivered ? (
+              <span className="badge ws-badge-delivered">resumo LLM</span>
+            ) : (
+              <span className="badge badge-muted ws-badge-delivered">texto do robô</span>
+            )}
+          </h4>
+          <div className="ws-delivered">
+            <Markdown text={deliveredText} />
+          </div>
+        </section>
+      )}
+
+      {occ.stop && (
+        <section className="ws-occ-section ws-stop">
+          <h4 className="ws-section-title">
+            {occ.status === "blocked" ? "🟠 ETAPA PARADA — DECISÃO NECESSÁRIA" : "❌ ETAPA PARADA"}
+          </h4>
+          <p className="ws-stop-reason">{occ.stop.reason || "execução interrompida"}</p>
+        </section>
+      )}
+
+      {occ.tests && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">Resultado de testes</h4>
+          <div className="ws-tests">
+            {occ.tests.passed != null && <span className="ws-test-ok">✓ {occ.tests.passed} testes passaram</span>}
+            {occ.tests.failed != null && <span className="ws-test-err">✕ {occ.tests.failed} testes falharam</span>}
+            {occ.tests.verdict && <span>Veredicto: <b>{occ.tests.verdict}</b></span>}
+          </div>
+        </section>
+      )}
+
+      {occ.proposals.length > 0 && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">Tarefas propostas</h4>
+          <div className="ws-proposals">
+            {occ.proposals.map((p) => (
+              <ProposalRow key={p.id} proposal={p} onChanged={onChanged} onError={onError} />
+            ))}
+          </div>
+        </section>
+      )}
+
+      {occ.file_count > 0 && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">Arquivos alterados</h4>
+          <ul className="ws-files">
+            {occ.files.slice(0, 10).map((f) => (
+              <li key={f}>{f}</li>
+            ))}
+          </ul>
+          <div className="ws-file-actions">
+            {occ.file_count > 10 && <span className="muted small">Ver todos os {occ.file_count} arquivos…</span>}
+            <button className="link-btn" onClick={() => onOpenDiff(occ.position)}>
+              Ver diff
+            </button>
+          </div>
+        </section>
+      )}
+
+      {occ.system_activity.length > 0 && (
+        <details className="ws-occ-section ws-collapse">
+          <summary className="ws-section-title">Atividade do sistema ({occ.system_activity.length})</summary>
+          <ul className="ws-sysact">
+            {occ.system_activity.map((a, i) => (
+              <li key={i} className="ws-sysact-item">
+                <span className="muted small">{fmtTime(a.ts)}</span> {a.summary}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+
+      {occ.events.length > 0 && (
+        <details className="ws-occ-section ws-collapse">
+          <summary className="ws-section-title">Detalhes técnicos ({occ.events.length} eventos)</summary>
+          <ul className="ws-sysact">
+            {occ.events.map((e, i) => (
+              <li key={i} className="ws-sysact-item">
+                <span className="muted small">{fmtTime(e.ts)}</span> [{e.type}] {e.name} — {e.summary}
+              </li>
+            ))}
+          </ul>
+        </details>
+      )}
+    </article>
+  );
+}
+
+export default function Workspace() {
+  const { repoId: repoIdStr, taskId: taskIdStr } = useParams<{ repoId: string; taskId: string }>();
+  const taskId = Number(taskIdStr);
+  const repoId = Number(repoIdStr);
+
+  const [ws, setWs] = useState<Workspace | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [instruction, setInstruction] = useState("");
+  const [resumePos, setResumePos] = useState<string>("");
+  const [busy, setBusy] = useState(false);
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  const [diffPos, setDiffPos] = useState<number | null>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const timelineRef = useRef<HTMLElement>(null);
+  // Segue automaticamente o fim da timeline conforme a execução avança; pausa
+  // quando o usuário rola para cima (ler histórico) e volta quando chega ao fim.
+  const [followLatest, setFollowLatest] = useState(true);
+
+  const refresh = () => {
+    api
+      .getWorkspace(taskId)
+      .then(setWs)
+      .catch((e) => setError(String(e)));
+  };
+
+  usePolling(
+    (signal) => {
+      api
+        .getWorkspace(taskId, signal)
+        .then(setWs)
+        .catch((e) => setError(String(e)));
+    },
+    1500,
+    [taskId],
+  );
+
+  // Mantém o fim da timeline sempre visível enquanto a execução evolui.
+  useEffect(() => {
+    if (!followLatest) return;
+    const el = timelineRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [ws, followLatest]);
+
+  const onTimelineScroll = () => {
+    const el = timelineRef.current;
+    if (!el) return;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
+    if (nearBottom !== followLatest) setFollowLatest(nearBottom);
+  };
+
+  const task = ws?.task ?? null;
+  const meta = task ? statusMeta(task.status) : null;
+  const positions = useMemo(() => (task ? availablePositions(task) : []), [task]);
+  const runningOcc = ws?.occurrences.find((o) => o.status === "running") ?? null;
+  const nextStep = useMemo(() => {
+    if (!task) return null;
+    return [...task.steps].sort((a, b) => a.position - b.position).find((s) => s.status === "pending") ?? null;
+  }, [task]);
+
+  const act = async (action: () => Promise<unknown>) => {
+    setBusy(true);
+    try {
+      await action();
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const focusInput = () => inputRef.current?.focus();
+
+  const summarize = () => {
+    setSummaryBusy(true);
+    api
+      .regenerateSummary(taskId)
+      .catch((e) => setError(String(e)))
+      .finally(() => {
+        setTimeout(() => {
+          refresh();
+          setSummaryBusy(false);
+        }, 2500);
+      });
+  };
+
+  const send = async () => {
+    if (!instruction.trim()) return;
+    const position = resumePos === "" ? undefined : Number(resumePos);
+    await act(() => api.sendInstruction(taskId, { instruction: instruction.trim(), position }));
+    setInstruction("");
+  };
+
+  const chooseDecision = (option: string) => {
+    setInstruction(option);
+    setTimeout(() => sendDecision(option), 0);
+  };
+
+  const sendDecision = (text: string) => {
+    api
+      .sendInstruction(taskId, { instruction: text })
+      .then(() => {
+        setInstruction("");
+        refresh();
+      })
+      .catch((e) => setError(String(e)));
+  };
+
+  const taskStatus = task?.status ?? "created";
+  const controls = (() => {
+    const list: { label: string; cls?: string; onClick: () => void }[] = [];
+    if (taskStatus === "created") list.push({ label: "Iniciar", onClick: () => act(() => api.startTask(taskId)) });
+    if (taskStatus === "queued" || taskStatus === "in_progress")
+      list.push({ label: "Pausar", onClick: () => act(() => api.pauseTask(taskId)) });
+    if (taskStatus === "paused") list.push({ label: "Continuar", onClick: () => act(() => api.resumeTask(taskId)) });
+    if (["blocked", "needs_review", "waiting_approval", "failed"].includes(taskStatus))
+      list.push({ label: "Continuar", onClick: focusInput });
+    if (taskStatus === "done" && task && task.steps.length > 0) {
+      const last = [...task.steps].sort((a, b) => a.position - b.position)[task.steps.length - 1];
+      list.push({ label: "Reexecutar", onClick: () => act(() => api.retryStep(taskId, last.position)) });
+    }
+    if (taskStatus !== "created") list.push({ label: "Resumir", cls: "ws-btn-summary", onClick: summarize });
+    return list;
+  })();
+
+  return (
+    <div className="ws">
+      {error && (
+        <div className="sticky-alert sticky-alert-critical ws-error">
+          <span>{error}</span>
+          <button className="link-btn" onClick={() => setError(null)}>×</button>
+        </div>
+      )}
+
+      <header className="ws-header">
+        <div className="ws-header-top">
+          <Link to={`/${repoId}/tasks`} className="link-btn ws-back">← tarefas</Link>
+          <Link to={`/${repoId}/tasks/${taskId}`} className="link-btn" title="ver tela de detalhes (auditoria)">
+            detalhes técnicos ↗
+          </Link>
+        </div>
+
+        <div className="ws-header-title">
+          <h2>{task ? `#${task.id} ${task.title}` : "…"}</h2>
+          {meta && (
+            <span className={`badge ${meta.cls} ws-status-badge`}>● {meta.label}</span>
+          )}
+        </div>
+
+        <div className="ws-header-meta">
+          {task && (
+            <>
+              <span className="ws-cost">
+                Custo total: <b>{fmtCost(task.cost_spent)}</b>
+                <span className="muted small"> / {fmtCost(task.budget_limit)}</span>
+              </span>
+              <span className="muted small">{task.executor === "opencode" ? "opencode" : "kimi code"}</span>
+              {runningOcc ? (
+                <span className="ws-etapa-atual ws-etapa-running" title="fase em execução agora">
+                  <span className="ws-pulse" />
+                  <b>Etapa em execução:</b> {runningOcc.robot?.name} · Fase {runningOcc.position + 1}
+                  {runningOcc.last_activity && (
+                    <span className="muted small"> — {runningOcc.last_activity}</span>
+                  )}
+                </span>
+              ) : taskStatus === "queued" && nextStep ? (
+                <span className="ws-etapa-atual" title="próxima fase da fila">
+                  <b>Próxima etapa:</b> {nextStep.robot?.name} · Fase {nextStep.position + 1}
+                </span>
+              ) : null}
+            </>
+          )}
+          <div className="ws-controls">
+            {controls.map((c) => (
+              <button
+                key={c.label}
+                className={c.cls ?? ""}
+                disabled={busy || summaryBusy}
+                onClick={c.onClick}
+              >
+                {summaryBusy && c.label === "Resumir" ? "resumindo…" : c.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {(task?.status === "blocked" || task?.status === "failed" || task?.status === "needs_review") && task.error && (
+          <div className={`ws-header-alert ${task.status === "blocked" ? "ws-alert-critical" : ""}`}>
+            <span>
+              {task.status === "blocked" && task.block_reason_type === "decision_request"
+                ? "🟠 Decisão necessária:"
+                : task.status === "blocked"
+                  ? "⛔ Bloqueada:"
+                  : task.status === "failed"
+                    ? "❌ Erro:"
+                    : "⚠ Revisão:"}{" "}
+              {task.error}
+            </span>
+            <button className="link-btn" onClick={focusInput}>responder ↓</button>
+          </div>
+        )}
+      </header>
+
+      <main className="ws-timeline" ref={timelineRef} onScroll={onTimelineScroll}>
+        {!ws && <div className="muted ws-loading">carregando workspace…</div>}
+        {ws && ws.occurrences.length === 0 && (
+          <div className="ws-empty">
+            <p className="muted">Nenhuma etapa executada ainda.</p>
+            {taskStatus === "created" && (
+              <button onClick={() => act(() => api.startTask(taskId))}>Iniciar tarefa</button>
+            )}
+          </div>
+        )}
+
+        {ws?.decisions.length ? (
+          <section className="ws-decision">
+            <h3>🟠 ETAPA PARADA — DECISÃO NECESSÁRIA</h3>
+            <p className="ws-decision-question">{ws.decisions[0].question}</p>
+            {ws.decisions[0].context && <p className="muted small">{ws.decisions[0].context}</p>}
+            <div className="ws-decision-options">
+              {ws.decisions[0].options.map((opt) => (
+                <button key={opt} className="ws-option-chip" onClick={() => chooseDecision(opt)}>
+                  {opt}
+                </button>
+              ))}
+            </div>
+            <p className="muted small">ou responda no campo abaixo e envie.</p>
+          </section>
+        ) : null}
+
+        {ws?.occurrences.map((occ) => (
+          <OccurrenceCard
+            key={`${occ.step_id}-${occ.attempt}`}
+            occ={occ}
+            onChanged={refresh}
+            onError={setError}
+            onOpenDiff={setDiffPos}
+          />
+        ))}
+      </main>
+
+      <footer className="ws-input">
+        <div className="ws-input-row">
+          <textarea
+            ref={inputRef}
+            value={instruction}
+            onChange={(e) => setInstruction(e.target.value)}
+            placeholder="Escreva uma instrução para o agente… (corrigir decisão, mudar abordagem, destravar etapa, nova execução…)"
+            rows={2}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                void send();
+              }
+            }}
+          />
+          <button className="ws-send" disabled={busy || !instruction.trim()} onClick={() => void send()}>
+            Enviar
+          </button>
+        </div>
+        <div className="ws-input-foot">
+          <label className="ws-resume-label">
+            Continuar a partir de:
+            <select value={resumePos} onChange={(e) => setResumePos(e.target.value)}>
+              <option value="">Etapa atual</option>
+              {positions.map((p) => (
+                <option key={p.position} value={p.position}>
+                  {p.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <span className="muted small">Escolher uma etapa anterior cria uma nova execução dela — o histórico permanece intacto.</span>
+        </div>
+      </footer>
+
+      {diffPos != null && (
+        <DiffModal taskId={taskId} position={diffPos} onClose={() => setDiffPos(null)} />
+      )}
+    </div>
+  );
+}

@@ -337,6 +337,71 @@ class TimelineEventOut(BaseModel):
     step_role: str | None = None
 
 
+class StepSummaryOut(BaseModel):
+    """Resumo de UMA execução de fase ("O que foi entregue") gerado por LLM dedicada."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    step_id: int
+    position: int
+    attempt: int
+    summary: str
+    changes: list[str] = []
+    result: str | None = None
+    issues: list[str] = []
+    files: list[str] = []
+    created_at: datetime
+
+
+class WorkspaceOccurrenceOut(BaseModel):
+    """Uma execução de fase na timeline do workspace (histórico imutável)."""
+
+    step_id: int
+    position: int
+    robot: dict | None = None
+    attempt: int
+    status: str
+    goal: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    last_activity: str | None = None
+    delivered_text: str | None = None
+    delivered: StepSummaryOut | None = None
+    stop: dict | None = None
+    proposals: list[TaskProposalOut] = []
+    files: list[str] = []
+    file_count: int = 0
+    tests: dict | None = None
+    system_activity: list[dict] = []
+    events: list[TimelineEventOut] = []
+
+
+class WorkspaceOut(BaseModel):
+    """Payload da tela de trabalho (workspace): task + timeline de execuções."""
+
+    task: TaskOut
+    summary: TaskSummaryOut | None = None
+    occurrences: list[WorkspaceOccurrenceOut] = []
+    decisions: list[dict] = []
+
+
+class StepDiffOut(BaseModel):
+    """Diff real (git) do commit de uma fase — o git é a fonte de verdade."""
+
+    stat: str = ""
+    diff: str = ""
+    files: list[str] = []
+    commit: str | None = None
+
+
+class InstructionRequest(BaseModel):
+    """Instrução do usuário ao agente + (opcional) a partir de qual fase continuar."""
+
+    instruction: str = Field(min_length=1, max_length=10000)
+    position: int | None = None
+
+
 class BlockedContinueRequest(BaseModel):
     """Instrução do usuário para retomar uma fase bloqueada (continuar de onde parou)."""
 

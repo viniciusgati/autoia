@@ -47,6 +47,8 @@ backend/app/            # pacote `app`
     project.py          # detecção de ecossistema + AGENTS.md gerado no checkout
     arch_metric.py      # métrica de mudança de arquitetura/deploy (evento arch_metric)
     summarizer.py       # resumo estruturado do desenvolvimento via executor (autoia_summary.json)
+    step_summarizer.py  # resumo "O que foi entregue" por fase (autoia_step_summary.json)
+    handoff.py          # autoia_handoff.md gerado antes de cada execução do robô
 frontend/               # Vite + React (páginas em src/pages/, tipos em src/types.ts)
 tests/                  # pytest; fixtures compartilhadas em conftest.py
 ```
@@ -134,6 +136,27 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   (attempt+1) e registra `user_intervention`/`execution_resumed` na timeline. A instrução
   entra no handoff/prompt da retomada. `Task.details` = detalhes adicionados pelo usuário
   durante o fluxo (entram no handoff das próximas fases).
+- **Pedir decisão ao usuário** (`autoia_decision.json`, contrato `DECISION_TOOL` no
+  prompt): o agente PARA e pergunta (`question`/`options`/`context`) quando uma escolha
+  muda o rumo do trabalho. O worker trata como `blocked` com `block_reason_type =
+  "decision_request"` (opções em `Task.block_options`); a resposta do usuário flui pelo
+  mesmo caminho de instrução (`blocked/continue` ou `/instruction`).
+- **Workspace (tela de trabalho)** — rota `/:repoId/tasks/:taskId/workspace`
+  (`frontend/src/pages/Workspace.tsx`). A timeline é uma **lista cronológica de
+  execuções de fase** ("ocorrências"): `timeline.derive_task_occurrences` agrupa os
+  `RunEvent` por `(step, attempt)` usando `attempt_started` como fronteira — re-execuções
+  viram NOVAS ocorrências e o histórico nunca é apagado. Endpoint
+  `GET /api/tasks/{id}/workspace` (task + ocorrências + resumos + propostas por step +
+  decisões) + `GET /api/tasks/{id}/steps/{position}/diff` (diff real via git,
+  `gitops.diff_for_step`, commit `(fase N)`) + `POST /api/tasks/{id}/instruction`
+  (instrução + `position` opcional p/ reexecutar a partir de uma fase — reusa a lógica do
+  bounceback via `_rewind_pipeline`). Header fixo com status/custo/controles, campo de
+  interação inferior fixo. `TaskDetail` atual fica para auditoria técnica.
+- **"O que foi entregue" por fase** (`worker/step_summarizer.py` + tabela `StepSummary`):
+  LLM dedicada (via executor da task, zero custo contábil) gera `autoia_step_summary.json`
+  por `(step, attempt)` quando a fase termina `done` (gate `AUTOIA_STEP_SUMMARY`,
+  default ligado). A UI mostra o `delivered` (LLM) ou o texto final do robô como fallback.
+  `TaskStep.goal` ("O que será feito") é derivado deterministicamente da mission + título.
 
 ## Padrões de desenvolvimento (backend)
 

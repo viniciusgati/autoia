@@ -21,6 +21,12 @@ BLOCKED_FILENAME = "autoia_blocked.json"
 # Resumo estruturado gerado pela LLM dedicada (contrato de saída).
 SUMMARY_FILENAME = "autoia_summary.json"
 
+# Resumo de UMA fase ("O que foi entregue") gerado pela LLM dedicada a resumo.
+STEP_SUMMARY_FILENAME = "autoia_step_summary.json"
+
+# Pedido de decisão do agente ao usuário (pausa a fase até o humano responder).
+DECISION_FILENAME = "autoia_decision.json"
+
 # Veredictos esperados por papel
 V_READY = "READY"
 V_NEEDS_WORK = "NEEDS_WORK"
@@ -120,6 +126,78 @@ def read_summary(checkout: str) -> dict | None:
 def remove_summary(checkout: str) -> None:
     try:
         os.remove(os.path.join(checkout, SUMMARY_FILENAME))
+    except FileNotFoundError:
+        pass
+
+
+def read_step_summary(checkout: str) -> dict | None:
+    """Lê o resumo de fase (autoia_step_summary.json), tolerante e com defaults."""
+    path = os.path.join(checkout, STEP_SUMMARY_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def _list(key: str) -> list[str]:
+        value = data.get(key)
+        if isinstance(value, list):
+            return [str(v) for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value]
+        return []
+
+    result = str(data.get("result") or "").strip().lower()
+    if result not in SUMMARY_RESULTS:
+        result = None
+    return {
+        "summary": str(data.get("summary") or ""),
+        "changes": _list("changes"),
+        "result": result,
+        "issues": _list("issues"),
+        "files": _list("files"),
+    }
+
+
+def remove_step_summary(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, STEP_SUMMARY_FILENAME))
+    except FileNotFoundError:
+        pass
+
+
+def read_decision(checkout: str) -> dict | None:
+    """Lê o pedido de decisão do agente (autoia_decision.json), tolerante."""
+    path = os.path.join(checkout, DECISION_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    question = str(data.get("question") or data.get("reason") or "")
+    options = data.get("options")
+    if not isinstance(options, list):
+        options = []
+    options = [str(o) for o in options if str(o).strip()][:8]
+    context = str(data.get("context") or "")[:2000]
+    return {
+        "question": question[:2000],
+        "options": options,
+        "context": context,
+    }
+
+
+def remove_decision(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, DECISION_FILENAME))
     except FileNotFoundError:
         pass
 

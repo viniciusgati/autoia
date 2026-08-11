@@ -212,6 +212,35 @@ def diff_changes(path: str, base: str, branch: str) -> list[DiffChange]:
     return changes
 
 
+def _step_commit(path: str, position: int) -> str | None:
+    """SHA do commit mais recente da fase `position` (mensagem `(fase N)`)."""
+    result = run_git(
+        path, "log", "-1", "--fixed-strings", "--grep", f"(fase {position})",
+        "--format=%H", check=False,
+    )
+    sha = result.stdout.strip()
+    return sha or None
+
+
+def diff_for_step(path: str, position: int) -> dict:
+    """Diff real (do git) do commit mais recente da fase `position`.
+
+    O git é a fonte de verdade da alteração — a LLM apenas explica. Retorna
+    `stat` (git diff --stat), `diff` (patch unificado), `files` e o sha do commit.
+    """
+    commit = _step_commit(path, position)
+    if commit is None:
+        return {"stat": "", "diff": "", "files": [], "commit": None}
+    stat = run_git(path, "show", "--stat", "--format=", commit, check=False).stdout.strip()
+    diff = run_git(path, "show", "--format=", commit, check=False).stdout.rstrip()
+    files = [
+        f for f in (s.strip() for s in run_git(
+            path, "show", "--name-only", "--format=", commit, check=False
+        ).stdout.splitlines()) if f
+    ]
+    return {"stat": stat, "diff": diff, "files": files, "commit": commit}
+
+
 @dataclass
 class MergeResult:
     ok: bool

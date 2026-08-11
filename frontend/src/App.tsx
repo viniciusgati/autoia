@@ -10,6 +10,7 @@ import RepoDashboard from "./pages/RepoDashboard";
 import RepoTasks from "./pages/RepoTasks";
 import PhaseDetail from "./pages/PhaseDetail";
 import TaskDetail from "./pages/TaskDetail";
+import Workspace from "./pages/Workspace";
 import Execution from "./pages/Execution";
 import Notifications from "./components/Notifications";
 import { usePolling } from "./lib/polling";
@@ -156,6 +157,7 @@ export default function App() {
           <Route path="/:repoId" element={<RepoDashboard />} />
           <Route path="/:repoId/tasks" element={<RepoTasks />} />
           <Route path="/:repoId/tasks/:taskId" element={<TaskDetail />} />
+          <Route path="/:repoId/tasks/:taskId/workspace" element={<Workspace />} />
           <Route path="/:repoId/tasks/:taskId/phase/:stepId" element={<PhaseDetail />} />
           <Route
             path="/:repoId/robots"

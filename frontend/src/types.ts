@@ -158,6 +158,7 @@ export interface Task {
   block_reason_type: string | null;
   block_reason: string | null;
   block_question: string | null;
+  block_options?: string[];
   summary: TaskSummary | null;
   created_at: string;
   updated_at: string;
@@ -248,4 +249,63 @@ export interface Execution {
   proposals: TaskProposal[];
   notices: Notice[];
   worker: WorkerStatus;
+}
+
+/** Resumo de UMA execução de fase ("O que foi entregue") gerado por LLM dedicada. */
+export interface StepSummary {
+  id: number;
+  step_id: number;
+  position: number;
+  attempt: number;
+  summary: string;
+  changes: string[];
+  result: "completed" | "partial" | "failed" | "pending" | null;
+  issues: string[];
+  files: string[];
+  created_at: string;
+}
+
+/** Uma execução de fase na timeline do workspace (histórico imutável). */
+export interface WorkspaceOccurrence {
+  step_id: number;
+  position: number;
+  robot: { name: string; role: string } | null;
+  attempt: number;
+  status: string;
+  goal: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+  last_activity: string | null;
+  delivered_text: string | null;
+  delivered: StepSummary | null;
+  stop: { kind: string; reason: string } | null;
+  proposals: TaskProposal[];
+  files: string[];
+  file_count: number;
+  tests: { passed: number | null; failed: number | null; verdict: string | null } | null;
+  system_activity: { ts: string; type: string; name: string; summary: string; status: string | null }[];
+  events: TimelineEvent[];
+}
+
+/** Pedido de decisão do agente aguardando resposta do usuário. */
+export interface WorkspaceDecision {
+  question: string;
+  options: string[];
+  context: string;
+}
+
+/** Payload da tela de trabalho (workspace). */
+export interface Workspace {
+  task: Task;
+  summary: TaskSummary | null;
+  occurrences: WorkspaceOccurrence[];
+  decisions: WorkspaceDecision[];
+}
+
+/** Diff real (git) do commit de uma fase. */
+export interface StepDiff {
+  stat: string;
+  diff: string;
+  files: string[];
+  commit: string | null;
 }

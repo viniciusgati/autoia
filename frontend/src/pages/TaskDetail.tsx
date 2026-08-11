@@ -411,6 +411,8 @@ export default function TaskDetail() {
         <Link to={`/${repoId}`}>← projeto</Link>
         {" · "}
         <Link to={`/${repoId}/tasks`}>tarefas</Link>
+        {" · "}
+        <Link to={`/${repoId}/tasks/${task.id}/workspace`}>workspace ↗</Link>
       </p>
 
       {/* Header fixo */}

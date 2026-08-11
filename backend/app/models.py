@@ -149,6 +149,8 @@ class Task(Base):
     block_reason_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     block_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     block_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Opções de uma decisão solicitada pelo agente ao usuário (autoia_decision.json).
+    block_options: Mapped[list] = mapped_column(JSON, default=list)
 
     repository: Mapped[Repository] = relationship(back_populates="tasks")
     pipeline: Mapped[Pipeline] = relationship()
@@ -174,6 +176,12 @@ class Task(Base):
     summaries: Mapped[list["TaskSummary"]] = relationship(
         back_populates="task",
         order_by="TaskSummary.id.desc()",
+        cascade="all, delete-orphan",
+    )
+    # Resumos por execução de fase (StepSummary), mais recente primeiro.
+    step_summaries: Mapped[list["StepSummary"]] = relationship(
+        back_populates="task",
+        order_by="StepSummary.id.desc()",
         cascade="all, delete-orphan",
     )
 
@@ -207,6 +215,33 @@ class TaskSummary(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     task: Mapped[Task] = relationship(back_populates="summaries")
+
+
+class StepSummary(Base):
+    """Resumo de UMA execução de fase ("O que foi entregue"), gerado por LLM dedicada.
+
+    O resumo da fase é chaveado por (step, attempt): cada re-execução tem o seu,
+    preservando o histórico imutável da timeline. A LLM nunca é fonte de verdade —
+    eventos/arquivos/diff são. Regenerar um passo cria uma nova linha apenas se o
+    attempt mudar; falha na geração não afeta o pipeline.
+    """
+
+    __tablename__ = "step_summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    step_id: Mapped[int] = mapped_column(ForeignKey("task_steps.id"))
+    position: Mapped[int] = mapped_column(Integer)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    changes: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    files: Mapped[list] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    task: Mapped[Task] = relationship(back_populates="step_summaries")
+    step: Mapped["TaskStep"] = relationship(back_populates="step_summaries")
 
 
 class TaskProposal(Base):
@@ -257,6 +292,9 @@ class TaskStep(Base):
     pause_before: Mapped[bool] = mapped_column(default=False)
     log_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Objetivo legível da fase ("O que será feito") derivado deterministicamente
+    # da mission do robô + título da task no momento da execução.
+    goal: Mapped[str | None] = mapped_column(Text, nullable=True)
     diff_stat: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
@@ -264,6 +302,11 @@ class TaskStep(Base):
 
     task: Mapped[Task] = relationship(back_populates="steps")
     robot: Mapped[Robot] = relationship()
+    step_summaries: Mapped[list["StepSummary"]] = relationship(
+        back_populates="step",
+        order_by="StepSummary.id.desc()",
+        cascade="all, delete-orphan",
+    )
     events: Mapped[list["RunEvent"]] = relationship(
         back_populates="step",
         order_by="RunEvent.seq",

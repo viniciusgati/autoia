@@ -146,6 +146,9 @@ class Settings:
     api_host: str = field(default_factory=lambda: _env("AUTOIA_API_HOST", "127.0.0.1"))
     api_port: int = field(default_factory=lambda: _int("AUTOIA_API_PORT", 9000))
     frontend_dist: str | None = field(default_factory=_frontend_dist_default)
+    # Gera o resumo de cada fase concluída ("O que foi entregue") via LLM de resumo
+    # (zero custo contábil; usa tokens do executor da task). Desligar evita chamadas.
+    step_summary: bool = field(default_factory=lambda: _env("AUTOIA_STEP_SUMMARY", "1") == "1")
 
     def ensure_dirs(self) -> None:
         for d in (self.workspace_dir, self.log_dir, _sqlite_parent(self.database_url)):

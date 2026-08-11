@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import types
@@ -48,6 +49,7 @@ from ..models import (
     Robot,
     RunEvent,
     StepArtifact,
+    StepSummary,
     SubTask,
     Task,
     TaskProposal,
@@ -112,6 +114,19 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         workspace_dir=settings.workspace_dir,
         max_identical_calls=settings.max_identical_calls,
     )
+
+
+def _step_goal(step: TaskStep, task: Task) -> str:
+    """Objetivo legível da fase ("O que será feito") — derivado de forma
+    determinística da mission do robô + título da task, sem LLM."""
+    mission = (step.robot.mission if step.robot else "") or ""
+    first = next((s.strip() for s in re.split(r"[.\n]", mission) if s.strip()), "")
+    if len(first) > 180:
+        first = first[:177].rstrip() + "..."
+    title = (task.title or "").strip()
+    if title and first:
+        return f"{title} — {first}"
+    return title or first or f"Fase {step.position}"
 
 
 def recover_stale_steps(session_factory) -> int:
@@ -237,6 +252,8 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
                 _maybe_pm(session_factory, settings, trigger["task_id"], trigger["reason"])
             # Resumo automático (se o repo tiver auto_summary) a cada fase decidida.
             _maybe_auto_summary(settings, session_factory, step_id)
+            # Resumo "O que foi entregue" por fase (LLM de resumo dedicada).
+            _maybe_step_summary(settings, session_factory, step_id)
         except Exception:
             log.exception("erro executando step %s", step_id)
             _fail_step_hard(session_factory, step_id)
@@ -479,8 +496,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         task = step.task
         repo = task.repository
         base = repo.default_branch
-        branch = task.branch or f"{eff.branch_prefix}/task-{task.id}"
         eff = _effective(settings, repo)
+        branch = task.branch or f"{eff.branch_prefix}/task-{task.id}"
 
         # Workspace isolado por task — cada task tem seu próprio clone, sem conflito
         checkout = _task_workspace(eff, repo.id, task.id)
@@ -564,6 +581,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         )
         role = step.robot.role if step.robot else ""
         has_subtasks = bool(task.subtasks)  # força eager load dentro da sessão
+        if not step.goal:
+            step.goal = _step_goal(step, task)
         s.commit()
 
     # ── Ramo de subtarefas: implement e verify iteram sobre subtarefas ──
@@ -699,6 +718,44 @@ def _consume_block_declaration(s: Session, step: TaskStep, checkout: str) -> dic
     return data
 
 
+def _consume_decision(s: Session, step: TaskStep, checkout: str) -> dict | None:
+    """Lê (e remove) o pedido de decisão do agente (autoia_decision.json).
+
+    Difere do bloqueio: o agente PAROU para perguntar algo ao usuário — a resposta
+    destrava a continuidade. Tratado como um `blocked` com reason_type específico
+    para a UI renderizar a pergunta e as opções.
+    """
+    data = verdicts.read_decision(checkout)
+    if data is None:
+        return None
+    verdicts.remove_decision(checkout)
+    return data
+
+
+def _mark_decision(s: Session, step: TaskStep, task: Task, data: dict) -> None:
+    """Marca a fase como `blocked` aguardando DECISÃO do usuário (autoia_decision.json).
+
+    A task fica parada com a pergunta + opções visíveis na UI; o usuário responde
+    pelo campo de instrução do workspace e a execução retoma da MESMA fase.
+    """
+    task.status = TASK_BLOCKED
+    task.error = data.get("question") or "agente aguardando decisão do usuário"
+    task.block_reason_type = "decision_request"
+    task.block_reason = data.get("question") or "agente aguardando decisão"
+    task.block_question = data.get("context") or ""
+    task.block_options = data.get("options") or []
+    step.status = STEP_BLOCKED
+    step.error = task.error
+    _finish(step)
+    payload = {
+        "reason_type": "decision_request",
+        "reason": task.block_reason,
+        "question": task.block_reason,
+        "options": task.block_options,
+    }
+    _system_event(s, step, "task_blocked", payload)
+
+
 def _mark_blocked(s: Session, step: TaskStep, task: Task, data: dict) -> None:
     """Marca a fase e a task como `blocked` aguardando instrução do usuário.
 
@@ -736,6 +793,13 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         block = _consume_block_declaration(s, step, checkout)
         if block:
             _mark_blocked(s, step, task, block)
+            s.commit()
+            return None
+
+        # O agente pediu uma decisão ao usuário (autoia_decision.json).
+        decision = _consume_decision(s, step, checkout)
+        if decision:
+            _mark_decision(s, step, task, decision)
             s.commit()
             return None
 
@@ -1242,12 +1306,13 @@ def _pm_context(s: Session, task: Task) -> str:
     return "\n".join(lines)
 
 
-def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: str) -> None:
+def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) -> None:
     """Roda o PM e aplica a decisão (retry / continuar / escalar). Sempre bound por pm_decisions."""
     with session_factory() as s:
         task = s.get(Task, task_id)
         if task is None:
             return
+        eff = _effective(settings, task.repository)
         checkout = _task_workspace(eff, task.repository.id, task.id)
         pm_robot = (
             s.query(Robot)
@@ -1384,6 +1449,9 @@ def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: s
 _SUMMARY_IN_FLIGHT: set[int] = set()
 _SUMMARY_LOCK = threading.Lock()
 
+# Fases cujo resumo ("O que foi entregue") já está sendo gerado.
+_STEP_SUMMARY_LOCK = threading.Lock()
+
 
 def _maybe_auto_summary(settings: Settings, session_factory, step_id: int) -> None:
     """Gera o resumo automaticamente após a decisão de uma fase, se o repo tiver
@@ -1441,6 +1509,70 @@ def _spawn_auto_summary(settings, session_factory, task_id: int, eff: EffectiveS
     threading.Thread(target=_run, daemon=True, name=f"auto-summary-{task_id}").start()
 
 
+# Fases cujo resumo ("O que foi entregue") já está em geração (evita sobrepor).
+_STEP_SUMMARY_IN_FLIGHT: set[tuple[int, int]] = set()
+
+
+def _maybe_step_summary(settings: Settings, session_factory, step_id: int) -> None:
+    """Gera o resumo da fase concluída ("O que foi entregue") via LLM de resumo.
+
+    Roda em thread daemon com heartbeat próprio e NUNCA falha o pipeline. A geração
+    é por (step, attempt): re-execuções têm resumos independentes, preservando o
+    histórico imutável da timeline do workspace.
+    """
+    if not settings.step_summary:
+        return
+    try:
+        with session_factory() as s:
+            step = s.get(TaskStep, step_id)
+            if step is None or step.status != STEP_DONE:
+                return
+            key = (step.id, step.attempt)
+            existing = (
+                s.query(StepSummary)
+                .filter(
+                    StepSummary.step_id == step.id,
+                    StepSummary.attempt == step.attempt,
+                )
+                .first()
+            )
+            if existing is not None:
+                return
+            eff = _effective(settings, step.task.repository)
+    except Exception:
+        log.exception("resumo de fase: falha ao avaliar o step %s", step_id)
+        return
+
+    with _STEP_SUMMARY_LOCK:
+        if key in _STEP_SUMMARY_IN_FLIGHT:
+            return
+        _STEP_SUMMARY_IN_FLIGHT.add(key)
+
+    def _run() -> None:
+        try:
+            from .step_summarizer import summarize_step
+
+            hb_path = os.path.join(eff.workspace_dir, "worker.heartbeat")
+            stop = threading.Event()
+            hb = threading.Thread(
+                target=_heartbeat_loop, args=(hb_path, stop),
+                daemon=True, name="step-summary-heartbeat",
+            )
+            hb.start()
+            try:
+                summarize_step(settings, session_factory, step_id)
+            finally:
+                stop.set()
+                hb.join(timeout=1)
+        except Exception:
+            log.exception("resumo de fase falhou para o step %s", step_id)
+        finally:
+            with _STEP_SUMMARY_LOCK:
+                _STEP_SUMMARY_IN_FLIGHT.discard(key)
+
+    threading.Thread(target=_run, daemon=True, name=f"step-summary-{step_id}").start()
+
+
 def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) -> None:
     with session_factory() as s:
         task = s.get(Task, task_id)
@@ -1456,7 +1588,7 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
             s.commit()
             return
     log.info("PM decidindo para a task %s (%s)", task_id, reason)
-    _pm_decide(session_factory, eff, task_id, reason)
+    _pm_decide(session_factory, settings, task_id, reason)
 
 
 def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:

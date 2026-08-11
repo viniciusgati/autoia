@@ -17,7 +17,7 @@ from datetime import datetime
 
 from sqlalchemy.orm import Session
 
-from .models import RunEvent, Task, TaskStep
+from .models import STEP_GUARDRAIL_BLOCKED, RunEvent, Task, TaskStep
 
 # Tipos de evento expostos na timeline.
 EV_DEV_START = "development_started"
@@ -447,6 +447,139 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
     # Ordena por ts (e seq) — tool_calls pareadas preservam a ordem original.
     return sorted(timeline, key=lambda e: (e["ts"], e["seq"]))
+
+
+# Kinds que encerram uma ocorrência de fase com estado terminal.
+_TERMINAL_DONE = {"phase_done", "merged"}
+_TERMINAL_BLOCK = {"task_blocked", "guardrail_blocked"}
+_TERMINAL_FAIL = {
+    "timeout", "exec_exit", "verdict", "git_error", "merge_error",
+    "merge_failed", "post_merge_failed", "budget_hit",
+}
+
+# Tipos de evento que representam "atividade do sistema" (marcos discretos) dentro
+# de uma ocorrência de fase — o resto (text, tool_call) é o trabalho técnico.
+_SYSTEM_ACTIVITY_TYPES = ("system", "task", "warning", "user", "error", "blocked")
+
+
+def _stop_reason(kind: str, payload: dict) -> str:
+    """Motivo determinístico da parada de uma ocorrência de fase."""
+    if kind == "task_blocked":
+        return str(payload.get("reason") or payload.get("question") or "")
+    if kind == "guardrail_blocked":
+        return str(payload.get("detail") or payload.get("pattern") or "")
+    return str(payload.get("reason") or "")
+
+
+def _new_occurrence(step: TaskStep, attempt: int) -> dict:
+    return {
+        "step_id": step.id,
+        "position": step.position,
+        "robot": {"name": step.robot.name, "role": step.robot.role} if step.robot else None,
+        "attempt": attempt,
+        "status": "pending",
+        "goal": step.goal,
+        "started_at": None,
+        "finished_at": None,
+        "last_activity": None,
+        "delivered_text": None,
+        "stop": None,
+        "system_activity": [],
+        "events": [],
+    }
+
+
+def _finalize_occurrence(occ: dict, step: TaskStep | None) -> None:
+    events = sorted(occ["events"], key=lambda e: (e["ts"], e["seq"]))
+    occ["events"] = events
+    if events:
+        occ["started_at"] = events[0]["ts"]
+        occ["finished_at"] = events[-1]["ts"]
+
+    last_terminal = None
+    for ev in events:
+        kind = ev["raw"]["kind"]
+        if kind in _TERMINAL_DONE:
+            last_terminal = ("done", kind, ev["raw"]["payload"])
+        elif kind in _TERMINAL_BLOCK:
+            last_terminal = ("blocked", kind, ev["raw"]["payload"])
+        elif kind in _TERMINAL_FAIL:
+            last_terminal = ("failed", kind, ev["raw"]["payload"])
+        if ev["type"] == "tool_call":
+            occ["last_activity"] = ev["summary"]
+        if ev["type"] == "text":
+            occ["delivered_text"] = str(ev["raw"]["payload"].get("content") or "")
+        if ev["type"] in _SYSTEM_ACTIVITY_TYPES:
+            occ["system_activity"].append({
+                "ts": ev["ts"],
+                "type": ev["type"],
+                "name": ev["name"],
+                "summary": ev["summary"],
+                "status": ev["status"],
+            })
+
+    if last_terminal is not None:
+        occ["status"], kind, payload = last_terminal
+        if occ["status"] != "done":
+            occ["stop"] = {"kind": kind, "reason": _stop_reason(kind, payload)}
+        return
+    if step is not None and step.attempt > occ["attempt"]:
+        # Execução MAIS ANTIGA que não terminou (ex.: restart do worker no meio):
+        # sem veredicto/merge — o histórico continua, mas esta tentativa foi interrompida.
+        occ["status"] = "interrupted"
+        return
+    st = step.status if step else "pending"
+    occ["status"] = "blocked" if st == STEP_GUARDRAIL_BLOCKED else st
+
+
+def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
+    """Deriva as OCOrrências de fase ("execuções") da task a partir da timeline.
+
+    Cada fase vira UMA ocorrência por execução/tentativa, na ordem cronológica
+    (da mais antiga para a mais nova). Um evento `attempt_started` com `attempt>1`
+    (ou manual retry/bounce-back) marca uma NOVA ocorrência da mesma fase — o
+    histórico anterior nunca é apagado. Determinístico, sem LLM.
+    """
+    steps = {st.id: st for st in task.steps}
+    tl = derive_task_timeline(session, task)
+
+    groups: dict[tuple[int, int], dict] = {}
+    current_key: dict[int, tuple[int, int]] = {}
+    order: list[tuple[int, int]] = []
+
+    for ev in tl:
+        raw_kind = ev["raw"]["kind"]
+        step_id = ev["step_id"]
+        if step_id is None:
+            continue
+        step = steps.get(step_id)
+        if step is None:
+            continue
+        if raw_kind == "attempt_started":
+            payload = ev["raw"]["payload"]
+            try:
+                attempt = max(int(payload.get("attempt") or 1), 1)
+            except (TypeError, ValueError):
+                attempt = 1
+            key = (step_id, attempt)
+            if key not in groups:
+                groups[key] = _new_occurrence(step, attempt)
+                order.append(key)
+            current_key[step_id] = key
+        else:
+            key = current_key.get(step_id)
+            if key is None or key not in groups:
+                # Eventos ancorados na fase ANTES do primeiro `attempt_started`
+                # (ex.: `summary_generated`/`pm_decision` no último step da task,
+                # `task_paused`, `worker_recovered`) são de nível da TASK, não de
+                # uma execução real — NÃO criam ocorrência nem deslocam a posição
+                # cronológica da fase.
+                continue
+            groups[key]["events"].append(ev)
+
+    for key in order:
+        _finalize_occurrence(groups[key], steps.get(key[0]))
+    return [groups[key] for key in order]
 
 
 def timeline_summary_text(timeline: list[dict]) -> str:
