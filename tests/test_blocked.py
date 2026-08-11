@@ -135,3 +135,30 @@ def test_resume_instruction_enters_handoff(flow, fake_kimi):
     md = open(os.path.join(checkout, "autoia_handoff.md"), encoding="utf-8").read()
     assert "Intervenção do usuário" in md
     assert "abordagem B" in md
+
+
+def test_retry_unlocked_when_blocked(flow, settings):
+    """Em task bloqueada (ex.: conflito de merge), o retry de fase falha com tentativas
+    máximas fica LIBERADO: o usuário instrui (feedback) e re-executa para resolver."""
+    task_id = flow["task"]["id"]
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        t.status = "blocked"
+        t.error = "conflito de merge"
+        merger = next(st for st in t.steps if st.position == 5)
+        merger.status = "failed"
+        merger.attempt = settings.max_attempts
+        merger.error = "Auto-merging ... CONFLICT (content) ..."
+        s.commit()
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/steps/5/retry",
+        json={"note": "resolva o conflito dando prioridade ao que já está testado"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "queued"
+    assert data["feedback"] == "resolva o conflito dando prioridade ao que já está testado"
+    merger = next(st for st in data["steps"] if st["position"] == 5)
+    assert merger["status"] == "pending"
+    assert merger["attempt"] == settings.max_attempts + 1

@@ -358,6 +358,49 @@ Regras:
 - `issues` só com algo relevante; caso contrário, array vazio.
 - NÃO faça commit deste arquivo."""
 
+# Relatório obrigatório do merger: a fase mais crítica da integração. Toda decisão
+# de conflito DEVE ser explicada com evidência (o que cada lado propunha, o que foi
+# escolhido e PORQUÊ, e o que foi descartado).
+CONTRACT_MERGE = """## Formato de saída OBRIGATÓRIO (relatório do merge)
+O seu TEXTO FINAL é a documentação oficial desta fase — o que a auditoria e as próximas
+fases verão. Escreva com EXATAMENTE estas seções:
+
+### O que foi feito
+<resumo objetivo do que a fase realizou>
+
+### Conflitos e decisões
+Para CADA conflito resolvido, use este bloco (um por arquivo):
+```
+Arquivo: <caminho>
+Branch propunha: <o que a sua branch trazia>
+Main propunha: <o que a main já trazia>
+Decisão: <ficou com a branch | ficou com a main | mesclou os dois>
+Por quê: <evidência concreta — testes, critérios de aceite, feedback do usuário, risco>
+Descartado: <o que não foi aproveitado e por quê>
+```
+Se NÃO houve conflito: `Nenhum conflito — a branch está mesclável com
+origin/{default_branch} direto.`
+
+### Arquivos alterados
+- <caminho> — <para quê>
+
+### Evidência
+<comandos reais e saídas: git status, git log, git merge-base, git merge-tree, testes com
+resultado real (PASS/FAIL) e contagem>
+
+### Pendências
+- <o que não foi possível, ou "Nenhuma">
+
+### Para a próxima fase
+<o que o sistema vai integrar e o que conferir após o merge (ex.: testes na default)>
+
+### Regras
+- Toda decisão de conflito DEVE ter "Por quê" com evidência real — proibido justificativa
+  genérica ("melhor solução", "mais correto", "faz sentido").
+- O relatório precisa permitir a um humano entender exatamente o que mudou no merge e por
+  quê, sem abrir o diff.
+- Se você precisou pausar (autoia_blocked.json), relate o motivo e a pergunta feita."""
+
 _CONTRACTS = {
     "refine": CONTRACT_REFINE,
     "review": CONTRACT_REVIEW,
@@ -365,6 +408,7 @@ _CONTRACTS = {
     "assess": CONTRACT_ASSESS,
     "pm": CONTRACT_PM,
     "summary": CONTRACT_SUMMARY,
+    "merge": CONTRACT_MERGE,
 }
 
 
@@ -412,9 +456,10 @@ def build_prompt(
     contract = _CONTRACTS.get(robot.role)
     if contract:
         parts.append(contract)
-    # refine (história) e pm (decisão) têm formatos de saída próprios; os demais
-    # documentam o trabalho no texto final, que vira o histórico da fase no handoff.
-    if robot.role not in ("refine", "pm", "summary"):
+    # refine (história), pm (decisão), summary (resumo) e merge (relatório de
+    # integração) têm formatos de saída próprios; os demais documentam o trabalho
+    # no texto final, que vira o histórico da fase no handoff.
+    if robot.role not in ("refine", "pm", "summary", "merge"):
         parts.append(HANDOFF_DOCUMENT)
     parts.append(EVIDENCE)
     parts.append(GUARDRAIL_INSTRUCTIONS)

@@ -5,6 +5,7 @@ import ArtifactThumbs from "../components/ArtifactThumbs";
 import BlockedPanel from "../components/BlockedPanel";
 import ExecTimeline from "../components/ExecTimeline";
 import FluxoSteps from "../components/FluxoSteps";
+import MergeConflictPanel from "../components/MergeConflictPanel";
 import PhasePanel from "../components/PhasePanel";
 import PhaseStepper from "../components/PhaseStepper";
 import StatusBadge from "../components/StatusBadge";
@@ -339,8 +340,23 @@ export default function TaskDetail() {
     }
   };
 
+  const instructAndRetry = async (instruction: string, position: number) => {
+    setContinueBusy(true);
+    try {
+      await api.retryStep(taskId, position, instruction.trim() || undefined);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setContinueBusy(false);
+    }
+  };
+
   const scrollToBlocked = () => {
     document.getElementById("bloqueio-instrucao")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+  const scrollToMerge = () => {
+    document.getElementById("conflito-merge")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
   const scrollToApproval = () => {
     document.getElementById("aprovacao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -360,7 +376,11 @@ export default function TaskDetail() {
   const live = runningStep
     ? { step: runningStep, toolCall: runningToolCall, events: runningEvents }
     : null;
-  const blocked = task.status === "blocked" && task.block_reason != null;
+  // Bloqueio por agente (aguardando instrução via autoia_blocked.json) vs. bloqueio
+  // por conflito de merge (integração) — painéis e ações diferentes.
+  const agentBlocked = task.status === "blocked" && task.block_reason != null;
+  const mergeConflict =
+    task.status === "blocked" && (task.error ?? "").toLowerCase().includes("conflito");
 
   function subtaskAlert(task: Task): {message: string; level: "critical" | "warning"} | null {
     const subs = task.subtasks || [];
@@ -493,10 +513,16 @@ export default function TaskDetail() {
             <button onClick={scrollToApproval}>ir para a aprovação ↓</button>
           </div>
         )}
-        {blocked && (
+        {agentBlocked && (
           <div className="sticky-alert sticky-alert-critical">
             <span>⛔ Desenvolvimento bloqueado — aguardando sua instrução para continuar</span>
             <button onClick={scrollToBlocked}>dar instrução ↓</button>
+          </div>
+        )}
+        {mergeConflict && (
+          <div className="sticky-alert sticky-alert-critical">
+            <span>⚠ Conflito de merge — instrua o robô e re-execute a fase para resolver</span>
+            <button onClick={scrollToMerge}>resolver ↓</button>
           </div>
         )}
         {task.status === "paused" && (
@@ -555,8 +581,11 @@ export default function TaskDetail() {
             onGoAcompanhamento={() => setView("acompanhamento")}
           />
 
-          {blocked && (
+          {agentBlocked && (
             <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} />
+          )}
+          {mergeConflict && (
+            <MergeConflictPanel task={task} steps={steps} onInstructAndRetry={instructAndRetry} busy={continueBusy} />
           )}
 
           <TaskSummaryCard summary={task.summary} onRegenerate={regenerateSummary} busy={summaryBusy} />
@@ -685,8 +714,11 @@ export default function TaskDetail() {
       {/* ─────────────── Nível 2: Acompanhamento ─────────────── */}
       {view === "acompanhamento" && (
         <div className="acompanhamento-view">
-          {blocked && (
+          {agentBlocked && (
             <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} />
+          )}
+          {mergeConflict && (
+            <MergeConflictPanel task={task} steps={steps} onInstructAndRetry={instructAndRetry} busy={continueBusy} />
           )}
 
           {/* Solicitação */}
@@ -1064,13 +1096,17 @@ function SituacaoCard({
   }
 
   if (parada) {
+    const mergeConflict =
+      task.status === "blocked" && (task.error ?? "").toLowerCase().includes("conflito");
     const msg =
       task.status === "needs_review"
         ? "parada aguardando revisão humana"
         : task.status === "waiting_approval"
           ? "parada aguardando aprovação humana (gate do pipeline)"
           : task.status === "blocked"
-            ? "parada: o agente não conseguiu continuar sozinho"
+            ? mergeConflict
+              ? "parada por conflito de merge (integração)"
+              : "parada: o agente não conseguiu continuar sozinho"
             : "pausada pelo usuário";
     return (
       <div className="card situation-stopped">

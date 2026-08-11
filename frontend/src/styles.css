@@ -392,8 +392,10 @@ summary::marker {
   top: calc(100% + 8px);
   width: 340px;
   max-width: calc(100vw - 40px);
-  background: var(--surface);
-  border: 1px solid var(--surface-border);
+  background: rgba(14, 16, 21, 0.97);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--surface-border-hover);
   border-radius: var(--radius-md);
   box-shadow: var(--shadow-md);
   padding: 10px;

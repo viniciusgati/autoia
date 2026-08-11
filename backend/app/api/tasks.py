@@ -419,7 +419,14 @@ def retry_step(
         raise HTTPException(404, "fase não encontrada")
     if step.status in (STEP_PENDING, "running"):
         raise HTTPException(400, f"fase em andamento (status: {step.status})")
-    if step.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED) and step.attempt >= settings.max_attempts:
+    if (
+        step.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)
+        and step.attempt >= settings.max_attempts
+        and task.status != TASK_BLOCKED
+    ):
+        # Em task bloqueada (ex.: conflito de merge) o retry fica liberado mesmo com
+        # tentativas máximas: o usuário precisa poder instruir o robô (feedback) e
+        # re-executar a fase para resolver o bloqueio.
         raise HTTPException(400, f"tentativas máximas atingidas ({settings.max_attempts})")
 
     if data and data.note:

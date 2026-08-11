@@ -38,27 +38,37 @@ def build_summary_prompt(
         f"Custo: {task.cost_spent:.2f} US$",
     ]
     if task.description:
-        parts.append(f"## Solicitação original\n{task.description}")
+        parts.append(f"## Solicitação original\n{_cap(task.description, 3000)}")
     if task.details:
-        parts.append(f"## Detalhes adicionados pelo usuário\n{task.details}")
+        parts.append(f"## Detalhes adicionados pelo usuário\n{_cap(task.details, 1200)}")
     if task.acceptance_criteria:
-        parts.append(f"## Critérios de aceite\n{task.acceptance_criteria}")
+        parts.append(f"## Critérios de aceite\n{_cap(task.acceptance_criteria, 2000)}")
     if task.feedback:
-        parts.append(f"## Feedback externo\n{task.feedback}")
+        parts.append(f"## Feedback externo\n{_cap(task.feedback, 1200)}")
     if task.resume_instruction:
-        parts.append(f"## Intervenção do usuário (retomada)\n{task.resume_instruction}")
+        parts.append(f"## Intervenção do usuário (retomada)\n{_cap(task.resume_instruction, 1200)}")
     if task.error:
-        parts.append(f"## Erro/observação\n{task.error}")
+        parts.append(f"## Erro/observação\n{_cap(task.error, 1200)}")
     if phases_text:
-        parts.append(f"## Relatórios das fases\n{phases_text}")
+        parts.append(f"## Relatórios das fases\n{_cap(phases_text, 15000)}")
     if subtasks_text:
         parts.append(subtasks_text)
     if timeline_text:
-        parts.append(f"## Timeline da execução\n{timeline_text}")
+        parts.append(f"## Timeline da execução\n{_cap(timeline_text, 6000)}")
     if project_info:
-        parts.append(project_info)
+        parts.append(_cap(project_info, 2000))
     parts.append(prompts.CONTRACT_SUMMARY)
     return "\n\n".join(parts)
+
+
+def _cap(text: str, limit: int) -> str:
+    """Limita o tamanho de um trecho de contexto para caber no argumento do kimi
+    (`-p`): o prompt é entrada de LLM, não dado persistido — truncar não viola o
+    requisito de não-truncar payloads/eventos."""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    return cut.rsplit("\n", 1)[0] + f"\n… (contexto truncado em {limit} chars para o resumo)"
 
 
 def _phases_text(task: Task) -> str:
