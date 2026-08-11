@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import ArtifactGallery from "./ArtifactGallery";
+import DiffView from "./DiffView";
 import HelpTip from "./HelpTip";
 import StatusBadge from "./StatusBadge";
 import Markdown from "../lib/markdown";
@@ -73,7 +74,7 @@ export default function PhasePanel({ step, repoId, taskId, taskStatus, onClose, 
           {step.diff_stat && (
             <div className="panel-section">
               <div className="panel-section-label">Alterações</div>
-              <pre className="panel-diff">{step.diff_stat}</pre>
+              <DiffView code={step.diff_stat} compact />
             </div>
           )}
 

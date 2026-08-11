@@ -147,6 +147,46 @@ class Task(Base):
         order_by="SubTask.position",
         cascade="all, delete-orphan",
     )
+    proposals: Mapped[list["TaskProposal"]] = relationship(
+        back_populates="task",
+        order_by="TaskProposal.position",
+        cascade="all, delete-orphan",
+        foreign_keys="TaskProposal.task_id",
+    )
+
+
+class TaskProposal(Base):
+    """Proposta de task filha gerada por um robô (autoia_tasks.json) que fica
+    PENDENTE de aprovação humana antes de virar uma task real.
+
+    O worker NUNCA cria a task automaticamente: grava a proposta (dedup por
+    `task_id + title`) e o humano decide aceitar/rejeitar via API."""
+
+    __tablename__ = "task_proposals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    step_id: Mapped[int | None] = mapped_column(ForeignKey("task_steps.id"), nullable=True)
+    position: Mapped[int] = mapped_column(Integer, default=0)
+    title: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text, default="")
+    kind: Mapped[str] = mapped_column(String(50), default="feature")
+    target_repository_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("repositories.id"), nullable=True
+    )
+    status: Mapped[str] = mapped_column(String(20), default="pending")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    accepted_task_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("tasks.id"), nullable=True
+    )
+
+    task: Mapped[Task] = relationship(back_populates="proposals", foreign_keys=[task_id])
+
+    @property
+    def repository_id(self) -> int | None:
+        """Repositório da task pai (para exibir o projeto de origem da proposta)."""
+        return self.task.repository_id if self.task else None
+    accepted_task: Mapped["Task | None"] = relationship(foreign_keys=[accepted_task_id])
 
 
 class TaskStep(Base):

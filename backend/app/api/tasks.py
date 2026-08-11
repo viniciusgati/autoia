@@ -23,9 +23,11 @@ from ..models import (
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
     Pipeline,
+    Repository,
     RunEvent,
     SubTask,
     Task,
+    TaskProposal,
     TaskStep,
 )
 from ..schemas import (
@@ -36,9 +38,10 @@ from ..schemas import (
     ReviewRequest,
     TaskCreate,
     TaskOut,
+    TaskProposalOut,
     TaskUpdateRequest,
 )
-from ..worker.runner import _pm_decide, _system_event
+from ..worker.runner import _pm_decide, _system_event, create_child_task
 from .deps import get_repository_or_404, get_session, get_settings
 
 log = logging.getLogger("autoia.api")
@@ -53,6 +56,7 @@ def _task_query(session: Session):
         joinedload(Task.steps).joinedload(TaskStep.robot),
         joinedload(Task.repository),
         joinedload(Task.subtasks),
+        joinedload(Task.proposals),
     )
 
 
@@ -123,6 +127,82 @@ def list_tasks(
 
 @router.get("/{task_id}", response_model=TaskOut)
 def get_task(task_id: int, session: Session = Depends(get_session)):
+    return _get_task_or_404(session, task_id)
+
+
+# ---------- Propostas de tasks filhas (aprovação humana) ----------
+
+
+def _get_proposal_or_404(task: Task, proposal_id: int) -> TaskProposal:
+    proposal = next((p for p in task.proposals if p.id == proposal_id), None)
+    if proposal is None:
+        raise HTTPException(404, "proposta não encontrada")
+    return proposal
+
+
+@router.get("/{task_id}/proposals", response_model=list[TaskProposalOut])
+def list_proposals(task_id: int, session: Session = Depends(get_session)):
+    task = _get_task_or_404(session, task_id)
+    return sorted(task.proposals, key=lambda p: p.position)
+
+
+@router.post("/{task_id}/proposals/{proposal_id}/accept", response_model=TaskOut)
+def accept_proposal(
+    task_id: int,
+    proposal_id: int,
+    session: Session = Depends(get_session),
+):
+    """Aprova a proposta e cria a task filha real (valida `allow_external_tasks`
+    quando a proposta mira outro repositório)."""
+    task = _get_task_or_404(session, task_id)
+    proposal = _get_proposal_or_404(task, proposal_id)
+    if proposal.status != "pending":
+        raise HTTPException(400, f"proposta já foi {proposal.status}")
+
+    if proposal.target_repository_id is not None:
+        target_repo = session.get(Repository, proposal.target_repository_id)
+        if target_repo is None:
+            raise HTTPException(404, "repositório alvo não encontrado")
+        if not target_repo.allow_external_tasks:
+            raise HTTPException(
+                400,
+                f"repositório '{target_repo.name}' não aceita tasks externas",
+            )
+
+    child = create_child_task(
+        session,
+        task,
+        title=proposal.title,
+        description=proposal.description,
+        kind=proposal.kind,
+        target_repository_id=proposal.target_repository_id,
+    )
+    proposal.status = "accepted"
+    proposal.accepted_task_id = child.id
+    _system_event(
+        session, _anchor_step(task), "proposal_accepted",
+        {"proposal_id": proposal.id, "title": proposal.title, "child_task_id": child.id},
+    )
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/proposals/{proposal_id}/reject", response_model=TaskOut)
+def reject_proposal(
+    task_id: int,
+    proposal_id: int,
+    session: Session = Depends(get_session),
+):
+    task = _get_task_or_404(session, task_id)
+    proposal = _get_proposal_or_404(task, proposal_id)
+    if proposal.status != "pending":
+        raise HTTPException(400, f"proposta já foi {proposal.status}")
+    proposal.status = "rejected"
+    _system_event(
+        session, _anchor_step(task), "proposal_rejected",
+        {"proposal_id": proposal.id, "title": proposal.title},
+    )
+    session.commit()
     return _get_task_or_404(session, task_id)
 
 

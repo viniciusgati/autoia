@@ -1,38 +1,17 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import PhasePanel from "../components/PhasePanel";
 import StatusBadge from "../components/StatusBadge";
+import TaskChat from "../components/TaskChat";
 import Timeline from "../components/Timeline";
+import { buildTurns } from "../lib/chat";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
-import type { RunEvent, Task, TaskStep } from "../types";
+import { etapaAtualLabel } from "../lib/tasks";
+import type { Repository, RunEvent, Task, TaskStep } from "../types";
 
-/** Página de detalhe da task com timeline vertical e painel lateral. */
-
-function faseAtual(task: Task): TaskStep | null {
-  const steps = [...task.steps].sort((a, b) => a.position - b.position);
-  return (
-    steps.find((s) => s.status === "running") ??
-    steps.find((s) => s.status === "pending") ??
-    steps[task.current_step] ??
-    null
-  );
-}
-
-function etapaAtualLabel(task: Task): string {
-  const steps = [...task.steps].sort((a, b) => a.position - b.position);
-  const step = faseAtual(task);
-  if (!step) return "";
-  const nome = step.robot?.name ?? "?";
-  const estado =
-    step.status === "running"
-      ? "rodando"
-      : step.status === "pending"
-        ? "na fila"
-        : step.status;
-  return `Fase ${step.position}/${steps.length} · ${nome} (tentativa ${step.attempt}) · ${estado}`;
-}
+/** Detalhe da task: header sticky + timeline-chat (Conversa | Técnico). */
 
 export default function TaskDetail() {
   const { repoId, taskId: taskIdStr } = useParams<{ repoId: string; taskId: string }>();
@@ -40,9 +19,11 @@ export default function TaskDetail() {
   const repoIdNum = Number(repoId);
 
   const [task, setTask] = useState<Task | null>(null);
+  const [view, setView] = useState<"conversa" | "tecnico">("conversa");
+  const [eventsByStep, setEventsByStep] = useState<Record<number, RunEvent[]>>({});
   const [panelStep, setPanelStep] = useState<TaskStep | null>(null);
-  const [runningToolCall, setRunningToolCall] = useState<RunEvent | null>(null);
   const [runningSubtask, setRunningSubtask] = useState<{position: number; title: string} | null>(null);
+  const [repoNames, setRepoNames] = useState<Record<number, string>>({});
   const [error, setError] = useState("");
   const [extraBudget, setExtraBudget] = useState(5);
   const [cancelNote] = useState("");
@@ -67,15 +48,21 @@ export default function TaskDetail() {
   const prevStatus = useRef<string | null>(null);
 
   useEffect(() => {
+    api.listRepositories().then((repos: Repository[]) => {
+      const m: Record<number, string> = {};
+      for (const r of repos) m[r.id] = r.name;
+      setRepoNames(m);
+    }).catch(() => {});
+  }, []);
+
+  useEffect(() => {
     const load = () =>
       api
         .getTask(taskId)
         .then((t) => {
           setTask(t);
           setFeedbackText((current) => current || t.feedback || "");
-          // Só inicializa o alvo na primeira carga
           setBouncebackTarget((prev) => prev || suggestedBouncebackTarget(t));
-          // História: inicializa na primeira carga e ao ENTRAR em waiting_approval
           const gated = t.steps.find((s) => s.status === "pending" && s.pause_before);
           if (
             !storyInit.current ||
@@ -92,31 +79,38 @@ export default function TaskDetail() {
             }
           }
           prevStatus.current = t.status;
+
+          // Subtarefa atual (evento subtask_start da fase running)
           const running = t.steps.find((s) => s.status === "running");
-          if (running) {
+          if (running && t.subtasks && t.subtasks.length > 0) {
             api
-              .listEvents(running.id, "tool_call", "desc")
-              .then((evs) => setRunningToolCall(evs[0] ?? null))
-              .catch(() => setRunningToolCall(null));
-            // Subtarefa atual: busca o último evento subtask_start
-            if (t.subtasks && t.subtasks.length > 0) {
-              api
-                .listEvents(running.id, "subtask_start", "desc")
-                .then((evs) => {
-                  if (evs.length > 0) {
-                    const p = evs[0].payload as {position?: number; title?: string};
-                    setRunningSubtask({position: p.position ?? -1, title: p.title ?? "?"});
-                  } else {
-                    setRunningSubtask(null);
-                  }
-                })
-                .catch(() => setRunningSubtask(null));
-            } else {
-              setRunningSubtask(null);
-            }
+              .listEvents(running.id, "subtask_start", "desc")
+              .then((evs) => {
+                if (evs.length > 0) {
+                  const p = evs[0].payload as {position?: number; title?: string};
+                  setRunningSubtask({position: p.position ?? -1, title: p.title ?? "?"});
+                } else setRunningSubtask(null);
+              })
+              .catch(() => setRunningSubtask(null));
           } else {
-            setRunningToolCall(null);
             setRunningSubtask(null);
+          }
+
+          // Eventos das fases (para o chat): fases executadas ou em execução.
+          const toLoad = t.steps.filter(
+            (s) => s.summary || s.status === "running",
+          );
+          if (toLoad.length > 0) {
+            Promise.allSettled(
+              toLoad.map((s) => api.listEvents(s.id)),
+            ).then((results) => {
+              const next: Record<number, RunEvent[]> = {};
+              toLoad.forEach((s, i) => {
+                const r = results[i];
+                if (r.status === "fulfilled") next[s.id] = r.value;
+              });
+              setEventsByStep((current) => ({ ...current, ...next }));
+            });
           }
         })
         .catch((e) => setError(String(e)));
@@ -126,6 +120,11 @@ export default function TaskDetail() {
   }, [taskId]);
 
   const refresh = () => api.getTask(taskId).then(setTask).catch((e) => setError(String(e)));
+
+  const turns = useMemo(
+    () => (task ? buildTurns(task, eventsByStep) : []),
+    [task, eventsByStep],
+  );
 
   const retry = async (position: number) => {
     try {
@@ -180,10 +179,7 @@ export default function TaskDetail() {
     }
   };
 
-  /** Sugere a fase alvo para bounceback:
-   *  - Se há step com falha, volta para o step anterior a ele.
-   *  - Se é falha pós-merge, volta para a fase implement (developer).
-   *  - Fallback: primeiro step pré-merge com status done. */
+  /** Sugere a fase alvo para bounceback. */
   function suggestedBouncebackTarget(task: Task): number {
     const steps = [...task.steps].sort((a, b) => a.position - b.position);
     const failedStep = steps.find((s) => s.status === "failed" || s.status === "guardrail_blocked");
@@ -191,10 +187,8 @@ export default function TaskDetail() {
       const prev = steps.filter((s) => s.position < failedStep.position).pop();
       return prev ? prev.position : failedStep.position;
     }
-    // Pós-merge: sugere o implement (developer)
     const implement = steps.find((s) => s.robot?.role === "implement" && !s.post_merge);
     if (implement) return implement.position;
-    // Fallback: primeiro step pré-merge com status done
     const firstDone = steps.find((s) => s.status === "done" && !s.post_merge);
     return firstDone ? firstDone.position : 0;
   }
@@ -295,6 +289,11 @@ export default function TaskDetail() {
 
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
   const runningStep = steps.find((s) => s.status === "running") ?? null;
+  const runningEvents = runningStep ? eventsByStep[runningStep.id] ?? [] : [];
+  const runningToolCall = [...runningEvents].reverse().find((e) => e.kind === "tool_call") ?? null;
+  const live = runningStep
+    ? { step: runningStep, toolCall: runningToolCall, events: runningEvents }
+    : null;
   const pmCandidates = ["failed", "blocked", "needs_review"].includes(task.status);
 
   function subtaskAlert(task: Task): {message: string; level: "critical" | "warning"} | null {
@@ -444,34 +443,61 @@ export default function TaskDetail() {
 
       {task.error && <div className="error">{task.error}</div>}
 
-      {/* Timeline vertical das fases */}
-      <h3>Pipeline</h3>
-      <Timeline
-        steps={steps}
-        selectedId={panelStep?.id ?? null}
-        onSelect={(id) => {
-          const step = steps.find((s) => s.id === id) ?? null;
-          setPanelStep(step);
-        }}
-        onRetry={retry}
-      />
+      {/* Pipeline: Conversa | Técnico */}
+      <div className="meta" style={{ margin: "12px 0" }}>
+        <div className="view-toggle">
+          <button
+            className={view === "conversa" ? "view-active" : ""}
+            onClick={() => setView("conversa")}
+          >
+            conversa
+          </button>
+          <button
+            className={view === "tecnico" ? "view-active" : ""}
+            onClick={() => setView("tecnico")}
+          >
+            técnico
+          </button>
+        </div>
+      </div>
 
-      {/* Painel lateral */}
-      <PhasePanel
-        step={panelStep}
-        repoId={repoIdNum}
-        taskId={taskId}
-        taskStatus={task.status}
-        onClose={() => setPanelStep(null)}
-        onRetry={retry}
-      />
+      {view === "conversa" ? (
+        <TaskChat
+          task={task}
+          turns={turns}
+          repoNames={repoNames}
+          live={live}
+          onProposalsChanged={refresh}
+          onError={setError}
+        />
+      ) : (
+        <>
+          <h3>Pipeline</h3>
+          <Timeline
+            steps={steps}
+            selectedId={panelStep?.id ?? null}
+            onSelect={(id) => {
+              const step = steps.find((s) => s.id === id) ?? null;
+              setPanelStep(step);
+            }}
+            onRetry={retry}
+          />
+          <PhasePanel
+            step={panelStep}
+            repoId={repoIdNum}
+            taskId={taskId}
+            taskStatus={task.status}
+            onClose={() => setPanelStep(null)}
+            onRetry={retry}
+          />
+        </>
+      )}
 
       {/* Revisão humana */}
       {task.status === "needs_review" && (() => {
         const sorted = [...task.steps].sort((a, b) => a.position - b.position);
         const lastExecuted = sorted.filter((s) => s.status !== "pending").pop();
         const maxPos = lastExecuted ? lastExecuted.position : sorted.length - 1;
-        // Candidatos: fases anteriores à última executada (exclui pós-merge se falha foi nelas)
         const candidates = sorted.filter(
           (s) => s.position < maxPos && !(lastExecuted?.post_merge && s.post_merge)
         );
@@ -578,9 +604,9 @@ export default function TaskDetail() {
             </div>
             <p className="muted">
               O pipeline parou antes da fase acima (gate configurado no pipeline).
-              Revise o trabalho das fases anteriores na timeline/painel ao lado e
-              decida: aprovar para liberar o robô, ou voltar uma fase para refazer
-              com ajustes. Você também pode editar a história abaixo.
+              Revise o trabalho das fases anteriores na conversa acima e decida:
+              aprovar para liberar o robô, ou voltar uma fase para refazer com
+              ajustes. Você também pode editar a história abaixo.
             </p>
             <div className="form-field" style={{ marginBottom: 10 }}>
               <label className="form-label">Nota / instruções para a fase aprovada (opcional)</label>

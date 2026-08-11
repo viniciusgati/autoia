@@ -28,6 +28,14 @@ _READABLE_EXTRA_ROOTS = (
     "/var/tmp",
 )
 
+# Arquivos de instrução (AGENTS.md/CLAUDE.md) cuja LEITURA é permitida de qualquer
+# lugar. O runtime do agente instrui ler AGENTS.md que cobrem caminhos tocados por
+# tool calls (ex.: ao rodar `./gradlew` que toca `~/.gradle`, ele manda ler os
+# AGENTS.md ancestrais) — e o workspace da autoia fica DENTRO do repo, então o
+# robô tenta ler o AGENTS.md da plataforma (fora do checkout). São documentação
+# benigna: ler não vaza código nem permite escrita (que segue sempre bloqueada).
+_INSTRUCTION_FILENAMES = {"AGENTS.md", "CLAUDE.md"}
+
 
 @dataclass
 class GuardrailViolation:
@@ -80,10 +88,67 @@ def _read_allowed_extra(path: str) -> bool:
     return any(real == root or real.startswith(root + os.sep) for root in roots)
 
 
-def check_command(command: str, patterns: list[str]) -> GuardrailViolation | None:
+def _read_allowed_instruction(path: str) -> bool:
+    """Leitura de arquivos de instrução (AGENTS.md/CLAUDE.md) é permitida de
+    qualquer lugar: o runtime do agente manda ler os que cobrem os caminhos que
+    ele toca (o workspace fica dentro do repo da autoia). Escrita nunca."""
+    return os.path.basename(os.path.realpath(path)) in _INSTRUCTION_FILENAMES
+
+
+# Ferramentas de inspeção SOMENTE-LEITURA: o termo procurado nunca é executado
+# (ex.: `grep -n "curl" gradlew` só procura a palavra — não invoca curl).
+# Sem essa exceção, buscas por palavras arriscadas são falsos positivos.
+_READONLY_TOOLS = {
+    "grep", "rg", "ag", "cat", "head", "tail", "wc",
+    "less", "more", "diff", "sort", "uniq", "comm", "cut",
+}
+
+# Subcomandos git somente-leitura (grep/log/show/diff/status etc. não executam
+# o termo; `git checkout main`/`git push` continuam bloqueados).
+_READONLY_GIT_SUBCOMMANDS = {
+    "grep", "log", "show", "diff", "status", "branch", "rev-parse",
+    "ls-files", "ls-tree", "remote", "config", "blame",
+}
+
+
+# Padrões de rede cujo bloqueio pode ser afrouxado por `whitelisted_hosts`
+# (curl/wget para hosts de registro de pacotes é legítimo em build/CI).
+_NETWORK_PATTERNS = {r"\bcurl\b", r"\bwget\b"}
+
+_URL_RE = re.compile(r"https?://([^/\s'\"]+)", re.IGNORECASE)
+
+
+def extract_network_targets(command: str) -> list[str]:
+    """Hosts alvo de curl/wget no comando. Vazio se não houver URL explícita."""
+    return [m.group(1).lower().rstrip(".,;:)") for m in _URL_RE.finditer(command)]
+
+
+def _network_allowed(command: str, whitelisted_hosts: list[str]) -> bool:
+    """True se TODOS os alvos http(s) do comando estão na whitelist de hosts."""
+    targets = extract_network_targets(command)
+    if not targets:
+        return False
+    allowed = {h.lower().lstrip(".") for h in whitelisted_hosts if h}
+    return all(t.lstrip(".") in allowed for t in targets)
+
+
+def check_command(
+    command: str,
+    patterns: list[str],
+    whitelisted_hosts: list[str] | None = None,
+) -> GuardrailViolation | None:
     if not command or not command.strip():
         return None
+    tokens = command.lstrip().split()
+    first = tokens[0]
+    if first in _READONLY_TOOLS:
+        return None
+    if first == "git" and len(tokens) > 1 and tokens[1] in _READONLY_GIT_SUBCOMMANDS:
+        return None
+    whitelisted_hosts = whitelisted_hosts or []
     for pattern in patterns:
+        if pattern in _NETWORK_PATTERNS and _network_allowed(command, whitelisted_hosts):
+            continue
         if re.search(pattern, command):
             return GuardrailViolation(pattern=pattern, detail=command[:300])
     return None
@@ -93,6 +158,7 @@ def check_tool_call(
     tool_call: dict,
     patterns: list[str],
     checkout_path: str | None = None,
+    whitelisted_hosts: list[str] | None = None,
 ) -> GuardrailViolation | None:
     """Avalia uma tool call do kimi contra a política. Retorna violação ou None."""
     function = tool_call.get("function") or {}
@@ -101,14 +167,16 @@ def check_tool_call(
 
     if name == "Bash":
         command = extract_command(arguments)
-        return check_command(command or "", patterns)
+        return check_command(command or "", patterns, whitelisted_hosts)
 
     if name in _FILE_TOOLS:
         path = extract_file_path(arguments)
         if path and checkout_path and not path_is_within(path, checkout_path):
             # Leitura de logs do próprio kimi/temporários é permitida (o robô precisa
             # inspecionar a saída de comandos que ele mesmo executou); escrita não.
-            if name in ("Read", "Grep") and _read_allowed_extra(path):
+            if name in ("Read", "Grep") and (
+                _read_allowed_extra(path) or _read_allowed_instruction(path)
+            ):
                 return None
             return GuardrailViolation(
                 pattern="path-outside-workspace",

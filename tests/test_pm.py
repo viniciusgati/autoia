@@ -108,3 +108,32 @@ def test_pm_limit_skips(flow, fake_kimi):
         assert t.status == "failed"
         anchor = sorted(t.steps, key=lambda x: x.position)[-1]
         assert any(e.kind == "pm_skip" for e in anchor.events)
+
+
+def test_pm_handoff_with_subtasks_does_not_crash(flow, fake_kimi, tmp_path):
+    """Regressão: o PM gerava o handoff com um step "fantasma" sem `post_merge`,
+    e _build_handoff quebrava (AttributeError) quando a task tinha subtarefas
+    ("erro interno do worker")."""
+    import os
+
+    from app.models import SUB_PENDING, SubTask
+    from app.worker.runner import _task_workspace
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        checkout = _task_workspace(flow["settings"], t.repository.id, t.id)
+        os.makedirs(os.path.join(checkout, ".git"), exist_ok=True)
+        s.add(SubTask(task_id=t.id, position=0, title="Sub 1", status=SUB_PENDING))
+        t.status = "failed"
+        s.commit()
+
+    flow["settings"].max_pm_decisions = 2
+    flow["settings"].kimi_bin = fake_kimi(HARMLESS, verdict="pm_escalate")
+    # não deve lançar AttributeError
+    runner._pm_decide(flow["session_factory"], flow["settings"], flow["task"]["id"], "test")
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        assert t.status == "needs_review"
+        assert "escalou" in (t.error or "")
+        assert any(e.kind == "pm_decision" for e in sorted(t.steps, key=lambda x: x.position)[-1].events)

@@ -17,7 +17,14 @@ import subprocess
 import threading
 
 from .. import guardrails
-from .exec_common import ExecOutcome, drain_stderr, kill_group, make_watchdog
+from .exec_common import (
+    ExecOutcome,
+    drain_stderr,
+    kill_group,
+    make_watchdog,
+    register_proc,
+    unregister_proc,
+)
 
 # Tipos de evento emitidos para o callback (mesmos do kimi_exec).
 EVENT_TOOL_CALL = "tool_call"
@@ -66,6 +73,7 @@ def run_opencode(
     max_identical_calls: int,
     risky_patterns: list[str],
     checkout_path: str,
+    whitelisted_hosts: list[str] = (),
     model: str | None = None,
     on_event,
 ) -> ExecOutcome:
@@ -90,6 +98,7 @@ def run_opencode(
             bufsize=1,
             start_new_session=True,
         )
+        register_proc(proc)
 
         stderr_thread = threading.Thread(
             target=drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
@@ -153,6 +162,7 @@ def run_opencode(
                         {"function": {"name": tc["name"], "arguments": tc["arguments"]}},
                         risky_patterns,
                         checkout_path,
+                        whitelisted_hosts,
                     )
                     if violation is None and identical_count >= max_identical_calls:
                         violation = guardrails.GuardrailViolation(
@@ -234,6 +244,7 @@ def run_opencode(
 
         proc.wait()
         stderr_thread.join(timeout=10)
+        unregister_proc(proc)
 
     if timed_out.is_set() and not outcome.aborted:
         outcome.aborted = True

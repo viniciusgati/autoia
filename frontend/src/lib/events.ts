@@ -19,3 +19,46 @@ export function formatToolCall(event: RunEvent): string {
   }
   return `${name} ${raw}`.trim();
 }
+
+/** Resumo de uma linha para os eventos ao vivo de uma sessão. */
+export function sessionEventLine(event: RunEvent): string {
+  const payload = event.payload as Record<string, unknown>;
+  switch (event.kind) {
+    case "assistant_text":
+      return String(payload.content ?? "").replace(/\s+/g, " ").trim().slice(0, 140);
+    case "tool_call":
+      return formatToolCall(event);
+    case "tool_result": {
+      const content = String(payload.content ?? "").replace(/\s+/g, " ").trim();
+      return content.slice(0, 120) + (content.length > 120 ? "…" : "");
+    }
+    case "guardrail_blocked":
+      return `⛔ ${String(payload.detail ?? payload.pattern ?? "")}`;
+    case "bounce_back":
+      return `↩️ voltou da fase ${String(payload.from_position ?? "?")}: ${String(
+        payload.reason ?? "",
+      )}`;
+    case "phase_done":
+      return `fase concluída → próxima ${String(payload.next ?? "?")}`;
+    case "budget_hit":
+      return `orçamento estourado: ${String(payload.reason ?? "")}`;
+    case "subtask_start":
+      return `🧩 iniciando subtarefa ${Number(payload.position ?? -1) + 1}: ${String(payload.title ?? "?")}`;
+    case "subtask_implemented":
+      return `✅ subtarefa ${Number(payload.position ?? -1) + 1} implementada: ${String(payload.title ?? "?")}`;
+    case "subtask_verified":
+      return `✔️ subtarefa ${Number(payload.position ?? -1) + 1} verificada: ${String(payload.title ?? "?")}`;
+    case "subtask_failed":
+      return `❌ subtarefa ${Number(payload.position ?? -1) + 1} falhou: ${String(payload.reason ?? "")}`;
+    case "subtask_bounce_back":
+      return `↩️ bounce-back de subtarefas: ${String(payload.positions ?? "")}`;
+    case "subtask_marked_done":
+      return `✅ subtarefa ${Number(payload.position ?? -1) + 1} marcada como implementada: ${String(payload.title ?? "?")}`;
+    case "human_subtask_retry":
+      return `👤 retry manual da subtarefa ${Number(payload.position ?? -1) + 1}: ${String(payload.title ?? "?")}`;
+    case "system":
+      return String(payload.reason ?? JSON.stringify(payload)).slice(0, 140);
+    default:
+      return JSON.stringify(payload).slice(0, 140);
+  }
+}

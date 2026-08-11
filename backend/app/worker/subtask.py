@@ -11,6 +11,7 @@ e o papel do step é `implement` ou `verify`.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -138,6 +139,7 @@ def _build_subtask_implement_prompt(
     except gitops.GitError:
         pass
 
+    parts.append(prompts.SUB_TASK_DONE_TOOL)
     parts.append(prompts.HANDOFF_READ)
     parts.append(prompts.HANDOFF_DOCUMENT)
     parts.append(prompts.EVIDENCE)
@@ -247,6 +249,25 @@ def run_implement_subtasks(
     return None
 
 
+def _subtask_marked_done(checkout: str, position_1based: int) -> bool:
+    """True se o agente declarou a subtarefa como já implementada via
+    `autoia_subtasks_done.json` (array de posições 1-based) no checkout."""
+    path = os.path.join(checkout, "autoia_subtasks_done.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return False
+    if not isinstance(data, list):
+        return False
+    for item in data:
+        if isinstance(item, int) and item == position_1based:
+            return True
+        if isinstance(item, str) and item.strip().isdigit() and int(item.strip()) == position_1based:
+            return True
+    return False
+
+
 def _run_one_implement(
     settings: Settings,
     session_factory,
@@ -321,6 +342,35 @@ def _run_one_implement(
             )
             s.commit()
             return reason
+
+        # Sucesso: o agente pode ter declarado a subtarefa como JÁ implementada na
+        # branch (arquivo autoia_subtasks_done.json) — evita re-implementar trabalho
+        # já commitado (ex.: status perdido por restart do worker).
+        if _subtask_marked_done(checkout, st.position + 1):
+            st.status = SUB_IMPLEMENTED
+            st.error = None
+            st.finished_at = func.now()
+            args = json.dumps(
+                {"subtask_id": st.position + 1, "title": st.title},
+                ensure_ascii=False,
+            )
+            _system_event(
+                s, step, "tool_call",
+                {"tool_call": {"function": {"name": "autoia_mark_subtask_done", "arguments": args}},
+                 "violation": None},
+            )
+            _system_event(
+                s, step, "tool_result",
+                {"content": f"subtarefa {st.position + 1} ({st.title}) marcada como "
+                            "implementada — código já presente na branch"},
+            )
+            _system_event(
+                s, step, "subtask_marked_done",
+                {"position": st.position, "title": st.title,
+                 "reason": "agente declarou a subtarefa como já implementada na branch"},
+            )
+            s.commit()
+            return None
 
         # Sucesso: commit local e avança status
         try:

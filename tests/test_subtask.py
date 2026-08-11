@@ -219,6 +219,79 @@ class TestSubtaskAPI:
         assert sub["attempt"] == 3
         assert sub["error"] is None
 
+    def test_retry_subtask_pending_task_failed(self, flow):
+        """Subtarefa `pending` com a task morta (failed) não é "em andamento":
+        o worker nunca vai reclamá-la — o retry deve funcionar."""
+        client = flow["client"]
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "repository_id": 1,
+                "pipeline_id": 1,
+                "title": "t",
+                "description": "d",
+                "kind": "feature",
+                "subtasks": [{"title": "Sub 1", "description": "d1"}],
+            },
+        )
+        task = resp.json()
+        from app.db import make_engine, make_session_factory
+        session_factory = make_session_factory(make_engine(flow["settings"].database_url))
+        with session_factory() as s:
+            from app.models import SubTask, Task
+            t = s.get(Task, task["id"])
+            t.status = "failed"
+            t.error = "erro interno do worker"
+            st = s.query(SubTask).filter(SubTask.task_id == task["id"]).first()
+            st.status = "pending"  # abortou (guardrail) e ficou pending
+            st.attempt = 2
+            st.error = "guardrail: path-outside-workspace"
+            s.commit()
+
+        resp = client.post(f"/api/tasks/{task['id']}/subtasks/0/retry")
+        assert resp.status_code == 200, resp.text
+        sub = resp.json()
+        assert sub["status"] == "pending"
+        assert sub["attempt"] == 3
+        assert sub["error"] is None
+        # task reencaminhada para a fila
+        with session_factory() as s:
+            from app.models import Task
+            t = s.get(Task, task["id"])
+            assert t.status == "queued"
+            assert t.error is None
+
+    def test_retry_subtask_pending_task_running_blocked(self, flow):
+        """Subtarefa `pending` com a task em andamento continua bloqueada
+        (o worker vai processá-la; retry duplicaria a execução)."""
+        client = flow["client"]
+        resp = client.post(
+            "/api/tasks",
+            json={
+                "repository_id": 1,
+                "pipeline_id": 1,
+                "title": "t",
+                "description": "d",
+                "kind": "feature",
+                "subtasks": [{"title": "Sub 1", "description": "d1"}],
+            },
+        )
+        task = resp.json()
+        from app.db import make_engine, make_session_factory
+        session_factory = make_session_factory(make_engine(flow["settings"].database_url))
+        with session_factory() as s:
+            from app.models import SubTask, Task
+            t = s.get(Task, task["id"])
+            t.status = "in_progress"
+            st = s.query(SubTask).filter(SubTask.task_id == task["id"]).first()
+            st.status = "pending"
+            st.attempt = 2
+            s.commit()
+
+        resp = client.post(f"/api/tasks/{task['id']}/subtasks/0/retry")
+        assert resp.status_code == 400, resp.text
+        assert "em andamento" in resp.json()["detail"]
+
 
 # ---------------------------------------------------------------------------
 # Worker: fluxo de subtarefas com fake_kimi
@@ -270,6 +343,54 @@ class TestSubtaskWorker:
             for sub in subs:
                 assert sub.status == "implemented", f"sub {sub.position} status={sub.status}"
                 assert sub.summary == "implementado!"
+
+    def test_implement_marks_done_via_tool(self, flow, fake_kimi, settings, monkeypatch):
+        """O agente pode marcar uma subtarefa como implementada via `autoia_subtasks_done.json`
+        (evita re-implementar código já commitado, ex.: após restart do worker). A chamada
+        vira tool_call/tool_result no timeline."""
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        client = flow["client"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            from app.models import STEP_DONE, SUB_PENDING, SubTask, TaskStep
+            s.add(SubTask(task_id=task_id, position=0, title="Sub 1", description="fazer A", status=SUB_PENDING))
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            steps[0].status = STEP_DONE
+            steps[0].summary = "história"
+            steps[1].status = STEP_DONE
+            steps[1].summary = "revisão ok"
+            steps[2].status = "pending"
+            s.commit()
+
+        step_id = claim_next(session_factory)
+        assert step_id is not None
+        monkeypatch.setattr(settings, "kimi_bin", fake_kimi(
+            [{"role": "assistant", "content": "código já estava na branch"}],
+            write_file="autoia_subtasks_done.json",
+            write_content="[1]",
+        ))
+        trigger = execute_step(settings, session_factory, step_id)
+        assert trigger is None
+
+        with session_factory() as s:
+            from app.models import RunEvent, SubTask
+            sub = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+            assert sub.status == "implemented"
+            assert sub.error is None
+
+            kinds = [e.kind for e in s.query(RunEvent).filter(RunEvent.step_id == step_id).all()]
+            assert "tool_call" in kinds
+            assert "tool_result" in kinds
+            assert "subtask_marked_done" in kinds
+
+            tc = next(e for e in s.query(RunEvent).filter(RunEvent.step_id == step_id).all()
+                      if e.kind == "tool_call")
+            fn = (tc.payload or {}).get("tool_call", {}).get("function", {})
+            assert fn.get("name") == "autoia_mark_subtask_done"
+            assert '"subtask_id": 1' in fn.get("arguments", "")
 
     def test_verify_subtasks_pass(self, flow, fake_kimi, settings, monkeypatch):
         """Tester verifica cada subtarefa e todas passam."""

@@ -7,7 +7,15 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..models import SUB_FAILED, SUB_PENDING, STEP_FAILED, STEP_GUARDRAIL_BLOCKED, TASK_QUEUED, SubTask
+from ..models import (
+    SUB_FAILED,
+    SUB_PENDING,
+    STEP_FAILED,
+    STEP_GUARDRAIL_BLOCKED,
+    TASK_IN_PROGRESS,
+    TASK_QUEUED,
+    SubTask,
+)
 from ..schemas import SubTaskIn, SubTaskOut, SubTaskUpdate
 from ..worker.runner import _pm_decide
 from .deps import get_session, get_settings
@@ -87,7 +95,10 @@ def retry_subtask(
     st = next((s for s in task.subtasks if s.position == position), None)
     if st is None:
         raise HTTPException(404, "subtarefa não encontrada")
-    if st.status == SUB_PENDING:
+    if st.status == SUB_PENDING and task.status in (TASK_QUEUED, TASK_IN_PROGRESS):
+        # Subtarefa `pending` só é "em andamento" enquanto o worker pode processá-la
+        # (task na fila/rodando). Se a task morreu (failed/needs_review/blocked/…),
+        # o worker nunca mais vai reclamar a subtarefa — retry é a única saída.
         raise HTTPException(400, f"subtarefa em andamento (status: {st.status})")
     if st.attempt >= settings.max_attempts:
         raise HTTPException(400, f"tentativas máximas atingidas ({settings.max_attempts})")

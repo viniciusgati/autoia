@@ -42,37 +42,56 @@ def _load_dotenv(directory: str | None = None) -> None:
 _load_dotenv()
 
 # Padrões de comandos considerados arriscados no shell dos robôs.
-# Robôs nunca precisam: destruir arquivos, mexer no sistema, rede externa,
-# privilégios, push ou sair da branch de trabalho.
+# Política: bloquear só o que é destrutivo/irreversível no nível do SISTEMA ou
+# quebra as garantias do sandbox (sem push, sem sair da branch de trabalho).
+# Tudo que é operação de build normal dentro do checkout/temp é permitido:
+# `rm -rf` em caminho relativo, curl/wget p/ host da whitelist, pip/npm install,
+# systemctl status, kill de processo próprio, etc.
 DEFAULT_RISKY_PATTERNS = [
-    r"\brm\s+-rf\b",
+    # `rm -rf` em alvos de sistema (raiz, home, diretórios do SO)
+    r"rm\s+-rf\s+/(\s|$)",
+    r"rm\s+-rf\s+~/",
+    r"rm\s+-rf\s+/(etc|usr|var|home|root|bin|sbin|boot|lib|opt)([/\s]|$)",
+    # Destruição de disco
     r"\bmkfs(\.|\b)",
-    r"dd\s+if=.*of=/\s*dev",
+    r"\bdd\s+if=.*of=/\s*dev",
     r">\s*/dev/sd",
+    r"\bfdisk\b",
+    r"\bparted\b",
+    r"\bwipefs\b",
+    r"\bblkdiscard\b",
+    # Desligamento/reboot do host
+    r"\bshutdown\b|\breboot\b|\bhalt\b|\bpoweroff\b",
+    r"\binit\s+[06]\b",
+    # Escalação de privilégio
+    r"\bsudo\b",
+    r"\bsu\s+-\b",
+    r"\bpkexec\b",
+    # Rede externa (exceto curl/wget p/ host da whitelist) e exfiltração
     r"\bcurl\b",
     r"\bwget\b",
     r"\bssh\b",
     r"\bscp\b",
-    r"\bsudo\b",
-    r"\bchown\b",
-    r"\bchmod\s+777",
-    r"\bchmod\s+-R\s+777",
+    # Git: nunca push nem sair da branch de trabalho (merge é feito pelo worker)
     r"git\s+push\b",
     r"git\s+checkout\s+(main|master)\b",
     r"git\s+switch\s+(main|master)\b",
-    r"\bmv\s+[/~]",
-    r"\bpython\s+-m\s+pip\s+install\b",
-    r"npm\s+install\s+-g\b",
-    r"\bmake\s+install\b",
-    r"\bshutdown\b|\breboot\b|\bhalt\b",
-    r"\bsystemctl\b",
-    r"\bkillall?\b",
-    r"pkexec\b",
-    r"\bsu\s+-\b",
 ]
 
-# Hosts que os robôs podem acessar via curl/wget (vazio = nenhum).
-DEFAULT_WHITELISTED_HOSTS: list[str] = []
+# Hosts que os robôs podem acessar via curl/wget (vazio = nenhum). Default:
+# registros de pacotes usados por builds (Gradle/Maven/Android, npm, pip).
+DEFAULT_WHITELISTED_HOSTS: list[str] = [
+    "dl.google.com",
+    "maven.google.com",
+    "repo.maven.apache.org",
+    "repo1.maven.org",
+    "plugins.gradle.org",
+    "services.gradle.org",
+    "registry.npmjs.org",
+    "registry.yarnpkg.com",
+    "files.pythonhosted.org",
+    "pypi.org",
+]
 
 
 def _env(key: str, default: str) -> str:
@@ -110,7 +129,7 @@ class Settings:
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
     run_timeout: int = field(default_factory=lambda: _int("AUTOIA_RUN_TIMEOUT", 1800))
-    max_identical_calls: int = field(default_factory=lambda: _int("AUTOIA_MAX_IDENTICAL_CALLS", 3))
+    max_identical_calls: int = field(default_factory=lambda: _int("AUTOIA_MAX_IDENTICAL_CALLS", 6))
     max_attempts: int = field(default_factory=lambda: _int("AUTOIA_MAX_ATTEMPTS", 3))
     task_budget: float = field(default_factory=lambda: _float("AUTOIA_TASK_BUDGET", 10.0))
     cost_per_interaction: float = field(default_factory=lambda: _float("AUTOIA_COST_PER_INTERACTION", 0.01))

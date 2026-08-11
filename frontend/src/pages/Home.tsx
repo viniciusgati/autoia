@@ -15,6 +15,35 @@ function faseAtual(task: Task): TaskStep | null {
   );
 }
 
+/** Tarefa precisa de iteração humana (revisão, aprovação, bloqueada ou guardrail). */
+function precisaHumano(task: Task): boolean {
+  if (
+    task.status === "needs_review" ||
+    task.status === "waiting_approval" ||
+    task.status === "blocked"
+  ) {
+    return true;
+  }
+  return (
+    task.status !== "done" &&
+    task.status !== "failed" &&
+    task.steps.some((s) => s.status === "guardrail_blocked")
+  );
+}
+
+/** "há 5 min", "há 3 h", etc. */
+function tempoRelativo(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (Number.isNaN(ms) || ms < 0) return "";
+  const min = Math.floor(ms / 60000);
+  if (min < 1) return "agora";
+  if (min < 60) return `há ${min} min`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `há ${h} h`;
+  const d = Math.floor(h / 24);
+  return `há ${d} d`;
+}
+
 export default function Home() {
   const [dash, setDash] = useState<DashboardData | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
@@ -110,7 +139,7 @@ export default function Home() {
             {dash.notices.map((notice, i) => (
               <Link
                 key={`${notice.kind}-${notice.task_id}-${i}`}
-                to={`/${notice.task_id}/tasks/${notice.task_id}`}
+                to={`/${notice.repository_id}/tasks/${notice.task_id}`}
                 className={`notice notice-${notice.level}`}
               >
                 <div className="notice-line">
@@ -142,12 +171,15 @@ export default function Home() {
               ? (counts.byStatus["queued"] || 0) +
                 (counts.byStatus["in_progress"] || 0)
               : 0;
-            const attentionCount = counts
-              ? (counts.byStatus["needs_review"] || 0) +
-                (counts.byStatus["waiting_approval"] || 0) +
-                (counts.byStatus["blocked"] || 0)
-              : 0;
-            const recentTasks = repoTasks.slice(0, 3);
+            const humanCount = repoTasks.filter(precisaHumano).length;
+            const recentTasks = [...repoTasks]
+              .sort((a, b) => {
+                const aH = precisaHumano(a) ? 1 : 0;
+                const bH = precisaHumano(b) ? 1 : 0;
+                if (aH !== bH) return bH - aH;
+                return b.id - a.id;
+              })
+              .slice(0, 3);
 
             return (
               <div key={repo.id} className="project-card-wrapper">
@@ -159,18 +191,21 @@ export default function Home() {
                   <div className="project-card-meta">
                     <span className="muted mono small">{repo.url}</span>
                   </div>
+                  {humanCount > 0 && (
+                    <div className="project-card-human">
+                      <span className="project-card-human-icon">👀</span>
+                      {humanCount} {humanCount === 1 ? "tarefa aguardando" : "tarefas aguardando"} você
+                    </div>
+                  )}
                   <div className="project-card-stats">
                     <span>{counts?.total ?? 0} tarefas</span>
                     {activeCount > 0 && (
                       <span className="project-card-active">{activeCount} ativas</span>
                     )}
-                    {attentionCount > 0 && (
-                      <span className="project-card-attention">⚠ {attentionCount}</span>
-                    )}
                   </div>
                 </Link>
 
-                {/* últimas tarefas do projeto */}
+                {/* últimas tarefas do projeto (prioriza as que precisam de humano) */}
                 {recentTasks.length > 0 && (
                   <div className="project-tasks-mini">
                     {recentTasks.map((task) => {
@@ -178,19 +213,11 @@ export default function Home() {
                       const etapa = step
                         ? `F${step.position} · ${step.robot?.name ?? "?"}`
                         : "—";
-                      const isAttention =
-                        task.status === "needs_review" ||
-                        task.status === "waiting_approval" ||
-                        task.status === "blocked" ||
-                        (task.steps.some(
-                          (s) => s.status === "guardrail_blocked",
-                        ) &&
-                          task.status !== "done" &&
-                          task.status !== "failed");
-                      const rowClass = isAttention
-                        ? task.status === "needs_review" || task.status === "waiting_approval"
-                          ? " project-task-row-warn"
-                          : " project-task-row-err"
+                      const precisa = precisaHumano(task);
+                      const rowClass = precisa
+                        ? task.status === "blocked"
+                          ? " project-task-row-err"
+                          : " project-task-row-warn"
                         : "";
                       return (
                         <Link
@@ -198,17 +225,20 @@ export default function Home() {
                           to={`/${repo.id}/tasks/${task.id}`}
                           className={`project-task-row${rowClass}`}
                         >
-                          <span className="project-task-title">
-                            {isAttention && <span className="project-task-alert">⚠ </span>}
-                            #{task.id} {task.title}
-                          </span>
-                          <span className="project-task-meta">
-                            <StatusBadge status={task.status} />
-                            <span className="muted small">{etapa}</span>
-                            <span className="muted small mono">
-                              {task.cost_spent.toFixed(2)} US$
+                          <div className="project-task-line">
+                            <span className="project-task-title">
+                              #{task.id} {task.title}
                             </span>
-                          </span>
+                            {precisa && (
+                              <span className="project-task-await">👀 aguarda você</span>
+                            )}
+                            <StatusBadge status={task.status} />
+                          </div>
+                          <div className="project-task-sub">
+                            <span>{etapa}</span>
+                            <span className="mono">{task.cost_spent.toFixed(2)} US$</span>
+                            <span className="muted">{tempoRelativo(task.updated_at)}</span>
+                          </div>
                         </Link>
                       );
                     })}

@@ -59,6 +59,25 @@ Formato do arquivo (JSON array):
   documentação no repo "docs" quando uma feature é implementada no repo "api".
 """
 
+# Ferramenta: marcar subtarefa como implementada (evita re-implementar o que já está na branch).
+SUB_TASK_DONE_TOOL = """### Ferramenta: marcar subtarefa como implementada
+
+Se a subtarefa atual JÁ está implementada na branch — código presente, commitado e
+atendendo os critérios (ex.: o trabalho foi feito numa execução anterior e o status foi
+perdido por um restart do worker) — NÃO reimplemente do zero. Em vez disso, escreva o
+arquivo `autoia_subtasks_done.json` na raiz do projeto e o sistema marcará a subtarefa
+como implementada automaticamente ao final desta fase.
+
+Formato (JSON array com a posição 1-based da subtarefa):
+```json
+[1, 2, 4]
+```
+
+- Use APENAS quando o código da subtarefa JÁ está commitado na branch e atende os critérios.
+- Ainda assim, documente no texto final o que você constatou (arquivos já presentes etc.).
+- Se a subtarefa ainda precisa de trabalho, implemente normalmente e NÃO escreva o arquivo.
+"""
+
 # Caderno de trabalho: o worker gera autoia_handoff.md no checkout antes de cada fase
 # com o histórico COMPLETO das fases anteriores + diff + instrução da fase atual.
 HANDOFF_READ = """## Caderno de trabalho (leia antes de começar)

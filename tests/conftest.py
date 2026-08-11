@@ -67,6 +67,7 @@ def fake_kimi(tmp_path):
         lines: list[dict],
         verdict: str | None = None,
         write_file: str | None = None,
+        write_content: str | None = None,
     ) -> str:
         counter = len(list(tmp_path.glob("fake_kimi_*")))
         script = tmp_path / f"fake_kimi_{counter}"
@@ -87,8 +88,9 @@ def fake_kimi(tmp_path):
                 + rule
                 + "\nif v:\n    with open('autoia_verdict.txt', 'w') as f:\n        f.write(v)\n"
             )
+        content = write_content if write_content is not None else "conteudo\n"
         write_code = (
-            f"with open({write_file!r}, 'w') as f:\n    f.write('conteudo\\n')\n"
+            f"with open({write_file!r}, 'w') as f:\n    f.write({content!r})\n"
             if write_file
             else ""
         )

@@ -4,6 +4,7 @@ import { api } from "../api";
 import HelpTip from "../components/HelpTip";
 import PhaseStepper from "../components/PhaseStepper";
 import StatusBadge from "../components/StatusBadge";
+import { diffSummary } from "../lib/tasks";
 import type { Pipeline, Repository, Task, TaskStep } from "../types";
 
 const ATIVOS = ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"];
@@ -94,7 +95,6 @@ export default function RepoDashboard() {
         cost_per_interaction: repo.cost_per_interaction,
         risky_patterns_extra: repo.risky_patterns_extra,
         db_rule: repo.db_rule,
-        allow_auto_tasks: repo.allow_auto_tasks,
         allow_external_tasks: repo.allow_external_tasks,
         default_pipeline_id: repo.default_pipeline_id,
       });
@@ -222,14 +222,6 @@ export default function RepoDashboard() {
 
               {/* Toggles */}
               <div className="form-inline">
-                <label className="post-merge-label">
-                  <input type="checkbox"
-                    checked={repo.allow_auto_tasks}
-                    onChange={(e) => setRepo({ ...repo, allow_auto_tasks: e.target.checked })}
-                  />
-                  permitir tasks automáticas
-                  <HelpTip>Robôs (ex: PO) podem criar novas tarefas automaticamente a partir de uma tarefa pai. Ex: uma feature complexa é quebrada em 3 tarefas menores.</HelpTip>
-                </label>
                 <label className="post-merge-label">
                   <input type="checkbox"
                     checked={repo.allow_external_tasks}
@@ -486,21 +478,4 @@ function extractSummary(text: string): string {
   const cut = cleaned.slice(0, limit);
   const lastSpace = cut.lastIndexOf(" ");
   return (lastSpace > 100 ? cut.slice(0, lastSpace) : cut) + "…";
-}
-
-function diffSummary(diffStat: string | null): string | null {
-  if (!diffStat) return null;
-  const lines = diffStat.trim().split("\n");
-  const last = lines[lines.length - 1];
-  const match = last.match(
-    /(\d+)\s+files?\s+changed(?:,\s*(\d+)\s+insertions?\(\+\))?(?:,\s*(\d+)\s+deletions?\(\-\))?/,
-  );
-  if (!match) {
-    const fileLines = lines.filter((l) => l.includes("|")).length;
-    if (fileLines > 0) return `${fileLines} arquivo(s)`;
-    return null;
-  }
-  const plus = match[2] ? `+${match[2]}` : "+0";
-  const minus = match[3] ? `-${match[3]}` : "-0";
-  return `${match[1]} arquivo(s) · ${plus} ${minus}`;
 }

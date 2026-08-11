@@ -8,6 +8,35 @@ import subprocess
 import threading
 from dataclasses import dataclass
 
+# Registro global de subprocessos ativos (kimi/opencode). Permite matar todos
+# no shutdown do worker — os robôs rodam em sessão própria (start_new_session=True)
+# e NÃO morrem quando o worker morre, virando processos órfãos que continuam
+# trabalhando na mesma branch (corrompendo estado). Sem isso, restart do worker
+# deixava robôs antigos executando em paralelo.
+_ACTIVE_PROCS: set[subprocess.Popen] = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def register_proc(proc: subprocess.Popen) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROCS.add(proc)
+
+
+def unregister_proc(proc: subprocess.Popen) -> None:
+    with _ACTIVE_LOCK:
+        _ACTIVE_PROCS.discard(proc)
+
+
+def kill_all_procs() -> None:
+    """SIGTERM no grupo de todos os subprocessos ativos (não bloqueia esperando)."""
+    with _ACTIVE_LOCK:
+        procs = list(_ACTIVE_PROCS)
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
 
 @dataclass
 class ExecOutcome:

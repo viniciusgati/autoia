@@ -87,6 +87,21 @@ export interface SubTask {
   finished_at: string | null;
 }
 
+export interface TaskProposal {
+  id: number;
+  task_id: number;
+  step_id: number | null;
+  position: number;
+  title: string;
+  description: string;
+  kind: string;
+  repository_id: number | null;
+  target_repository_id: number | null;
+  status: "pending" | "accepted" | "rejected";
+  created_at: string;
+  accepted_task_id: number | null;
+}
+
 export interface Task {
   id: number;
   repository_id: number;
@@ -108,6 +123,7 @@ export interface Task {
   updated_at: string;
   steps: TaskStep[];
   subtasks: SubTask[];
+  proposals: TaskProposal[];
   parent_task_id: number | null;
   children: Task[];
 }
@@ -126,6 +142,7 @@ export interface Notice {
   task_id: number;
   task_title: string;
   task_status: string;
+  repository_id: number;
   level: "critical" | "warning";
   kind: string;
   message: string;
@@ -139,4 +156,18 @@ export interface Dashboard {
   guardrail_events: number;
   recent_guardrails: RunEvent[];
   notices: Notice[];
+}
+
+export interface WorkerStatus {
+  alive: boolean;
+  last_heartbeat_sec: number | null;
+}
+
+/** Payload da página global "Execução" (GET /api/execution). */
+export interface Execution {
+  tasks: Task[];
+  current_events: Record<string, RunEvent[]>;
+  proposals: TaskProposal[];
+  notices: Notice[];
+  worker: WorkerStatus;
 }

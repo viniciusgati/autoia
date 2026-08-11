@@ -198,6 +198,25 @@ class TaskStepOut(BaseModel):
     artifacts: list[ArtifactOut] = []
 
 
+class TaskProposalOut(BaseModel):
+    """Proposta de task filha aguardando (ou não) aprovação humana."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    step_id: int | None
+    position: int
+    title: str
+    description: str
+    kind: str
+    repository_id: int | None = None
+    target_repository_id: int | None
+    status: str
+    created_at: datetime
+    accepted_task_id: int | None = None
+
+
 class TaskOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -222,6 +241,7 @@ class TaskOut(BaseModel):
     parent_task_id: int | None = None
     steps: list[TaskStepOut] = []
     subtasks: list[SubTaskOut] = []
+    proposals: list[TaskProposalOut] = []
     children: list["TaskOut"] = []
 
 
@@ -296,6 +316,7 @@ class NoticeOut(BaseModel):
     task_id: int
     task_title: str
     task_status: str
+    repository_id: int
     level: Literal["critical", "warning"]
     kind: str
     message: str
@@ -309,3 +330,21 @@ class DashboardOut(BaseModel):
     guardrail_events: int
     recent_guardrails: list[RunEventOut]
     notices: list[NoticeOut] = []
+
+
+# ---------- Execução (página global) ----------
+
+class WorkerStatusOut(BaseModel):
+    alive: bool
+    last_heartbeat_sec: float | None = None
+
+
+class ExecutionOut(BaseModel):
+    """Payload da página global "Execução": tasks ativas, eventos ao vivo das fases
+    running, propostas pendentes, avisos e status do worker (1 request/poll)."""
+
+    tasks: list[TaskOut] = []
+    current_events: dict[str, list[RunEventOut]] = {}
+    proposals: list[TaskProposalOut] = []
+    notices: list[NoticeOut] = []
+    worker: WorkerStatusOut = WorkerStatusOut(alive=False)

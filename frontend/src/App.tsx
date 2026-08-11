@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { api } from "./api";
-import { DashboardIcon, PipelinesIcon, ProjectsIcon, RobotsIcon, TasksIcon } from "./components/Icons";
+import { DashboardIcon, PipelinesIcon, ProjectsIcon, RobotsIcon, TasksIcon, TerminalIcon } from "./components/Icons";
 import Home from "./pages/Home";
 import Repositories from "./pages/Repositories";
 import Robots from "./pages/Robots";
@@ -10,6 +10,8 @@ import RepoDashboard from "./pages/RepoDashboard";
 import RepoTasks from "./pages/RepoTasks";
 import PhaseDetail from "./pages/PhaseDetail";
 import TaskDetail from "./pages/TaskDetail";
+import Execution from "./pages/Execution";
+import Notifications from "./components/Notifications";
 import type { Repository } from "./types";
 
 /** Extrai o repoId numérico do pathname atual, ou null se não for um projeto. */
@@ -64,13 +66,27 @@ export default function App() {
 
   return (
     <div className="layout">
+      <header className="topbar">
+        <span className="topbar-brand">autoia</span>
+        <div className="topbar-right">
+          <Notifications />
+          <div className="worker-status">
+            <span className={`worker-dot${workerAlive === null ? "" : workerAlive ? " worker-dot-on" : " worker-dot-off"}`} />
+            <span className="worker-label">
+              {workerAlive === null ? "verificando…" : workerAlive ? "worker ativo" : "worker offline"}
+            </span>
+          </div>
+        </div>
+      </header>
+      <div className="layout-body">
       <nav className="sidebar">
-        <h1 className="brand">autoia</h1>
-
         <div className="sidebar-section">
           <div className="sidebar-label">Projetos</div>
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
             <ProjectsIcon size={16} /> Todos os projetos
+          </NavLink>
+          <NavLink to="/execucao" className={({ isActive }) => (isActive ? "active" : "")}>
+            <TerminalIcon size={16} /> Execução
           </NavLink>
 
           <div className="sidebar-projects">
@@ -128,20 +144,11 @@ export default function App() {
             <PipelinesIcon size={16} /> Pipelines
           </NavLink>
         </div>
-
-        <div className="sidebar-section" style={{ marginTop: "auto" }}>
-          <div className="sidebar-label">Sistema</div>
-          <div className="worker-status">
-            <span className={`worker-dot${workerAlive === null ? "" : workerAlive ? " worker-dot-on" : " worker-dot-off"}`} />
-            <span className="worker-label">
-              {workerAlive === null ? "verificando…" : workerAlive ? "worker ativo" : "worker offline"}
-            </span>
-          </div>
-        </div>
       </nav>
       <main className="content">
         <Routes>
           <Route path="/" element={<Home />} />
+          <Route path="/execucao" element={<Execution />} />
           <Route path="/robots" element={<Robots />} />
           <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/repositories" element={<Repositories />} />
@@ -159,6 +166,7 @@ export default function App() {
           />
         </Routes>
       </main>
+      </div>
     </div>
   );
 }

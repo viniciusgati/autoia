@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import ArtifactGallery from "../components/ArtifactGallery";
+import DiffView from "../components/DiffView";
 import StatusBadge from "../components/StatusBadge";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
@@ -24,7 +25,7 @@ const KINDS_COMANDOS = new Set(["tool_call", "tool_result"]);
 const KINDS_ALERTAS = new Set([
   "guardrail_blocked", "budget_hit", "bounce_back", "pm_decision", "pm_skip",
   "system", "phase_done", "merged", "merge_failed", "arch_metric",
-  "post_merge_failed", "worker_recovered",
+  "post_merge_failed", "worker_recovered", "subtask_marked_done",
 ]);
 
 function matchFiltro(kind: string, filtro: Filtro): boolean {
@@ -46,6 +47,7 @@ function eventSummary(event: RunEvent): string {
     case "guardrail_blocked": return `⛔ guardrail: ${String(payload.detail ?? payload.pattern ?? "")}`;
     case "pm_decision": return `🤖 PM: ${String(payload.action ?? "")} — ${String(payload.reason ?? "")}`;
     case "bounce_back": return `↩️ voltou da fase ${String(payload.from_position ?? "?")}: ${String(payload.reason ?? "")}`;
+    case "subtask_marked_done": return `✅ subtarefa ${Number(payload.position ?? -1) + 1} marcada como implementada: ${String(payload.title ?? "")}`;
     case "phase_done": return `✅ fase concluída → próxima ${String(payload.next ?? "?")}`;
     case "merged": return `🔀 merge realizado: ${String(payload.detail ?? "")}`;
     case "merge_failed": return `⚠️ merge falhou: ${String(payload.detail ?? "")}`;
@@ -311,7 +313,7 @@ export default function PhaseDetail() {
       {step.diff_stat && (
         <>
           <h3>Alterações</h3>
-          <pre className="diff-stat">{step.diff_stat}</pre>
+          <DiffView code={step.diff_stat} />
         </>
       )}
 

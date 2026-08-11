@@ -48,6 +48,7 @@ from ..models import (
     StepArtifact,
     SubTask,
     Task,
+    TaskProposal,
     TaskStep,
 )
 from . import arch_metric, gitops, handoff, kimi_exec, opencode_exec, project, subtask
@@ -72,6 +73,7 @@ class EffectiveSettings:
     cost_per_interaction: float
     pm_budget_topup: float
     risky_patterns: list[str]
+    whitelisted_hosts: list[str]
     db_rule: str
     kimi_bin: str
     opencode_bin: str
@@ -99,6 +101,7 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         cost_per_interaction=repo.cost_per_interaction if repo.cost_per_interaction is not None else settings.cost_per_interaction,
         pm_budget_topup=settings.pm_budget_topup,
         risky_patterns=patterns,
+        whitelisted_hosts=list(settings.whitelisted_hosts),
         db_rule=repo.db_rule or settings.db_rule,
         kimi_bin=settings.kimi_bin,
         opencode_bin=settings.opencode_bin,
@@ -191,16 +194,21 @@ def acquire_worker_lock(lock_path: str) -> object | None:
     return handle
 
 
-def worker_loop(settings: Settings) -> None:
-    engine = make_engine(settings.database_url)
-    Base.metadata.create_all(engine)  # não depende da API ter subido antes
-    migrate_schema(engine)
-    session_factory = make_session_factory(engine)
-    recovered = recover_stale_steps(session_factory)
-    if recovered:
-        log.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
-    log.info("worker iniciado (dir de trabalho: %s)", settings.workspace_dir)
-    hb_path = os.path.join(settings.workspace_dir, "worker.heartbeat")
+def _heartbeat_loop(path: str, stop, interval: float = 5.0) -> None:
+    """Toca o heartbeat periodicamente enquanto o worker executa uma fase.
+
+    O worker é síncrono: durante a execução do kimi/opencode (que pode levar
+    dezenas de minutos) o loop principal fica bloqueado no subprocess e o
+    heartbeat estaria parado — a UI reportaria "worker offline" (alive = age < 15).
+    Uma thread daemon mantém o arquivo fresco até a fase terminar.
+    """
+    while not stop.wait(interval):
+        _touch_heartbeat(path)
+
+
+def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None:
+    log.info("worker iniciado (dir de trabalho: %s)", workspace_dir)
+    hb_path = os.path.join(workspace_dir, "worker.heartbeat")
     while True:
         _touch_heartbeat(hb_path)
         try:
@@ -213,6 +221,14 @@ def worker_loop(settings: Settings) -> None:
             time.sleep(2)
             continue
         log.info("executando step %s", step_id)
+        # Heartbeat contínuo durante a fase (e o PM): o loop bloqueia no subprocess.
+        import threading
+
+        stop = threading.Event()
+        hb_thread = threading.Thread(
+            target=_heartbeat_loop, args=(hb_path, stop), daemon=True, name="heartbeat"
+        )
+        hb_thread.start()
         try:
             trigger = execute_step(settings, session_factory, step_id)
             if trigger:
@@ -220,6 +236,9 @@ def worker_loop(settings: Settings) -> None:
         except Exception:
             log.exception("erro executando step %s", step_id)
             _fail_step_hard(session_factory, step_id)
+        finally:
+            stop.set()
+            hb_thread.join(timeout=1)
 
 
 def claim_next(session_factory) -> int | None:
@@ -231,12 +250,22 @@ def claim_next(session_factory) -> int | None:
     Como a task sai do filtro `queued/in_progress`, a transição acontece uma só vez.
     """
     with session_factory() as s:
+        # Exclui steps de tasks que JÁ têm uma fase running (uma task só executa
+        # uma fase por vez). Sem isso, com o primeiro candidato sendo o próximo
+        # step da task em execução, o claim travaria e nunca chegaria às outras
+        # tasks pendentes (bug de paralelismo com `--workers N`).
+        running_task_ids = (
+            s.query(TaskStep.task_id)
+            .filter(TaskStep.status == STEP_RUNNING)
+            .scalar_subquery()
+        )
         step = (
             s.query(TaskStep)
             .join(Task)
             .filter(
                 TaskStep.status == STEP_PENDING,
                 Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+                TaskStep.task_id.not_in(running_task_ids),
             )
             .order_by(TaskStep.id)
             .first()
@@ -402,6 +431,7 @@ def _run_executor(
             max_identical_calls=eff.max_identical_calls,
             risky_patterns=eff.risky_patterns,
             checkout_path=cwd,
+            whitelisted_hosts=eff.whitelisted_hosts,
             model=model,
             on_event=on_event,
         )
@@ -414,6 +444,7 @@ def _run_executor(
         max_identical_calls=eff.max_identical_calls,
         risky_patterns=eff.risky_patterns,
         checkout_path=cwd,
+        whitelisted_hosts=eff.whitelisted_hosts,
         cost_per_interaction=(
             kimi_cost_per_interaction
             if kimi_cost_per_interaction is not None
@@ -1167,7 +1198,9 @@ def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: s
             try:
                 project.ensure_agents_md(checkout, project_info, eff.db_rule)
                 last_pos = max((st.position for st in task.steps), default=-1)
-                ghost = types.SimpleNamespace(position=last_pos + 1, robot=None)
+                # `post_merge` é lido por _build_handoff (progresso das subtarefas)
+                # mesmo para o "step fantasma" do PM.
+                ghost = types.SimpleNamespace(position=last_pos + 1, robot=None, post_merge=False)
                 handoff.write_handoff(
                     checkout,
                     _build_handoff(
@@ -1188,16 +1221,30 @@ def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: s
         s.commit()
 
     effective_cwd = checkout if os.path.isdir(checkout) else eff.workspace_dir
-    outcome = _run_executor(
-        eff,
-        task.executor,
-        prompt,
-        cwd=effective_cwd,
-        log_path=log_path,
-        model=pm_robot.model if pm_robot else None,
-        on_event=None,
-        kimi_cost_per_interaction=0.0,
+    # Heartbeat contínuo durante a decisão do PM (pode demorar como qualquer fase).
+    import threading
+
+    hb_path = os.path.join(eff.workspace_dir, "worker.heartbeat")
+    _touch_heartbeat(hb_path)
+    stop = threading.Event()
+    hb_thread = threading.Thread(
+        target=_heartbeat_loop, args=(hb_path, stop), daemon=True, name="pm-heartbeat"
     )
+    hb_thread.start()
+    try:
+        outcome = _run_executor(
+            eff,
+            task.executor,
+            prompt,
+            cwd=effective_cwd,
+            log_path=log_path,
+            model=pm_robot.model if pm_robot else None,
+            on_event=None,
+            kimi_cost_per_interaction=0.0,
+        )
+    finally:
+        stop.set()
+        hb_thread.join(timeout=1)
 
     raw = verdicts.read_verdict(effective_cwd)
     verdicts.remove_verdict(effective_cwd)
@@ -1274,7 +1321,11 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
 
 
 def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
-    """Lê autoia_tasks.json do checkout e cria tasks filhas."""
+    """Lê autoia_tasks.json do checkout e grava propostas de tasks filhas.
+
+    As propostas ficam `pending` aguardando APROVAÇÃO HUMANA — o worker NUNCA cria
+    a task automaticamente (allow_auto_tasks é obsoleto e ignorado). Dedup por
+    `task_id + title`: re-execuções da fase não duplicam a proposta."""
     tasks_file = os.path.join(checkout, "autoia_tasks.json")
     if not os.path.isfile(tasks_file):
         return
@@ -1293,81 +1344,108 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
         if step is None:
             return
         task = step.task
-        repo = task.repository
+        existing_titles = {
+            p.title for p in s.query(TaskProposal).filter(TaskProposal.task_id == task.id).all()
+        }
 
-        if not repo.allow_auto_tasks:
-            return  # repo não permite spawn automático
-
-        spawned = 0
+        added = 0
         for entry in entries:
             title = (entry.get("title") or "").strip()
             if not title:
                 continue
+            if title in existing_titles:
+                continue  # re-execução da fase: não duplica a proposta
+
             description = entry.get("description", "")
             kind = entry.get("kind", "feature")
             target_repo_name = (entry.get("repository") or "").strip()
-
-            # Determina repositório alvo
+            target_repo_id: int | None = None
             if target_repo_name:
                 target_repo = s.query(Repository).filter(Repository.name == target_repo_name).first()
                 if target_repo is None:
                     log.warning("repo alvo '%s' não encontrado para spawn", target_repo_name)
                     continue
-                if not target_repo.allow_external_tasks:
-                    log.warning("repo '%s' não aceita tasks externas", target_repo_name)
-                    continue
-            else:
-                target_repo = repo
+                # A validação de `allow_external_tasks` acontece no ACCEPT (decisão
+                # humana); aqui a proposta é sempre gravada para o humano decidir.
+                target_repo_id = target_repo.id
 
-            # Pipeline: usa default do repo alvo, ou o mesmo da task pai
-            pipeline_id = target_repo.default_pipeline_id or task.pipeline_id
-
-            child = Task(
-                repository_id=target_repo.id,
-                pipeline_id=pipeline_id,
-                title=title,
-                description=description,
-                kind=kind,
-                status="created",
-                executor=task.executor,
-                budget_limit=target_repo.task_budget if target_repo.task_budget is not None else task.budget_limit,
-                parent_task_id=task.id,
-            )
-            s.add(child)
-            s.flush()  # para obter child.id
-
-            # Copia steps do pipeline
-            pipeline_steps = (
-                s.query(PipelineStep)
-                .filter(PipelineStep.pipeline_id == pipeline_id)
-                .order_by(PipelineStep.position)
-                .all()
-            )
-            for ps in pipeline_steps:
-                child.steps.append(
-                    TaskStep(
-                        position=ps.position,
-                        robot_id=ps.robot_id,
-                        post_merge=ps.post_merge,
-                        pause_before=ps.pause_before,
-                        status="created",
-                    )
+            s.add(
+                TaskProposal(
+                    task_id=task.id,
+                    step_id=step.id,
+                    position=len(task.proposals) + added,
+                    title=title,
+                    description=description,
+                    kind=kind,
+                    target_repository_id=target_repo_id,
+                    status="pending",
                 )
+            )
+            existing_titles.add(title)
+            added += 1
 
-            # Task fica como "created" — aguardando aprovação humana
+        if added > 0:
+            titles = [e.get("title") for e in entries if (e.get("title") or "").strip()]
+            _system_event(s, step, "task_spawned", {"count": added, "titles": titles[:10]})
+        s.commit()
 
-            spawned += 1
-            log.info("task #%d spawnada de #%d: %s (repo: %s)", child.id, task.id, title, target_repo.name)
-
-        if spawned > 0:
-            _system_event(s, step, "task_spawned", {"count": spawned, "titles": [e.get("title") for e in entries[:10]]})
-            s.commit()
-
-    # Remove o arquivo após processar
+    # Remove o arquivo após processar (as propostas ficam no banco)
     try:
         os.remove(tasks_file)
     except OSError:
         pass
+
+
+def create_child_task(
+    s: Session,
+    parent: Task,
+    *,
+    title: str,
+    description: str,
+    kind: str,
+    target_repository_id: int | None = None,
+) -> Task:
+    """Cria a task filha a partir de uma proposta aprovada.
+
+    Reutilizado pelo _spawn_tasks antigo e pela API de aceitação de propostas:
+    copia os steps do pipeline do repo alvo (ou o mesmo da task pai), herda o
+    `executor` da task pai e usa o budget do repo alvo (ou o da task pai).
+    """
+    target_repo = (
+        s.get(Repository, target_repository_id) if target_repository_id else parent.repository
+    )
+    pipeline_id = target_repo.default_pipeline_id or parent.pipeline_id
+    child = Task(
+        repository_id=target_repo.id,
+        pipeline_id=pipeline_id,
+        title=title,
+        description=description,
+        kind=kind,
+        status="created",
+        executor=parent.executor,
+        budget_limit=target_repo.task_budget if target_repo.task_budget is not None else parent.budget_limit,
+        parent_task_id=parent.id,
+    )
+    s.add(child)
+    s.flush()  # para obter child.id
+
+    pipeline_steps = (
+        s.query(PipelineStep)
+        .filter(PipelineStep.pipeline_id == pipeline_id)
+        .order_by(PipelineStep.position)
+        .all()
+    )
+    for ps in pipeline_steps:
+        child.steps.append(
+            TaskStep(
+                position=ps.position,
+                robot_id=ps.robot_id,
+                post_merge=ps.post_merge,
+                pause_before=ps.pause_before,
+                status="created",
+            )
+        )
+    return child
 
 
 def _fail_step_hard(session_factory, step_id: int) -> None:

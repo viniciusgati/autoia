@@ -3,18 +3,8 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import PhaseStepper from "./PhaseStepper";
 import StatusBadge from "./StatusBadge";
-import type { Task, TaskStep } from "../types";
-
-/** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
-function faseAtual(task: Task): TaskStep | null {
-  const steps = [...task.steps].sort((a, b) => a.position - b.position);
-  return (
-    steps.find((s) => s.status === "running") ??
-    steps.find((s) => s.status === "pending") ??
-    steps[task.current_step] ??
-    null
-  );
-}
+import { faseAtual } from "../lib/tasks";
+import type { Task } from "../types";
 
 /** Tarefa que precisa de ação humana (revisão/aprovação/bloqueio). */
 function precisaHumano(task: Task): string | null {

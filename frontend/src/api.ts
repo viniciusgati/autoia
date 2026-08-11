@@ -1,12 +1,14 @@
 import type {
   Artifact,
   Dashboard,
+  Execution,
   Pipeline,
   Repository,
   Robot,
   RunEvent,
   SubTask,
   Task,
+  TaskProposal,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -119,6 +121,13 @@ export const api = {
       body: JSON.stringify(data),
     }),
 
+  // propostas de tasks filhas (aprovação humana)
+  listProposals: (taskId: number) => request<TaskProposal[]>(`/api/tasks/${taskId}/proposals`),
+  acceptProposal: (taskId: number, proposalId: number) =>
+    request<Task>(`/api/tasks/${taskId}/proposals/${proposalId}/accept`, { method: "POST" }),
+  rejectProposal: (taskId: number, proposalId: number) =>
+    request<Task>(`/api/tasks/${taskId}/proposals/${proposalId}/reject`, { method: "POST" }),
+
   // subtasks
   retrySubtask: (taskId: number, position: number) =>
     request<SubTask>(`/api/tasks/${taskId}/subtasks/${position}/retry`, {
@@ -142,6 +151,12 @@ export const api = {
   getDashboard: (repositoryId?: number) => {
     const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
     return request<Dashboard>(`/api/dashboard${params}`);
+  },
+
+  // execução (página global)
+  getExecution: (repositoryId?: number) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<Execution>(`/api/execution${params}`);
   },
 
   // worker

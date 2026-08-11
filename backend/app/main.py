@@ -10,11 +10,11 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .api import dashboard, pipelines, repositories, robots, steps, subtasks, tasks
+from .api import dashboard, execution, pipelines, repositories, robots, steps, subtasks, tasks
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, migrate_schema
 from .models import Pipeline, PipelineStep, Robot
-from .worker.runner import acquire_worker_lock, worker_loop
+from .worker.runner import acquire_worker_lock, recover_stale_steps, worker_loop
 
 log = logging.getLogger("autoia")
 
@@ -293,6 +293,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(subtasks.router)
     app.include_router(steps.router)
     app.include_router(dashboard.router)
+    app.include_router(execution.router)
 
     @app.get("/health")
     def health():
@@ -336,6 +337,7 @@ def run_api() -> None:
 
 def run_worker() -> None:
     import argparse
+    import signal
     import sys
     import threading
 
@@ -346,6 +348,7 @@ def run_worker() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
+    logger = logging.getLogger("autoia.worker")
     settings = Settings()
     settings.ensure_dirs()
 
@@ -365,12 +368,40 @@ def run_worker() -> None:
         )
         sys.exit(1)
 
+    # No shutdown, mata os subprocessos ativos: os robôs rodam em sessão própria
+    # (start_new_session=True) e, sem isso, virariam órfãos continuando a trabalhar
+    # na mesma branch (corrompendo estado) após restart do worker.
+    def _on_shutdown(signum, _frame):
+        logger.info("worker recebeu sinal %s — encerrando subprocessos", signum)
+        from app.worker import exec_common
+
+        exec_common.kill_all_procs()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _on_shutdown)
+    signal.signal(signal.SIGINT, _on_shutdown)
+
+    # Engine/session compartilhados e recuperação de steps órfãos UMA única vez
+    # ANTES de spawnar as threads. Rodar dentro de cada thread (como antes) tinha
+    # corrida: duas threads recuperavam o mesmo step running ao mesmo tempo e ambas
+    # o reclamavam → duas execuções da mesma fase em paralelo.
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)  # não depende da API ter subido antes
+    migrate_schema(engine)
+    session_factory = make_session_factory(engine)
+    recovered = recover_stale_steps(session_factory)
+    if recovered:
+        logger.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
+
     if args.workers <= 1:
-        worker_loop(settings)
+        worker_loop(settings, session_factory, settings.workspace_dir)
     else:
         threads = []
         for i in range(args.workers):
-            t = threading.Thread(target=worker_loop, args=(settings,), daemon=True, name=f"worker-{i}")
+            t = threading.Thread(
+                target=worker_loop, args=(settings, session_factory, settings.workspace_dir),
+                daemon=True, name=f"worker-{i}",
+            )
             t.start()
             threads.append(t)
         for t in threads:
