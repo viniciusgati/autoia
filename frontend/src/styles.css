@@ -1351,7 +1351,7 @@ tr:hover td {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 14px;
-  align-items: start;
+  align-items: stretch;
   width: 100%;
 }
 
@@ -1359,6 +1359,13 @@ tr:hover td {
   margin: 0;
   position: static;
   padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+}
+
+.exec-cards .session-card .session-foot {
+  margin-top: auto;
+  padding-top: 10px;
 }
 
 .session-command-time {
@@ -1789,6 +1796,19 @@ tr:hover td {
   border: 0;
   padding: 0;
   font-family: inherit;
+}
+
+.review-summary {
+  border: 1px solid var(--surface-border);
+  border-left: 3px solid var(--warn);
+  background: rgba(251, 191, 36, 0.05);
+  border-radius: var(--radius-md);
+  padding: 10px 14px;
+}
+
+.review-summary .summary-list {
+  margin: 4px 0 0;
+  padding-left: 18px;
 }
 
 .review-actions {

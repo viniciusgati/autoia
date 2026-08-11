@@ -40,9 +40,17 @@ EXPLÍCITAS na descrição — a história precisa ser implementável sem pergun
 
 Título: {task_title}
 
-Verifique se os critérios de aceite são claros, testáveis, completos e sem ambiguidade.
-Se a história estiver boa, veredicto READY. Se precisar de ajustes, veredicto NEEDS_WORK
-com o que o PO deve corrigir.""",
+Foque em dois aspectos além da revisão usual:
+1. FEEDBACK VISUAL das ações: para cada ação do usuário na interface, a história precisa
+   definir a resposta visual que ele vê (carregando, sucesso, erro, vazio) — nunca só
+   "exibir uma mensagem".
+2. EFETIVIDADE da história: ela precisa entregar valor real e mensurável ao usuário final,
+   descrevendo o resultado da experiência (não só uma ação técnica), verificável por um
+   humano, não apenas por teste automatizado.
+
+Verifique também se os critérios de aceite são claros, testáveis, completos e sem
+ambiguidade. Se a história estiver boa, veredicto READY. Se precisar de ajustes,
+veredicto NEEDS_WORK com o que o PO deve corrigir.""",
     ),
     (
         "developer",

@@ -227,9 +227,10 @@ def test_propostas_independentes_de_allow_auto_tasks(settings, bare_repo, tmp_pa
     assert proposals[0]["title"] == "filha"
 
 
-def test_spawn_tambem_em_task_com_subtarefas(spawn_flow, tmp_path):
-    """Regressão: _spawn_tasks também roda após implement/verify de subtarefas
-    (antes o arquivo só era lido depois de uma fase 'normal')."""
+def test_spawn_bloqueado_em_task_com_subtarefas(spawn_flow, tmp_path):
+    """Exclusividade: task com subtarefas NÃO gera propostas (autoia_tasks.json é
+    ignorado) — as subtarefas já dividem o trabalho na mesma branch e propostas
+    criariam branches paralelas no mesmo repo (risco de conflito de merge)."""
     settings = spawn_flow["settings"]
     settings.kimi_bin = _kimi_spawn(tmp_path, [{"title": "netinha", "kind": "chore"}])
     settings.task_budget = 100.0
@@ -267,10 +268,18 @@ def test_spawn_tambem_em_task_com_subtarefas(spawn_flow, tmp_path):
     parent_id = resp.json()["id"]
     client.post(f"/api/tasks/{parent_id}/start")
 
-    _claim_and_execute(spawn_flow)  # implement (ciclo de subtarefa)
+    _claim_and_execute(spawn_flow)  # implement (ciclo de subtarefa; escreve autoia_tasks.json)
     _claim_and_execute(spawn_flow)  # verify (ciclo de subtarefa) → spawn
 
     assert len(_all_tasks(spawn_flow)) == 1  # só o pai; nada criado automaticamente
     proposals = _proposals(spawn_flow, parent_id)
-    assert len(proposals) == 1
-    assert proposals[0]["title"] == "netinha"
+    assert len(proposals) == 0
+
+    # evento de auditoria registra o bloqueio no step
+    with spawn_flow["session_factory"]() as s:
+        parent = s.get(Task, parent_id)
+        blocked = [
+            e for st in parent.steps for e in st.events if e.kind == "task_spawn_blocked"
+        ]
+        assert len(blocked) == 1
+        assert blocked[0].payload["reason"] == "task já tem subtarefas"

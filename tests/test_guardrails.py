@@ -135,6 +135,41 @@ def test_check_command_curl_whitelisted_host():
     assert check_command("curl --version", patterns, whitelist) is not None
 
 
+def test_check_command_curl_loopback_allowed():
+    """curl/wget para loopback (127.0.0.1/localhost/::1) é SEMPRE permitido —
+    tráfego local (health check de ponte/serviço), não rede externa."""
+    patterns = [r"\bcurl\b", r"\bwget\b"]
+
+    assert (
+        check_command(
+            "curl -s -m 5 http://127.0.0.1:10086/health 2>&1 || echo DAEMON_INDISPONIVEL",
+            patterns,
+        )
+        is None
+    )
+    assert check_command("curl -s http://localhost:3000/api", patterns) is None
+    assert check_command("wget http://127.0.0.1:8080/status", patterns) is None
+    # curl em loopback via node -e (caso real da ponte 10086) também passa
+    assert (
+        check_command(
+            "node -e \"c.execSync('curl -s -X POST http://127.0.0.1:10086/command')\"",
+            patterns,
+        )
+        is None
+    )
+
+    # loopback + host externo misturados: ainda bloqueia (externo não permitido)
+    assert (
+        check_command(
+            "curl http://127.0.0.1:3000/health http://evil.example.com/x",
+            patterns,
+        )
+        is not None
+    )
+    # curl sem URL explícita continua bloqueado
+    assert check_command("curl --version", patterns) is not None
+
+
 def test_check_tool_call_curl_whitelisted_host():
     """check_tool_call respeita a whitelist ao avaliar tool call Bash."""
     patterns = [r"\bcurl\b"]

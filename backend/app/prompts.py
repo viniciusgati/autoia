@@ -11,11 +11,13 @@ GUARDRAIL_INSTRUCTIONS = """## Regras obrigatórias
   funcionam DENTRO do checkout — qualquer caminho fora (ex.: ~/.kimi-code, /tmp, logs do
   pipeline) é BLOQUEADO e encerra a sua execução na hora.
 - NÃO rode comandos destrutivos ou de sistema: rm -rf, mkfs, dd, sudo, chown, chmod 777,
-  curl, wget, ssh, scp, pip install, npm install -g, make install, shutdown/reboot/halt,
+  ssh, scp, pip install, npm install -g, make install, shutdown/reboot/halt,
   systemctl, service, killall/pkill, pkexec, su. A infraestrutura (banco, serviços,
   deploy) já está provisionada pelo ambiente — NÃO tente instalar, iniciar ou verificar
   serviços do sistema operacional; use as variáveis de ambiente fornecidas (ex.:
-  DATABASE_URL) ou mocks nos testes.
+  DATABASE_URL) ou mocks nos testes. `curl`/`wget` SÓ para loopback (127.0.0.1/localhost)
+  ou hosts de registro de pacotes (ex.: dl.google.com, registry.npmjs.org) — nunca para
+  rede externa.
 - NÃO rode `git push`. NÃO troque para as branches main/master (`git checkout main`). Trabalhe apenas na branch atual.
 - Faça commits locais com `git add -A && git commit -m "mensagem"` quando concluir.
 - Se algo estiver quebrado, corrija o que estiver ao seu alcance e relate o resto. Não invente resultados."""
@@ -38,6 +40,13 @@ que naturalmente se divide em várias entregas), crie um arquivo `autoia_tasks.j
 raiz do projeto. O sistema lerá este arquivo automaticamente ao final da fase e criará
 as tarefas. Use APENAS se a decomposição for realmente necessária — não crie tarefas
 triviais ou de 1 linha.
+
+### Exclusividade (IMPORTANTE)
+Esta ferramenta é EXCLUDENTE com subtarefas: se a história desta task foi (ou será)
+dividida em subtarefas no plano de implementação, NÃO crie `autoia_tasks.json` — as
+subtarefas já dividem o trabalho na mesma branch, e propostas virariam tasks com
+branches paralelas (risco de conflito de merge). Se houver subtarefas, o sistema IGNORA
+este arquivo. Escolha UMA das formas de divisão por task.
 
 Formato do arquivo (JSON array):
 ```json
@@ -76,6 +85,10 @@ Formato (JSON array com a posição 1-based da subtarefa):
 - Use APENAS quando o código da subtarefa JÁ está commitado na branch e atende os critérios.
 - Ainda assim, documente no texto final o que você constatou (arquivos já presentes etc.).
 - Se a subtarefa ainda precisa de trabalho, implemente normalmente e NÃO escreva o arquivo.
+- IMPORTANTE: se a subtarefa já FOI REPROVADA na revisão de qualidade (a fase de
+  verificação não a aprovou), NÃO use este arquivo para "carimbar" como pronta sem
+  consertar o que foi reportado. O sistema REJEITA a declaração se o código não mudar
+  nesta execução — o conserto (commit novo) é obrigatório.
 """
 
 # Caderno de trabalho: o worker gera autoia_handoff.md no checkout antes de cada fase
@@ -181,15 +194,39 @@ SUMMARY: o que está bom
 NEEDS_WORK
 SUMMARY: o que está faltando ou ambíguo, item por item
 
+### Feedback visual das ações (UX)
+Para CADA ação que o usuário realiza na interface, a história deve deixar explícito o
+que ele VÊ em resposta:
+- Carregando: feedback durante a operação (spinner, skeleton, botão desabilitado)?
+- Sucesso: confirmação clara ao concluir (mensagem, redirect, mudança de estado visível)?
+- Erro: mensagem compreensível que indique onde/porquê falhou e como corrigir (validação
+  inline, estado de erro no campo)?
+- Vazio: o que a tela mostra quando não há dados (empty state orientativo)?
+Critérios vagos como "exibir mensagem", "dar feedback" ou "notificar o usuário" sem
+descrever o quê, onde e como são NEEDS_WORK.
+
+### Efetividade da história (valor)
+A história é EFETIVA se resolve o problema do usuário final, não se só está tecnicamente
+completa:
+- O benefício (o "para ..." da descrição) é concreto e mensurável, não genérico
+  ("facilitar", "melhorar", "otimizar")?
+- A história descreve o RESULTADO para o usuário, não apenas uma ação técnica interna?
+- O resultado final é verificável por um humano/usuário (tela, fluxo, comportamento),
+  e não somente por um teste de função?
+
 ### Checklist de revisão
-1. Critérios são verificáveis (dado/quando/então ou com alvo mensurável)?
-2. Cobre o caminho feliz E o de erro?
-3. Sem ambiguidade ("e/ou", "depende", adjetivos vagos)?
-4. Escopo definido?
-5. Completo o suficiente para o developer implementar sem precisar perguntar?
+1. Feedback visual de cada ação do usuário está definido (carregando, sucesso, erro, vazio)?
+2. Efetividade: o benefício ao usuário é concreto, mensurável e o resultado é verificável
+   pela experiência (não só por teste)?
+3. Critérios são verificáveis (dado/quando/então ou com alvo mensurável)?
+4. Cobre o caminho feliz E o de erro (com seu feedback visual)?
+5. Sem ambiguidade ("e/ou", "depende", adjetivos vagos)?
+6. Escopo definido?
+7. Completo o suficiente para o developer implementar sem precisar perguntar?
 
 Se emitiu NEEDS_WORK, inclua no SUMMARY a HISTÓRIA CORRIGIDA completa (mesmo formato
-que o PO usa: ## Descrição / ## Critérios de aceite) para o PO aplicar diretamente.
+que o PO usa: ## Descrição / ## Critérios de aceite), preenchendo os feedbacks visuais
+e os benefícios mensuráveis que faltam, para o PO aplicar diretamente.
 NÃO altere código. NÃO faça commit do arquivo de veredicto."""
 
 CONTRACT_VERIFY = """## Formato de saída OBRIGATÓRIO (veredicto)

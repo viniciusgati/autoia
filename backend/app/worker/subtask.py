@@ -41,6 +41,19 @@ from . import gitops, kimi_exec
 
 log = logging.getLogger("autoia.worker.subtask")
 
+# Arquivos de controle do autoia (não versionados) que NÃO contam como "mudança
+# de código" no guard de re-declaração de subtarefa já implementada.
+_AUTOIA_CONTROL_FILES = (
+    "autoia_subtasks_done.json",
+    "autoia_tasks.json",
+    "autoia_verdict.txt",
+    "autoia_handoff.md",
+    "autoia_blocked.json",
+    "autoia_summary.json",
+    "autoia_screenshots/",
+    "AGENTS.md",
+)
+
 
 def _system_event(s: Session, step: TaskStep, kind: str, payload: dict) -> None:
     max_seq = (
@@ -268,6 +281,66 @@ def _subtask_marked_done(checkout: str, position_1based: int) -> bool:
     return False
 
 
+def _subtask_previously_failed_verify(session_factory, task_id: int, position: int) -> bool:
+    """True se a subtarefa já reprovou na verificação por VEREDICTO REAL (FAIL/AUSENTE)
+    em tentativa anterior — ou seja, o código foi apontado como defeituoso e devolvido
+    ao developer por correção.
+
+    Falhas de INFRAESTRUTURA na verificação (guardrail, timeout, kimi saiu com erro)
+    NÃO contam como defeito: o código não foi avaliado, então o developer pode
+    legitimamente re-declarar a subtarefa como já implementada sem alterar nada."""
+    with session_factory() as s:
+        step_ids = [
+            sid for (sid,) in s.query(TaskStep.id).filter(TaskStep.task_id == task_id).all()
+        ]
+        if not step_ids:
+            return False
+        events = (
+            s.query(RunEvent)
+            .filter(
+                RunEvent.step_id.in_(step_ids),
+                RunEvent.kind == "subtask_failed",
+            )
+            .all()
+        )
+    for ev in events:
+        payload = ev.payload or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("phase") != "verify" or payload.get("position") != position:
+            continue
+        reason = str(payload.get("reason") or "")
+        if "veredicto" in reason.lower():
+            return True
+    return False
+
+
+def _done_declaration_has_changes(checkout: str, head_before: str | None) -> bool:
+    """True se o código mudou desde o início desta execução (commit novo e/ou
+    árvore de trabalho suja) — evidência de que o agente realmente corrigiu algo
+    antes de declarar a subtarefa como já implementada.
+
+    Arquivos de controle do autoia (não versionados) não contam como mudança."""
+    try:
+        head_now = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+    except gitops.GitError:
+        head_now = None
+    if head_before and head_now and head_now != head_before:
+        return True
+    try:
+        result = gitops.run_git(checkout, "status", "--porcelain")
+    except gitops.GitError:
+        return False
+    for line in result.stdout.splitlines():
+        path = line[3:].strip()
+        if not path:
+            continue
+        if any(path.startswith(name) for name in _AUTOIA_CONTROL_FILES):
+            continue
+        return True
+    return False
+
+
 def _run_one_implement(
     settings: Settings,
     session_factory,
@@ -289,6 +362,10 @@ def _run_one_implement(
         st = s.get(SubTask, subtask.id)
         if st is None:
             return "subtarefa não encontrada"
+        try:
+            head_before = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+        except gitops.GitError:
+            head_before = None
         st.status = SUB_IMPLEMENTING
         st.started_at = func.now()
         st.attempt += 1
@@ -347,6 +424,33 @@ def _run_one_implement(
         # branch (arquivo autoia_subtasks_done.json) — evita re-implementar trabalho
         # já commitado (ex.: status perdido por restart do worker).
         if _subtask_marked_done(checkout, st.position + 1):
+            # Guarda anti-laço: numa subtarefa que JÁ reprovou na verificação, a
+            # declaração só é aceita se o código mudou nesta execução (fix real).
+            # Re-declarar "já implementada" sem alterar nada encobre a falha e
+            # queima ciclos de tester — nesse caso, falha a subtarefa na hora.
+            if (
+                _subtask_previously_failed_verify(session_factory, task_id, st.position)
+                and not _done_declaration_has_changes(checkout, head_before)
+            ):
+                reason = (
+                    f"subtask_done_rejected: subtarefa {st.position + 1} re-declarada "
+                    "como já implementada sem alterar o código (falha anterior não corrigida)"
+                )
+                st.status = SUB_FAILED
+                st.error = reason
+                st.finished_at = func.now()
+                _system_event(
+                    s, step, "subtask_failed",
+                    {"position": st.position, "title": st.title, "reason": reason, "phase": "implement"},
+                )
+                _system_event(
+                    s, step, "subtask_done_rejected",
+                    {"position": st.position, "title": st.title,
+                     "reason": "re-declaração sem alteração de código após falha na verificação"},
+                )
+                s.commit()
+                return reason
+
             st.status = SUB_IMPLEMENTED
             st.error = None
             st.finished_at = func.now()

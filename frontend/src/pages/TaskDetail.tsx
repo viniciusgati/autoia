@@ -503,7 +503,10 @@ export default function TaskDetail() {
         )}
         {task.status === "needs_review" && (
           <div className="sticky-alert">
-            <span>⚠ Aguardando revisão humana — o pipeline parou</span>
+            <span>
+              ⚠ Aguardando revisão humana — o pipeline parou
+              {task.error ? ` · ${task.error}` : ""}
+            </span>
             <button onClick={scrollToReview}>ir para a revisão ↓</button>
           </div>
         )}
@@ -1202,6 +1205,25 @@ function HumanIntervention(props: {
             <div style={{ marginBottom: 12 }}>
               <div className="form-label">Motivo da parada</div>
               <pre className="review-error">{task.error}</pre>
+            </div>
+          )}
+
+          {/* Resumo do problema (LLM) para entender o que aconteceu sem abrir logs */}
+          {task.summary && (
+            <div className="review-summary" style={{ marginBottom: 12 }}>
+              <div className="form-label">Resumo do problema</div>
+              <ul className="summary-list summary-list-warn">
+                {(task.summary.issues.length > 0 ? task.summary.issues : [task.summary.summary])
+                  .slice(0, 5)
+                  .map((item, i) => (
+                    <li key={i}>{item}</li>
+                  ))}
+              </ul>
+              {task.summary.tasks_summary && (
+                <p className="muted small" style={{ marginTop: 6, marginBottom: 0 }}>
+                  {task.summary.tasks_summary}
+                </p>
+              )}
             </div>
           )}
 

@@ -115,20 +115,38 @@ _READONLY_GIT_SUBCOMMANDS = {
 # (curl/wget para hosts de registro de pacotes é legítimo em build/CI).
 _NETWORK_PATTERNS = {r"\bcurl\b", r"\bwget\b"}
 
+# Loopback é SEMPRE permitido para curl/wget: não é rede externa nem exfiltração.
+# Robôs legitimamente fazem health check de serviços locais (ex.: ponte 127.0.0.1).
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
 _URL_RE = re.compile(r"https?://([^/\s'\"]+)", re.IGNORECASE)
 
 
 def extract_network_targets(command: str) -> list[str]:
-    """Hosts alvo de curl/wget no comando. Vazio se não houver URL explícita."""
-    return [m.group(1).lower().rstrip(".,;:)") for m in _URL_RE.finditer(command)]
+    """Hosts alvo de curl/wget no comando (sem porta), minúsculos.
+    Vazio se não houver URL explícita."""
+    hosts: list[str] = []
+    for m in _URL_RE.finditer(command):
+        netloc = m.group(1).lower().rstrip(".,;:)")
+        if netloc.startswith("["):  # IPv6: [::1]:8080
+            host = netloc[1 : netloc.find("]")] if "]" in netloc else netloc
+        else:
+            host = netloc.split(":", 1)[0]  # remove porta: host:port
+        if host:
+            hosts.append(host)
+    return hosts
 
 
 def _network_allowed(command: str, whitelisted_hosts: list[str]) -> bool:
-    """True se TODOS os alvos http(s) do comando estão na whitelist de hosts."""
+    """True se TODOS os alvos http(s) do comando estão na whitelist de hosts
+    (ou são loopback — sempre permitidos)."""
     targets = extract_network_targets(command)
     if not targets:
         return False
-    allowed = {h.lower().lstrip(".") for h in whitelisted_hosts if h}
+    allowed = (
+        {h.lower().lstrip(".") for h in whitelisted_hosts if h}
+        | {h.lstrip(".") for h in _LOOPBACK_HOSTS}
+    )
     return all(t.lstrip(".") in allowed for t in targets)
 
 

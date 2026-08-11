@@ -1005,6 +1005,18 @@ def _decide_subtask_implement(
             return None
 
         if abort_reason:
+            # Re-declaração de "já implementada" sem alterar código após falha na
+            # verificação: falha a task na hora (não queima mais ciclos de tester).
+            if abort_reason.startswith("subtask_done_rejected:"):
+                _system_event(s, step, "subtask_done_rejected", {"reason": abort_reason})
+                task.status = TASK_NEEDS_REVIEW
+                task.error = abort_reason
+                step.status = STEP_FAILED
+                step.error = abort_reason
+                _finish(step)
+                s.commit()
+                return {"task_id": task.id, "reason": task.error}
+
             # Erro durante a implementação de uma subtarefa
             if "orçamento" in abort_reason:
                 _system_event(s, step, "budget_hit", {"reason": abort_reason})
@@ -1471,6 +1483,21 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
         if step is None:
             return
         task = step.task
+        # Exclusividade: task com subtarefas não pode gerar propostas (autoia_tasks.json).
+        # As subtarefas já dividem o trabalho na MESMA branch; propostas criariam tasks
+        # com branches paralelas no mesmo repo → sobreposição de arquivos e conflito de merge.
+        if task.subtasks:
+            _system_event(
+                s, step, "task_spawn_blocked",
+                {"reason": "task já tem subtarefas",
+                 "titles": [e.get("title") for e in entries if (e.get("title") or "").strip()][:10]},
+            )
+            s.commit()
+            try:
+                os.remove(tasks_file)
+            except OSError:
+                pass
+            return
         existing_titles = {
             p.title for p in s.query(TaskProposal).filter(TaskProposal.task_id == task.id).all()
         }
