@@ -1,7 +1,7 @@
-import type { Task, TaskStep } from "../types";
+import type { TaskListItem, TaskStepListItem } from "../types";
 
 /** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
-export function faseAtual(task: Task): TaskStep | null {
+export function faseAtual(task: TaskListItem): TaskStepListItem | null {
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
   return (
     steps.find((s) => s.status === "running") ??
@@ -12,7 +12,7 @@ export function faseAtual(task: Task): TaskStep | null {
 }
 
 /** Rótulo curto da etapa atual: "Fase 3/7 · developer (tentativa 2) · rodando". */
-export function etapaAtualLabel(task: Task): string {
+export function etapaAtualLabel(task: TaskListItem): string {
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
   const step = faseAtual(task);
   if (!step) return "";
@@ -27,7 +27,7 @@ export function etapaAtualLabel(task: Task): string {
 }
 
 /** Tempo decorrido desde o início da fase, legível ("3m 12s"). */
-export function tempoDecorrido(step: TaskStep): string {
+export function tempoDecorrido(step: { started_at: string | null }): string {
   if (!step.started_at) return "";
   const ms = Date.now() - new Date(step.started_at).getTime();
   if (ms < 0) return "0s";

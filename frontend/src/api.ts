@@ -8,16 +8,28 @@ import type {
   RunEvent,
   SubTask,
   Task,
+  TaskListItem,
   TaskProposal,
   TaskSummary,
   TimelineEvent,
 } from "./types";
 
+/** Cache de ETag/body em memória: reenvia If-None-Match e reaproveita o corpo em 304. */
+const etagCache = new Map<string, { etag: string; body: unknown }>();
+const ETAG_CACHE_MAX = 200;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { "Content-Type": "application/json" },
-    ...init,
-  });
+  const method = init?.method ?? "GET";
+  const isGet = method === "GET";
+  const headers = new Headers(init?.headers);
+  headers.set("Content-Type", "application/json");
+  const cached = etagCache.get(path);
+  if (isGet && cached) headers.set("If-None-Match", cached.etag);
+
+  const response = await fetch(path, { ...init, headers });
+  if (response.status === 304 && cached) {
+    return cached.body as T;
+  }
   if (!response.ok) {
     let detail = response.statusText;
     try {
@@ -29,12 +41,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new Error(`${response.status}: ${detail}`);
   }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  const body = (await response.json()) as T;
+  if (isGet) {
+    const etag = response.headers.get("etag");
+    if (etag) {
+      if (etagCache.size >= ETAG_CACHE_MAX) etagCache.clear();
+      etagCache.set(path, { etag, body });
+    }
+  }
+  return body;
 }
 
 export const api = {
   // repositories
-  listRepositories: () => request<Repository[]>("/api/repositories"),
+  listRepositories: (signal?: AbortSignal) => request<Repository[]>("/api/repositories", { signal }),
   createRepository: (data: { name: string; url: string; default_branch: string }) =>
     request<Repository>("/api/repositories", {
       method: "POST",
@@ -52,8 +72,7 @@ export const api = {
   listRobots: (repositoryId?: number) => {
     const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
     return request<Robot[]>(`/api/robots${params}`);
-  },
-  createRobot: (data: { name: string; mission: string; role?: string; model?: string; repository_id?: number | null }) =>
+  },  createRobot: (data: { name: string; mission: string; role?: string; model?: string; repository_id?: number | null }) =>
     request<Robot>("/api/robots", { method: "POST", body: JSON.stringify(data) }),
   updateRobot: (id: number, data: Partial<Robot>) =>
     request<Robot>(`/api/robots/${id}`, { method: "PUT", body: JSON.stringify(data) }),
@@ -61,9 +80,9 @@ export const api = {
     request<void>(`/api/robots/${id}`, { method: "DELETE" }),
 
   // pipelines
-  listPipelines: (repositoryId?: number) => {
+  listPipelines: (repositoryId?: number, signal?: AbortSignal) => {
     const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
-    return request<Pipeline[]>(`/api/pipelines${params}`);
+    return request<Pipeline[]>(`/api/pipelines${params}`, { signal });
   },
   createPipeline: (data: { name: string; steps: { position: number; robot_id: number; post_merge?: boolean; pause_before?: boolean }[]; repository_id?: number | null }) =>
     request<Pipeline>("/api/pipelines", { method: "POST", body: JSON.stringify(data) }),
@@ -71,11 +90,11 @@ export const api = {
     request<void>(`/api/pipelines/${id}`, { method: "DELETE" }),
 
   // tasks
-  listTasks: (repositoryId?: number) => {
+  listTasks: (repositoryId?: number, signal?: AbortSignal) => {
     const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
-    return request<Task[]>(`/api/tasks${params}`);
+    return request<TaskListItem[]>(`/api/tasks${params}`, { signal });
   },
-  getTask: (id: number) => request<Task>(`/api/tasks/${id}`),
+  getTask: (id: number, signal?: AbortSignal) => request<Task>(`/api/tasks/${id}`, { signal }),
   createTask: (data: {
     repository_id: number;
     pipeline_id: number;
@@ -129,7 +148,8 @@ export const api = {
     request<TaskSummary | null>(`/api/tasks/${taskId}/summary/regenerate`, { method: "POST" }),
 
   // timeline cronológica da execução
-  getTaskTimeline: (taskId: number) => request<TimelineEvent[]>(`/api/tasks/${taskId}/timeline`),
+  getTaskTimeline: (taskId: number, signal?: AbortSignal) =>
+    request<TimelineEvent[]>(`/api/tasks/${taskId}/timeline`, { signal }),
 
   // bloqueio + retomada por instrução
   continueBlocked: (taskId: number, instruction: string) =>
@@ -152,12 +172,12 @@ export const api = {
     }),
 
   // observabilidade
-  listEvents: (stepId: number, kind?: string, order?: "asc" | "desc") => {
+  listEvents: (stepId: number, kind?: string, order?: "asc" | "desc", signal?: AbortSignal) => {
     const params = new URLSearchParams();
     if (kind) params.set("kind", kind);
     if (order) params.set("order", order);
     const query = params.toString() ? `?${params}` : "";
-    return request<RunEvent[]>(`/api/steps/${stepId}/events${query}`);
+    return request<RunEvent[]>(`/api/steps/${stepId}/events${query}`, { signal });
   },
   getLog: async (stepId: number): Promise<string> => {
     const response = await fetch(`/api/steps/${stepId}/log`);
@@ -165,19 +185,20 @@ export const api = {
   },
 
   // dashboard
-  getDashboard: (repositoryId?: number) => {
+  getDashboard: (repositoryId?: number, signal?: AbortSignal) => {
     const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
-    return request<Dashboard>(`/api/dashboard${params}`);
+    return request<Dashboard>(`/api/dashboard${params}`, { signal });
   },
 
   // execução (página global)
-  getExecution: (repositoryId?: number) => {
+  getExecution: (repositoryId?: number, signal?: AbortSignal) => {
     const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
-    return request<Execution>(`/api/execution${params}`);
+    return request<Execution>(`/api/execution${params}`, { signal });
   },
 
   // worker
-  getWorkerStatus: () => request<{ alive: boolean; last_heartbeat_sec: number | null }>("/api/worker/status"),
+  getWorkerStatus: (signal?: AbortSignal) =>
+    request<{ alive: boolean; last_heartbeat_sec: number | null }>("/api/worker/status", { signal }),
 
   // artifacts
   getArtifacts: (stepId: number) => request<Artifact[]>(`/api/steps/${stepId}/artifacts`),

@@ -16,6 +16,7 @@ import { buildTurns } from "../lib/chat";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
 import { diffSummary, etapaAtualLabel, tempoDecorrido } from "../lib/tasks";
+import { usePolling } from "../lib/polling";
 import type { Repository, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
 /** Detalhe da task em 3 níveis de acompanhamento:
@@ -75,10 +76,10 @@ export default function TaskDetail() {
     }).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    const load = () =>
+  usePolling(
+    (signal) =>
       api
-        .getTask(taskId)
+        .getTask(taskId, signal)
         .then((t) => {
           setTask(t);
           setFeedbackText((current) => current || t.feedback || "");
@@ -105,7 +106,7 @@ export default function TaskDetail() {
           const running = t.steps.find((s) => s.status === "running");
           if (running && t.subtasks && t.subtasks.length > 0) {
             api
-              .listEvents(running.id, "subtask_start", "desc")
+              .listEvents(running.id, "subtask_start", "desc", signal)
               .then((evs) => {
                 if (evs.length > 0) {
                   const p = evs[0].payload as {position?: number; title?: string};
@@ -123,7 +124,7 @@ export default function TaskDetail() {
           );
           if (toLoad.length > 0) {
             Promise.allSettled(
-              toLoad.map((s) => api.listEvents(s.id)),
+              toLoad.map((s) => api.listEvents(s.id, undefined, undefined, signal)),
             ).then((results) => {
               const next: Record<number, RunEvent[]> = {};
               toLoad.forEach((s, i) => {
@@ -134,18 +135,16 @@ export default function TaskDetail() {
             });
           }
         })
-        .catch((e) => setError(String(e)));
-    load();
-    const timer = setInterval(load, 1500);
-    return () => clearInterval(timer);
-  }, [taskId]);
+        .catch((e) => setError(String(e))),
+    1500,
+    [taskId],
+  );
 
-  useEffect(() => {
-    const load = () => api.getTaskTimeline(taskId).then(setTimeline).catch(() => {});
-    load();
-    const timer = setInterval(load, 1500);
-    return () => clearInterval(timer);
-  }, [taskId]);
+  usePolling(
+    (signal) => api.getTaskTimeline(taskId, signal).then(setTimeline).catch(() => {}),
+    1500,
+    [taskId],
+  );
 
   const refresh = () => api.getTask(taskId).then(setTask).catch((e) => setError(String(e)));
 

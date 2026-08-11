@@ -220,6 +220,51 @@ class TaskProposalOut(BaseModel):
     accepted_task_id: int | None = None
 
 
+class TaskStepListOut(BaseModel):
+    """Fase em payload "lean" de listas: sem o texto integral do resumo,
+    apenas um preview truncado para exibição (o completo fica no detalhe)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    position: int
+    robot: RobotOut | None = None
+    status: str
+    attempt: int
+    verdict: str | None
+    post_merge: bool
+    pause_before: bool = False
+    diff_stat: str | None = None
+    summary_preview: str | None = None
+    error: str | None
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class TaskListItem(BaseModel):
+    """Listagem leve de tasks (polling): sem resumo LLM, children, propostas e
+    subtarefas — só o que as telas de grid/dashboard precisam renderizar."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    repository_id: int
+    pipeline_id: int
+    title: str
+    kind: str
+    status: str
+    executor: str = "kimi"
+    current_step: int
+    budget_limit: float
+    cost_spent: float
+    pm_decisions: int
+    error: str | None
+    created_at: datetime
+    updated_at: datetime
+    parent_task_id: int | None = None
+    steps: list[TaskStepListOut] = []
+
+
 class TaskOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -398,7 +443,7 @@ class ExecutionOut(BaseModel):
     """Payload da página global "Execução": tasks ativas, eventos ao vivo das fases
     running, propostas pendentes, avisos e status do worker (1 request/poll)."""
 
-    tasks: list[TaskOut] = []
+    tasks: list[TaskListItem] = []
     current_events: dict[str, list[RunEventOut]] = {}
     proposals: list[TaskProposalOut] = []
     notices: list[NoticeOut] = []

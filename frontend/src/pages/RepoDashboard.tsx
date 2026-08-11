@@ -5,7 +5,8 @@ import HelpTip from "../components/HelpTip";
 import PhaseStepper from "../components/PhaseStepper";
 import StatusBadge from "../components/StatusBadge";
 import { diffSummary } from "../lib/tasks";
-import type { Pipeline, Repository, Task, TaskStep } from "../types";
+import { usePolling } from "../lib/polling";
+import type { Pipeline, Repository, TaskListItem, TaskStepListItem } from "../types";
 
 const ATIVOS = ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"];
 
@@ -13,7 +14,7 @@ export default function RepoDashboard() {
   const { repoId: repoIdStr } = useParams<{ repoId: string }>();
   const repoId = Number(repoIdStr);
 
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [repo, setRepo] = useState<Repository | null>(null);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [busy, setBusy] = useState<number | null>(null);
@@ -22,9 +23,9 @@ export default function RepoDashboard() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
 
-  const load = async () => {
+  const load = async (signal?: AbortSignal) => {
     try {
-      const list = await api.listTasks(repoId);
+      const list = await api.listTasks(repoId, signal);
       setTasks(list);
       setUpdatedAt(new Date());
     } catch (e) {
@@ -32,12 +33,8 @@ export default function RepoDashboard() {
     }
   };
 
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoId]);
+  // Poll do dashboard do projeto: 10s é suficiente (sem chat ao vivo).
+  usePolling(load, 10000, [repoId]);
 
   useEffect(() => {
     api.listRepositories().then((repos) => {
@@ -47,7 +44,7 @@ export default function RepoDashboard() {
     api.listPipelines(repoId).then(setPipelines).catch(() => {});
   }, [repoId]);
 
-  const review = async (task: Task, action: "approve" | "cancel") => {
+  const review = async (task: TaskListItem, action: "approve" | "cancel") => {
     setBusy(task.id);
     setError("");
     try {
@@ -65,7 +62,7 @@ export default function RepoDashboard() {
     }
   };
 
-  const quickBounceback = async (task: Task) => {
+  const quickBounceback = async (task: TaskListItem) => {
     const steps = [...task.steps].sort((a, b) => a.position - b.position);
     const implement = steps.find((s) => s.robot?.role === "implement" && !s.post_merge);
     const target = implement ? implement.position : 0;
@@ -314,11 +311,11 @@ function TaskCard({
   onReview,
   onBounceback,
 }: {
-  task: Task;
+  task: TaskListItem;
   repoId: number;
   busy: number | null;
-  onReview: (t: Task, action: "approve" | "cancel") => void;
-  onBounceback: (t: Task) => void;
+  onReview: (t: TaskListItem, action: "approve" | "cancel") => void;
+  onBounceback: (t: TaskListItem) => void;
 }) {
   const needsReview = task.status === "needs_review";
   const isBlocked = task.status === "blocked";
@@ -421,7 +418,7 @@ function TaskCard({
 
 /* ── Mini-card de etapa ── */
 
-function StageSummary({ step }: { step: TaskStep }) {
+function StageSummary({ step }: { step: TaskStepListItem }) {
   const state =
     step.status === "done"
       ? "done"
@@ -431,8 +428,8 @@ function StageSummary({ step }: { step: TaskStep }) {
           ? "failed"
           : "pending";
 
-  const summaryText = step.summary
-    ? extractSummary(step.summary)
+  const summaryText = step.summary_preview
+    ? extractSummary(step.summary_preview)
     : state === "running"
       ? "Em execução…"
       : state === "pending"

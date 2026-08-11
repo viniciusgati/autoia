@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models import (
     STEP_GUARDRAIL_BLOCKED,
     TASK_BLOCKED,
+    TASK_CANCELLED,
+    TASK_DONE,
+    TASK_FAILED,
     TASK_IN_PROGRESS,
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
@@ -19,6 +22,10 @@ from ..models import (
 )
 from ..schemas import DashboardOut, NoticeOut, RunEventOut
 from .deps import get_session
+from .etag import conditional
+
+# Estados terminais: um aviso sobre essas tasks não pede mais ação humana.
+_TASK_TERMINAL = (TASK_DONE, TASK_FAILED, TASK_CANCELLED)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -34,7 +41,10 @@ def _build_notices(session: Session) -> list[NoticeOut]:
     blocked_steps = (
         session.query(TaskStep)
         .join(Task)
-        .filter(TaskStep.status == STEP_GUARDRAIL_BLOCKED)
+        .filter(
+            TaskStep.status == STEP_GUARDRAIL_BLOCKED,
+            Task.status.not_in(_TASK_TERMINAL),
+        )
         .order_by(TaskStep.id.desc())
         .limit(10)
         .all()
@@ -157,7 +167,10 @@ def _build_notices(session: Session) -> list[NoticeOut]:
         session.query(RunEvent, TaskStep, Task)
         .join(TaskStep, RunEvent.step_id == TaskStep.id)
         .join(Task, TaskStep.task_id == Task.id)
-        .filter(RunEvent.kind == "arch_metric")
+        .filter(
+            RunEvent.kind == "arch_metric",
+            Task.status.not_in(_TASK_TERMINAL),
+        )
         .order_by(RunEvent.id.desc())
         .limit(30)
         .all()
@@ -191,8 +204,31 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 @router.get("", response_model=DashboardOut)
 def dashboard(
     repository_id: int | None = None,
+    request: Request = None,
+    response: Response = None,
     session: Session = Depends(get_session),
 ):
+    # Token barato (304): tasks + eventos (guardrail/arch/PM mudam junto).
+    task_q = session.query(Task)
+    if repository_id is not None:
+        task_q = task_q.filter(Task.repository_id == repository_id)
+    max_task_ts, token_total = task_q.with_entities(
+        func.max(Task.updated_at), func.count(Task.id)
+    ).first()
+    max_event_id = (
+        session.query(func.max(RunEvent.id))
+        .join(TaskStep, RunEvent.step_id == TaskStep.id)
+        .join(Task, TaskStep.task_id == Task.id)
+    )
+    if repository_id is not None:
+        max_event_id = max_event_id.filter(Task.repository_id == repository_id)
+    max_event_id = max_event_id.scalar()
+    not_modified = conditional(
+        request, response, "|".join(str(x) for x in (max_task_ts, token_total, max_event_id))
+    )
+    if not_modified is not None:
+        return not_modified
+
     # base query para Task, opcionalmente filtrada por repositório
     task_q = session.query(Task)
     if repository_id is not None:

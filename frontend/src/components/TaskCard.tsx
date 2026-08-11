@@ -4,10 +4,10 @@ import { api } from "../api";
 import PhaseStepper from "./PhaseStepper";
 import StatusBadge from "./StatusBadge";
 import { faseAtual } from "../lib/tasks";
-import type { Task } from "../types";
+import type { TaskListItem } from "../types";
 
 /** Tarefa que precisa de ação humana (revisão/aprovação/bloqueio). */
-function precisaHumano(task: Task): string | null {
+function precisaHumano(task: TaskListItem): string | null {
   if (task.status === "needs_review") return "aguardando revisão humana";
   if (task.status === "waiting_approval") return "aguardando aprovação humana";
   if (task.status === "blocked") return "bloqueada — requer atenção";
@@ -28,7 +28,7 @@ export default function TaskCard({
   onChanged,
   onError,
 }: {
-  task: Task;
+  task: TaskListItem;
   /** Caminho base do detalhe (ex.: `/tasks` ou `/:repoId/tasks`). */
   detailPath: string;
   repoName?: string;
@@ -178,7 +178,7 @@ export default function TaskCard({
 }
 
 /** Opções de filtro por status/grupo de status. */
-const FILTROS: { value: string; label: string; match: (t: Task) => boolean }[] = [
+const FILTROS: { value: string; label: string; match: (t: TaskListItem) => boolean }[] = [
   { value: "todas", label: "todas", match: () => true },
   {
     value: "ativas",
@@ -198,7 +198,7 @@ export function TaskCardGrid({
   onChanged,
   onError,
 }: {
-  tasks: Task[];
+  tasks: TaskListItem[];
   detailPath: string;
   repoNames?: Record<number, string>;
   onChanged: () => void;

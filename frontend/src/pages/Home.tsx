@@ -1,11 +1,12 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import StatusBadge from "../components/StatusBadge";
-import type { Dashboard as DashboardData, Repository, Task, TaskStep } from "../types";
+import { usePolling } from "../lib/polling";
+import type { Dashboard as DashboardData, Repository, TaskListItem, TaskStepListItem } from "../types";
 
 /** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
-function faseAtual(task: Task): TaskStep | null {
+function faseAtual(task: TaskListItem): TaskStepListItem | null {
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
   return (
     steps.find((s) => s.status === "running") ??
@@ -16,7 +17,7 @@ function faseAtual(task: Task): TaskStep | null {
 }
 
 /** Tarefa precisa de iteração humana (revisão, aprovação, bloqueada ou guardrail). */
-function precisaHumano(task: Task): boolean {
+function precisaHumano(task: TaskListItem): boolean {
   if (
     task.status === "needs_review" ||
     task.status === "waiting_approval" ||
@@ -47,14 +48,14 @@ function tempoRelativo(iso: string): string {
 export default function Home() {
   const [dash, setDash] = useState<DashboardData | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [error, setError] = useState("");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("main");
 
-  const load = () =>
-    Promise.all([api.getDashboard(), api.listRepositories(), api.listTasks()])
+  const load = (signal?: AbortSignal) =>
+    Promise.all([api.getDashboard(undefined, signal), api.listRepositories(signal), api.listTasks(undefined, signal)])
       .then(([d, r, t]) => {
         setDash(d);
         setRepos(r);
@@ -63,11 +64,8 @@ export default function Home() {
       })
       .catch((e) => setError(String(e)));
 
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 10000);
-    return () => clearInterval(timer);
-  }, []);
+  // Poll global da Home: 10s (dados agregados + listas leves).
+  usePolling(load, 10000, []);
 
   const addRepo = async (e: FormEvent) => {
     e.preventDefault();
@@ -85,7 +83,7 @@ export default function Home() {
   if (!dash || !repos.length === undefined) return <p>Carregando…</p>;
 
   // Agrupa tarefas por repositório, ordenadas por id decrescente (mais recentes primeiro)
-  const tasksByRepo: Record<number, Task[]> = {};
+  const tasksByRepo: Record<number, TaskListItem[]> = {};
   for (const t of tasks) {
     if (!tasksByRepo[t.repository_id]) tasksByRepo[t.repository_id] = [];
     tasksByRepo[t.repository_id].push(t);

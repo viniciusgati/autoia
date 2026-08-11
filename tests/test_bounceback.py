@@ -186,6 +186,34 @@ def test_max_attempts_bounds_bounce_back(flow, fake_kimi):
     assert _step(state, 3)["status"] == "failed"
 
 
+def test_bounceback_manual_ignora_limite(flow, settings):
+    """Bounceback via API é ação MANUAL: liberado mesmo com o step no teto de
+    `max_attempts` (limite só vale para o bounce-back automático do worker)."""
+    task_id = flow["task"]["id"]
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        t.status = "needs_review"
+        t.error = "deploy falhou"
+        dev = next(st for st in t.steps if st.position == 2)
+        dev.status = "done"
+        dev.attempt = settings.max_attempts  # já no teto automático
+        tester = next(st for st in t.steps if st.position == 3)
+        tester.status = "failed"
+        tester.error = "teste não passou"
+        s.commit()
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/bounceback",
+        json={"target_position": 2, "reviewed_by": "humano"},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "queued"
+    dev = next(st for st in data["steps"] if st["position"] == 2)
+    assert dev["status"] == "pending"
+    assert dev["attempt"] == settings.max_attempts + 1
+
+
 def test_agents_md_written_and_never_committed(flow, fake_kimi):
     """AGENTS.md é gerado no checkout em cada fase (inclui pós-merge) e nunca é versionado."""
     settings = flow["settings"]

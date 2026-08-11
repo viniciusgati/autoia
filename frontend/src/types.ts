@@ -168,6 +168,44 @@ export interface Task {
   children: Task[];
 }
 
+/** Fase no payload "lean" de listas: sem o texto integral do resumo (só preview). */
+export interface TaskStepListItem {
+  id: number;
+  position: number;
+  robot: Robot | null;
+  status: string;
+  attempt: number;
+  verdict: string | null;
+  post_merge: boolean;
+  pause_before: boolean;
+  diff_stat: string | null;
+  /** Preview do resumo (presente apenas na listagem lean; o completo é `summary`). */
+  summary_preview?: string | null;
+  error: string | null;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+/** Listagem leve de tasks p/ grids/dashboard (sem resumo LLM, children, propostas). */
+export interface TaskListItem {
+  id: number;
+  repository_id: number;
+  pipeline_id: number;
+  title: string;
+  kind: string;
+  status: string;
+  executor: string;
+  current_step: number;
+  budget_limit: number;
+  cost_spent: number;
+  pm_decisions: number;
+  error: string | null;
+  created_at: string;
+  updated_at: string;
+  parent_task_id: number | null;
+  steps: TaskStepListItem[];
+}
+
 export interface RunEvent {
   id: number;
   step_id: number;
@@ -205,7 +243,7 @@ export interface WorkerStatus {
 
 /** Payload da página global "Execução" (GET /api/execution). */
 export interface Execution {
-  tasks: Task[];
+  tasks: TaskListItem[];
   current_events: Record<string, RunEvent[]>;
   proposals: TaskProposal[];
   notices: Notice[];

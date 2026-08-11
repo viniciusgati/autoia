@@ -557,7 +557,8 @@ def test_worker_arch_metric_event(settings, bare_repo, tmp_path, fake_kimi):
 
     data = client.get("/api/dashboard").json()
     kinds = {n["kind"] for n in data["notices"]}
-    assert "arch" in kinds
+    # task concluída não gera aviso de arquitetura (não pede mais ação humana)
+    assert "arch" not in kinds
 
 
 def test_events_endpoint_order_desc(settings, bare_repo, tmp_path, fake_kimi):

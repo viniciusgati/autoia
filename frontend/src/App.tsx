@@ -12,6 +12,7 @@ import PhaseDetail from "./pages/PhaseDetail";
 import TaskDetail from "./pages/TaskDetail";
 import Execution from "./pages/Execution";
 import Notifications from "./components/Notifications";
+import { usePolling } from "./lib/polling";
 import type { Repository } from "./types";
 
 /** Extrai o repoId numérico do pathname atual, ou null se não for um projeto. */
@@ -42,16 +43,16 @@ export default function App() {
     api.listRepositories().then(setRepos).catch(() => {});
   }, [location.pathname]);
 
-  useEffect(() => {
-    const check = () => {
-      api.getWorkerStatus()
+  usePolling(
+    (signal) => {
+      api
+        .getWorkerStatus(signal)
         .then((s) => setWorkerAlive(s.alive))
         .catch(() => setWorkerAlive(false));
-    };
-    check();
-    const timer = setInterval(check, 5000);
-    return () => clearInterval(timer);
-  }, []);
+    },
+    5000,
+    [],
+  );
 
   const currentRepo = repoId != null ? repos.find((r) => r.id === repoId) : null;
 

@@ -162,3 +162,26 @@ def test_retry_unlocked_when_blocked(flow, settings):
     merger = next(st for st in data["steps"] if st["position"] == 5)
     assert merger["status"] == "pending"
     assert merger["attempt"] == settings.max_attempts + 1
+
+
+def test_retry_manual_ignora_limite_em_qualquer_estado(flow, settings):
+    """O retry é ação MANUAL: não fica preso ao `max_attempts` (limite do bounce-back
+    automático), mesmo com a task fora do estado 'blocked'."""
+    task_id = flow["task"]["id"]
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        t.status = "needs_review"  # ex.: falha pós-merge, não está 'blocked'
+        t.error = "deploy falhou"
+        merger = next(st for st in t.steps if st.position == 5)
+        merger.status = "failed"
+        merger.attempt = settings.max_attempts  # já no teto automático
+        merger.error = "erro no deploy"
+        s.commit()
+
+    resp = flow["client"].post(f"/api/tasks/{task_id}/steps/5/retry")
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["status"] == "queued"
+    merger = next(st for st in data["steps"] if st["position"] == 5)
+    assert merger["status"] == "pending"
+    assert merger["attempt"] == settings.max_attempts + 1

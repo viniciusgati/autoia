@@ -5,14 +5,13 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..models import (
     STEP_BLOCKED,
     STEP_FAILED,
-    STEP_GUARDRAIL_BLOCKED,
     STEP_PENDING,
     TASK_BLOCKED,
     TASK_CANCELLED,
@@ -39,8 +38,10 @@ from ..schemas import (
     RetryRequest,
     ReviewRequest,
     TaskCreate,
+    TaskListItem,
     TaskOut,
     TaskProposalOut,
+    TaskStepListOut,
     TaskSummaryOut,
     TaskUpdateRequest,
     TimelineEventOut,
@@ -49,6 +50,7 @@ from ..timeline import derive_task_timeline
 from ..worker.runner import _pm_decide, _system_event, create_child_task
 from ..worker.summarizer import summarize_task
 from .deps import get_repository_or_404, get_session, get_settings
+from .etag import conditional
 
 log = logging.getLogger("autoia.api")
 
@@ -64,6 +66,61 @@ def _task_query(session: Session):
         joinedload(Task.subtasks),
         joinedload(Task.proposals),
         selectinload(Task.summaries),
+    )
+
+
+def _task_list_query(session: Session):
+    """Query leve p/ listagens: sem resumos LLM, propostas e subtarefas."""
+    return session.query(Task).options(
+        joinedload(Task.steps).joinedload(TaskStep.robot),
+    )
+
+
+def _summary_preview(text: str | None, limit: int = 220) -> str | None:
+    """Preview de exibição do resumo de uma fase (o texto integral fica no detalhe)."""
+    if not text:
+        return None
+    cleaned = text.strip().replace("\n", " ")
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 1].rstrip() + "…"
+
+
+def _task_list_item(task: Task) -> TaskListItem:
+    return TaskListItem(
+        id=task.id,
+        repository_id=task.repository_id,
+        pipeline_id=task.pipeline_id,
+        title=task.title,
+        kind=task.kind,
+        status=task.status,
+        executor=task.executor,
+        current_step=task.current_step,
+        budget_limit=task.budget_limit,
+        cost_spent=task.cost_spent,
+        pm_decisions=task.pm_decisions,
+        error=task.error,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+        parent_task_id=task.parent_task_id,
+        steps=[
+            TaskStepListOut(
+                id=st.id,
+                position=st.position,
+                robot=st.robot,
+                status=st.status,
+                attempt=st.attempt,
+                verdict=st.verdict,
+                post_merge=st.post_merge,
+                pause_before=st.pause_before,
+                diff_stat=st.diff_stat,
+                summary_preview=_summary_preview(st.summary),
+                error=st.error,
+                started_at=st.started_at,
+                finished_at=st.finished_at,
+            )
+            for st in sorted(task.steps, key=lambda x: x.position)
+        ],
     )
 
 
@@ -121,15 +178,27 @@ def create_task(
     return _get_task_or_404(session, task.id)
 
 
-@router.get("", response_model=list[TaskOut])
+@router.get("", response_model=list[TaskListItem])
 def list_tasks(
     repository_id: int | None = None,
+    request: Request = None,
+    response: Response = None,
     session: Session = Depends(get_session),
 ):
-    q = _task_query(session)
+    token_parts: list[str] = []
+    q_count = session.query(func.max(Task.updated_at), func.count(Task.id))
+    q_count = q_count.filter(Task.repository_id == repository_id) if repository_id is not None else q_count
+    max_ts, count = q_count.first()
+    token_parts.extend([str(max_ts) if max_ts is not None else "", str(count)])
+    not_modified = conditional(request, response, "|".join(token_parts))
+    if not_modified is not None:
+        return not_modified
+
+    q = _task_list_query(session)
     if repository_id is not None:
         q = q.filter(Task.repository_id == repository_id)
-    return q.order_by(Task.id.desc()).limit(100).all()
+    tasks = q.order_by(Task.id.desc()).limit(100).all()
+    return [_task_list_item(t) for t in tasks]
 
 
 @router.get("/{task_id}", response_model=TaskOut)
@@ -310,7 +379,6 @@ def bounceback_task(
     task_id: int,
     data: BouncebackRequest,
     session: Session = Depends(get_session),
-    settings=Depends(get_settings),
 ):
     """Retorna o pipeline para uma fase anterior a partir de ``needs_review``.
 
@@ -321,6 +389,9 @@ def bounceback_task(
     Útil quando uma falha pós-merge ou um problema detectado exige reexecutar
     a partir de uma fase anterior (ex.: voltar ao developer após deploy-tester
     detectar que a feature não está deployada).
+
+    Ação sempre MANUAL (humano): não fica presa ao `max_attempts` (limite só do
+    bounce-back automático do worker).
     """
     task = _get_task_or_404(session, task_id)
     if task.status != TASK_NEEDS_REVIEW:
@@ -341,17 +412,9 @@ def bounceback_task(
             f"alvo (posição {data.target_position}) deve ser anterior à última fase "
             f"executada (posição {max_executed})",
         )
-
-    if target.attempt >= settings.max_attempts:
-        raise HTTPException(
-            400, f"tentativas máximas atingidas para a fase {data.target_position} "
-            f"({settings.max_attempts})"
-        )
-
     # Salva nota como feedback da task
     if data.note:
         task.feedback = data.note
-
     # Reseta o step alvo
     target.attempt += 1
     target.status = STEP_PENDING
@@ -403,13 +466,15 @@ def retry_step(
     position: int,
     data: RetryRequest | None = None,
     session: Session = Depends(get_session),
-    settings=Depends(get_settings),
 ):
     """Reabre uma fase para re-execução, opcionalmente com uma nota (feedback externo).
 
     Fases `failed`/`guardrail_blocked` voltam a pending; fases já `done` também podem
     voltar (ex.: "voltar para o developer" com a nota do erro externo) — as fases
     seguintes são reabertas naturalmente conforme o fluxo avança.
+
+    O retry é sempre uma ação MANUAL (humano): não fica limitado a `max_attempts`,
+    que vale apenas para o bounce-back automático do worker.
     """
     task = _get_task_or_404(session, task_id)
     if task.status == "created":
@@ -419,15 +484,6 @@ def retry_step(
         raise HTTPException(404, "fase não encontrada")
     if step.status in (STEP_PENDING, "running"):
         raise HTTPException(400, f"fase em andamento (status: {step.status})")
-    if (
-        step.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)
-        and step.attempt >= settings.max_attempts
-        and task.status != TASK_BLOCKED
-    ):
-        # Em task bloqueada (ex.: conflito de merge) o retry fica liberado mesmo com
-        # tentativas máximas: o usuário precisa poder instruir o robô (feedback) e
-        # re-executar a fase para resolver o bloqueio.
-        raise HTTPException(400, f"tentativas máximas atingidas ({settings.max_attempts})")
 
     if data and data.note:
         task.feedback = data.note

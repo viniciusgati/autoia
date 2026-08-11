@@ -1,14 +1,15 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "../api";
 import { TaskCardGrid } from "../components/TaskCard";
-import type { Pipeline, Task } from "../types";
+import { usePolling } from "../lib/polling";
+import type { Pipeline, TaskListItem } from "../types";
 
 export default function RepoTasks() {
   const { repoId: repoIdStr } = useParams<{ repoId: string }>();
   const repoId = Number(repoIdStr);
 
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [pipelineId, setPipelineId] = useState("");
   const [title, setTitle] = useState("");
@@ -17,8 +18,8 @@ export default function RepoTasks() {
   const [executor, setExecutor] = useState("kimi");
   const [error, setError] = useState("");
 
-  const load = () =>
-    Promise.all([api.listTasks(repoId), api.listPipelines(repoId)])
+  const load = (signal?: AbortSignal) =>
+    Promise.all([api.listTasks(repoId, signal), api.listPipelines(repoId, signal)])
       .then(([t, p]) => {
         setTasks(t);
         setPipelines(p);
@@ -26,12 +27,8 @@ export default function RepoTasks() {
       })
       .catch((e) => setError(String(e)));
 
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [repoId]);
+  // Poll leve (lista): atualiza a cada 15s; página é mais formulário + grid.
+  usePolling(load, 15000, [repoId]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();

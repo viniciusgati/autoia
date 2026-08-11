@@ -5,7 +5,8 @@ import ProposalCard from "../components/ProposalCard";
 import StatusBadge from "../components/StatusBadge";
 import TaskCard from "../components/TaskCard";
 import { formatToolCall } from "../lib/events";
-import type { Execution, Repository, RunEvent, Task } from "../types";
+import { usePolling } from "../lib/polling";
+import type { Execution, Repository, RunEvent, TaskListItem } from "../types";
 
 /** Página global "Execução": seções em colunas horizontais ocupando 100% da tela.
  *  Sessões ativas mostram apenas o comando atual + hora da chamada; propostas,
@@ -26,9 +27,9 @@ export default function ExecutionPage() {
     return m;
   }, [repos]);
 
-  const load = async () => {
+  const load = async (signal?: AbortSignal) => {
     try {
-      setData(await api.getExecution(filter ?? undefined));
+      setData(await api.getExecution(filter ?? undefined, signal));
     } catch (e) {
       setError(String(e));
     }
@@ -38,12 +39,7 @@ export default function ExecutionPage() {
     api.listRepositories().then(setRepos).catch(() => {});
   }, []);
 
-  useEffect(() => {
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter]);
+  usePolling(load, 5000, [filter]);
 
   if (error) return <p className="error">{error}</p>;
   if (!data) return <p>Carregando…</p>;
@@ -196,7 +192,7 @@ function RunningSession({
   events,
   repoNames,
 }: {
-  task: Task;
+  task: TaskListItem;
   events: RunEvent[];
   repoNames: Record<number, string>;
 }) {
@@ -249,7 +245,7 @@ function RunningSession({
   );
 }
 
-function etapaAtual(task: Task): string {
+function etapaAtual(task: TaskListItem): string {
   const step = task.steps.find((s) => s.status === "running")
     ?? [...task.steps].sort((a, b) => a.position - b.position)
       .find((s) => s.status === "pending");

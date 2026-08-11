@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import ArtifactGallery from "../components/ArtifactGallery";
@@ -6,6 +6,7 @@ import DiffView from "../components/DiffView";
 import StatusBadge from "../components/StatusBadge";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
+import { usePolling } from "../lib/polling";
 import type { RunEvent, Task } from "../types";
 
 /* ═══════════════════════════════════════════
@@ -217,25 +218,20 @@ export default function PhaseDetail() {
   const step = task?.steps.find((s) => s.id === stepId) ?? null;
   const active = task ? ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"].includes(task.status) : false;
 
-  useEffect(() => {
-    api.getTask(taskId)
-      .then(setTask)
-      .catch((e) => setError(String(e)));
-    const timer = setInterval(() => {
-      api.getTask(taskId).then(setTask).catch(() => {});
-    }, 1500);
-    return () => clearInterval(timer);
-  }, [taskId]);
+  usePolling(
+    (signal) => api.getTask(taskId, signal).then(setTask).catch(() => {}),
+    1500,
+    [taskId],
+  );
 
-  useEffect(() => {
-    const load = () => {
-      api.listEvents(stepId).then(setEvents).catch(() => {});
+  usePolling(
+    (signal) => {
+      api.listEvents(stepId, undefined, undefined, signal).then(setEvents).catch(() => {});
       api.getLog(stepId).then(setLog).catch(() => {});
-    };
-    load();
-    const timer = setInterval(load, 1500);
-    return () => clearInterval(timer);
-  }, [stepId]);
+    },
+    1500,
+    [stepId],
+  );
 
   const refresh = () =>
     api.getTask(taskId).then(setTask).catch((e) => setError(String(e)));

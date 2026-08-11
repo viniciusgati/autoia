@@ -1,7 +1,7 @@
-import type { Task } from "../types";
+import type { TaskListItem } from "../types";
 
 interface Props {
-  task: Task;
+  task: TaskListItem;
   muted?: boolean;
   /** Mostra o nome do robô abaixo de cada bolinha (dashboard do projeto). */
   showLabels?: boolean;

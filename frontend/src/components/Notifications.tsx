@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { api } from "../api";
 import { BellIcon } from "./Icons";
+import { usePolling } from "../lib/polling";
 import type { Notice } from "../types";
 
 const SEEN_KEY = "autoia_seen_notices";
@@ -41,19 +42,19 @@ export default function Notifications() {
   const [seen, setSeen] = useState<Set<string>>(loadSeen);
   const [open, setOpen] = useState(false);
   const lastKeys = useRef<string[]>([]);
+  const first = useRef(true);
   const location = useLocation();
 
-  useEffect(() => {
-    let first = true;
-    const load = () => {
+  usePolling(
+    (signal) => {
       api
-        .getDashboard()
+        .getDashboard(undefined, signal)
         .then((d) => {
           setNotices(d.notices);
           const keys = d.notices.map(noticeKey);
-          if (first) {
+          if (first.current) {
             lastKeys.current = keys;
-            first = false;
+            first.current = false;
             return;
           }
           const fresh = keys.filter((k) => !lastKeys.current.includes(k));
@@ -64,11 +65,10 @@ export default function Notifications() {
           lastKeys.current = keys;
         })
         .catch(() => {});
-    };
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-  }, []);
+    },
+    5000,
+    [],
+  );
 
   useEffect(() => {
     setOpen(false);

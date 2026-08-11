@@ -10,7 +10,8 @@ from __future__ import annotations
 import os
 import time
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request, Response
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..config import Settings
@@ -26,9 +27,11 @@ from ..models import (
     TaskProposal,
     TaskStep,
 )
-from ..schemas import ExecutionOut, RunEventOut, TaskOut, TaskProposalOut, WorkerStatusOut
+from ..schemas import ExecutionOut, RunEventOut, TaskProposalOut, WorkerStatusOut
 from .dashboard import _build_notices
 from .deps import get_session, get_settings
+from .etag import conditional
+from .tasks import _task_list_item
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
 
@@ -55,9 +58,42 @@ def _worker_status(settings: Settings) -> WorkerStatusOut:
 @router.get("", response_model=ExecutionOut)
 def execution(
     repository_id: int | None = None,
+    request: Request = None,
+    response: Response = None,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
 ):
+    # Token barato (304): versão de tasks + eventos + propostas + heartbeat do worker.
+    def _scoped(q):
+        return q.filter(Task.repository_id == repository_id) if repository_id is not None else q
+
+    max_task_ts = _scoped(session.query(func.max(Task.updated_at))).scalar()
+    event_q = (
+        session.query(func.max(RunEvent.id))
+        .join(TaskStep, RunEvent.step_id == TaskStep.id)
+        .join(Task, TaskStep.task_id == Task.id)
+    )
+    if repository_id is not None:
+        event_q = event_q.filter(Task.repository_id == repository_id)
+    max_event_id = event_q.scalar()
+    max_proposal_id, pending_proposals = _scoped(
+        session.query(
+            func.max(TaskProposal.id),
+            func.count(TaskProposal.id).filter(TaskProposal.status == "pending"),
+        ).join(Task, TaskProposal.task_id == Task.id)
+    ).first()
+    hb = os.path.join(settings.workspace_dir, "worker.heartbeat")
+    try:
+        hb_mtime = os.path.getmtime(hb)
+    except OSError:
+        hb_mtime = None
+    token = "|".join(
+        str(x) for x in (max_task_ts, max_event_id, max_proposal_id, pending_proposals, hb_mtime)
+    )
+    not_modified = conditional(request, response, token)
+    if not_modified is not None:
+        return not_modified
+
     # Tasks ativas (filtro opcional por projeto)
     task_q = session.query(Task)
     if repository_id is not None:
@@ -93,7 +129,7 @@ def execution(
     proposals = proposal_q.order_by(TaskProposal.created_at.desc()).limit(50).all()
 
     return ExecutionOut(
-        tasks=[TaskOut.model_validate(t) for t in tasks],
+        tasks=[_task_list_item(t) for t in tasks],
         current_events=current_events,
         proposals=[TaskProposalOut.model_validate(p) for p in proposals],
         notices=_build_notices(session),

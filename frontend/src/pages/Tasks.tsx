@@ -1,10 +1,10 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import { TaskCardGrid } from "../components/TaskCard";
-import type { Pipeline, Repository, Task } from "../types";
+import type { Pipeline, Repository, TaskListItem } from "../types";
 
 export default function Tasks() {
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [repositoryId, setRepositoryId] = useState("");
