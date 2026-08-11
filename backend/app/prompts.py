@@ -301,12 +301,70 @@ MOTIVO: <porquê — precisa de humano>
 Quando em dúvida, ESCALAR (default seguro).
 NÃO altere arquivos do projeto. NÃO faça commit do arquivo de veredicto."""
 
+# Declaração de bloqueio: o agente pede intervenção do usuário quando não consegue
+# continuar com segurança/autonomia (ambiguidade, decisão, dependência, permissão...).
+BLOCKED_TOOL = """## Ferramenta: declarar bloqueio (pedir instrução ao usuário)
+
+Se você NÃO puder continuar com segurança ou autonomia (ex.: duas abordagens possíveis
+e nenhuma é claramente melhor, requisito ambíguo, dependência de outra tarefa, decisão
+técnica que precisa de humano, falha de ferramenta, autorização necessária), NÃO
+invente nem adivinhe. Em vez disso, escreva o arquivo `autoia_blocked.json` na raiz do
+repositório com esta estrutura:
+
+```json
+{
+  "status": "blocked",
+  "reason_type": "decision_required",
+  "reason": "motivo claro e objetivo do bloqueio",
+  "question": "pergunta direta ao usuário sobre como continuar"
+}
+```
+
+- `reason_type` (obrigatório): um de `decision_required`, `insufficient_info`,
+  `ambiguity`, `dependency`, `authorization`, `tool_failure`, `guardrail`, `other`.
+- `reason` (obrigatório): o porquê do bloqueio.
+- `question` (opcional): a pergunta cuja resposta destrava a continuidade.
+- NÃO faça commit deste arquivo. O sistema pausa a execução, mostra o motivo ao usuário
+  e o retoma a partir daqui quando o usuário fornecer uma instrução. Isso NÃO é falha:
+  é um pedido legítimo de intervenção."""
+
+# Resumo estruturado do desenvolvimento (LLM dedicada — só interpreta, nunca desenvolve).
+CONTRACT_SUMMARY = """## Sua função: RESUMIR, não desenvolver
+Você é uma LLM dedicada a RESUMIR um desenvolvimento já executado. NÃO altere código,
+não gere código, não corrija nada: apenas INTERPRETE o contexto fornecido e produza um
+resumo objetivo, que permita a uma pessoa entender o que aconteceu sem abrir logs.
+
+## Formato de saída OBRIGATÓRIO (arquivo)
+Escreva o arquivo `autoia_summary.json` na raiz do repositório com EXATAMENTE esta
+estrutura JSON:
+
+```json
+{
+  "summary": "Resumo objetivo do desenvolvimento (o que foi feito).",
+  "request": "Descrição resumida do que foi solicitado.",
+  "implementation": "O que foi efetivamente implementado.",
+  "changes": ["Alteração importante 1", "Alteração importante 2"],
+  "result": "completed",
+  "issues": ["Problema ou limitação relevante"],
+  "files": ["arquivo relevante"],
+  "tasks_summary": "Resumo das tarefas executadas e pendentes"
+}
+```
+
+Regras:
+- `result` é um de: `completed`, `partial`, `failed`, `pending`.
+- `changes`, `issues` e `files` são arrays (podem ser vazios).
+- Seja concreto: evite frases genéricas ("melhorias gerais", "refatorações").
+- `issues` só com algo relevante; caso contrário, array vazio.
+- NÃO faça commit deste arquivo."""
+
 _CONTRACTS = {
     "refine": CONTRACT_REFINE,
     "review": CONTRACT_REVIEW,
     "verify": CONTRACT_VERIFY,
     "assess": CONTRACT_ASSESS,
     "pm": CONTRACT_PM,
+    "summary": CONTRACT_SUMMARY,
 }
 
 
@@ -338,15 +396,30 @@ def build_prompt(
             "Leve em conta este feedback no seu trabalho — pode conter erros de deploy, "
             "pedidos de ajuste ou informações do ambiente."
         )
+    if task.details:
+        parts.append(
+            f"### Detalhes adicionados pelo usuário (contexto da implementação)\n{task.details}\n\n"
+            "O usuário adicionou estes detalhes para orientar ou corrigir a implementação. "
+            "São posteriores à solicitação original — leve-os em conta."
+        )
+    if task.resume_instruction:
+        parts.append(
+            f"### Intervenção do usuário (retomada)\n{task.resume_instruction}\n\n"
+            "A execução anterior foi bloqueada e o usuário forneceu esta instrução para "
+            "você continuar EXATAMENTE de onde parou, no mesmo contexto. Obedeça-a."
+        )
     parts.append(HANDOFF_READ)
     contract = _CONTRACTS.get(robot.role)
     if contract:
         parts.append(contract)
     # refine (história) e pm (decisão) têm formatos de saída próprios; os demais
     # documentam o trabalho no texto final, que vira o histórico da fase no handoff.
-    if robot.role not in ("refine", "pm"):
+    if robot.role not in ("refine", "pm", "summary"):
         parts.append(HANDOFF_DOCUMENT)
     parts.append(EVIDENCE)
     parts.append(GUARDRAIL_INSTRUCTIONS)
+    # Todo agente pode declarar bloqueio pedindo intervenção do usuário.
+    if robot.role not in ("refine", "pm", "summary"):
+        parts.append(BLOCKED_TOOL)
     parts.append(TASK_SPAWN_TOOL)
     return "\n\n".join(p for p in parts if p)

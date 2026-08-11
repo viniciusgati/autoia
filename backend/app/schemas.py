@@ -25,6 +25,7 @@ class RepositoryCreate(BaseModel):
     allow_auto_tasks: bool = False
     allow_external_tasks: bool = False
     default_pipeline_id: int | None = None
+    auto_summary: bool = False
 
 
 class RepositoryUpdate(BaseModel):
@@ -42,6 +43,7 @@ class RepositoryUpdate(BaseModel):
     allow_auto_tasks: bool | None = None
     allow_external_tasks: bool | None = None
     default_pipeline_id: int | None = None
+    auto_summary: bool | None = None
 
 
 class RepositoryOut(BaseModel):
@@ -64,6 +66,7 @@ class RepositoryOut(BaseModel):
     allow_auto_tasks: bool = False
     allow_external_tasks: bool = False
     default_pipeline_id: int | None = None
+    auto_summary: bool = False
 
 
 # ---------- Robot ----------
@@ -236,6 +239,12 @@ class TaskOut(BaseModel):
     pm_decisions: int
     feedback: str | None = None
     error: str | None
+    details: str | None = None
+    resume_instruction: str | None = None
+    block_reason_type: str | None = None
+    block_reason: str | None = None
+    block_question: str | None = None
+    summary: "TaskSummaryOut | None" = None
     created_at: datetime
     updated_at: datetime
     parent_task_id: int | None = None
@@ -243,6 +252,50 @@ class TaskOut(BaseModel):
     subtasks: list[SubTaskOut] = []
     proposals: list[TaskProposalOut] = []
     children: list["TaskOut"] = []
+
+
+class TaskSummaryOut(BaseModel):
+    """Resumo estruturado do desenvolvimento gerado por LLM (persistido no banco)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    summary: str
+    request: str | None = None
+    implementation: str | None = None
+    changes: list[str] = []
+    result: str | None = None
+    issues: list[str] = []
+    files: list[str] = []
+    tasks_summary: str | None = None
+    model: str | None = None
+    created_at: datetime
+
+
+class TimelineEventOut(BaseModel):
+    """Evento da timeline cronológica de execução (resumo determinístico, sem LLM)."""
+
+    seq: int
+    ts: datetime
+    type: str
+    name: str
+    summary: str
+    status: str | None = None
+    duration_ms: int | None = None
+    input: dict | None = None
+    output: dict | None = None
+    raw: dict
+    step_id: int | None = None
+    step_position: int | None = None
+    step_robot: str | None = None
+    step_role: str | None = None
+
+
+class BlockedContinueRequest(BaseModel):
+    """Instrução do usuário para retomar uma fase bloqueada (continuar de onde parou)."""
+
+    instruction: str = Field(min_length=1, max_length=10000)
 
 
 class FeedbackCreate(BaseModel):
@@ -276,10 +329,12 @@ class ApproveStepRequest(BaseModel):
 
 class TaskUpdateRequest(BaseModel):
     """Edição humana da história (descrição/critérios) — permitida em `created` e
-    `waiting_approval`."""
+    `waiting_approval`. `details` (detalhes da implementação) é permitido em qualquer
+    status: complementa o contexto e entra no handoff das próximas fases."""
 
     description: str | None = None
     acceptance_criteria: str | None = None
+    details: str | None = None
 
 
 # ---------- Eventos ----------

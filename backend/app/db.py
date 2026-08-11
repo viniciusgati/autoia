@@ -52,6 +52,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("allow_auto_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("allow_external_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
+        ("auto_summary", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
     "robots": [
         ("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL"),
@@ -64,6 +65,11 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("feedback", "TEXT"),
         ("parent_task_id", "INTEGER REFERENCES tasks(id)"),
         ("executor", "VARCHAR(20) DEFAULT 'kimi' NOT NULL"),
+        ("details", "TEXT"),
+        ("resume_instruction", "TEXT"),
+        ("block_reason_type", "VARCHAR(50)"),
+        ("block_reason", "TEXT"),
+        ("block_question", "TEXT"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),

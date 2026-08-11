@@ -9,6 +9,8 @@ import type {
   SubTask,
   Task,
   TaskProposal,
+  TaskSummary,
+  TimelineEvent,
 } from "./types";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -115,10 +117,25 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ position, note }),
     }),
-  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null }) =>
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null }) =>
     request<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
+    }),
+
+  // resumo do desenvolvimento (LLM dedicada)
+  getTaskSummary: (taskId: number) => request<TaskSummary | null>(`/api/tasks/${taskId}/summary`),
+  regenerateSummary: (taskId: number) =>
+    request<TaskSummary | null>(`/api/tasks/${taskId}/summary/regenerate`, { method: "POST" }),
+
+  // timeline cronológica da execução
+  getTaskTimeline: (taskId: number) => request<TimelineEvent[]>(`/api/tasks/${taskId}/timeline`),
+
+  // bloqueio + retomada por instrução
+  continueBlocked: (taskId: number, instruction: string) =>
+    request<Task>(`/api/tasks/${taskId}/blocked/continue`, {
+      method: "POST",
+      body: JSON.stringify({ instruction }),
     }),
 
   // propostas de tasks filhas (aprovação humana)

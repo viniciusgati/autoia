@@ -56,6 +56,14 @@ export function sessionEventLine(event: RunEvent): string {
       return `✅ subtarefa ${Number(payload.position ?? -1) + 1} marcada como implementada: ${String(payload.title ?? "?")}`;
     case "human_subtask_retry":
       return `👤 retry manual da subtarefa ${Number(payload.position ?? -1) + 1}: ${String(payload.title ?? "?")}`;
+    case "task_blocked":
+      return `⛔ desenvolvimento bloqueado aguardando instrução: ${String(payload.reason ?? "")}`;
+    case "user_intervention":
+      return `👤 intervenção do usuário: "${String(payload.instruction ?? "").slice(0, 160)}"`;
+    case "execution_resumed":
+      return `▶ execução retomada na fase ${String(payload.step ?? "?")}`;
+    case "summary_generated":
+      return `📄 resumo do desenvolvimento gerado (${String(payload.result ?? "?")})`;
     case "system":
       return String(payload.reason ?? JSON.stringify(payload)).slice(0, 140);
     default:

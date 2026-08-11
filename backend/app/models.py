@@ -25,6 +25,9 @@ STEP_RUNNING = "running"
 STEP_DONE = "done"
 STEP_FAILED = "failed"
 STEP_GUARDRAIL_BLOCKED = "guardrail_blocked"
+# Fase que o agente declarou que não consegue continuar sozinha (aguarda instrução
+# do usuário para retomar — ver `autoia_blocked.json`).
+STEP_BLOCKED = "blocked"
 
 SUB_PENDING = "pending"
 SUB_IMPLEMENTING = "implementing"
@@ -57,6 +60,9 @@ class Repository(Base):
     allow_auto_tasks: Mapped[bool] = mapped_column(default=False)
     allow_external_tasks: Mapped[bool] = mapped_column(default=False)
     default_pipeline_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("pipelines.id"), nullable=True)
+    # Gera o resumo do desenvolvimento (LLM) automaticamente a cada avanço de fase
+    # e ao parar em estado terminal/decisão, sem precisar clicar em "regenerar".
+    auto_summary: Mapped[bool] = mapped_column(Boolean, default=False)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="repository")
 
@@ -133,6 +139,17 @@ class Task(Base):
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
     parent_task_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tasks.id"), nullable=True)
 
+    # Detalhes da implementação adicionados MANUALMENTE pelo usuário durante o
+    # fluxo (complementam o contexto original, diferenciados de description).
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Instrução fornecida pelo usuário ao retomar uma fase bloqueada (separada do
+    # contexto original — entra no handoff/prompt da retomada).
+    resume_instruction: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Motivo estruturado do bloqueio declarado pelo agente (autoia_blocked.json).
+    block_reason_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    block_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    block_question: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     repository: Mapped[Repository] = relationship(back_populates="tasks")
     pipeline: Mapped[Pipeline] = relationship()
     parent: Mapped["Task | None"] = relationship(remote_side="Task.id", back_populates="children")
@@ -153,6 +170,43 @@ class Task(Base):
         cascade="all, delete-orphan",
         foreign_keys="TaskProposal.task_id",
     )
+    # Versões do resumo gerado por LLM (mais recente primeiro).
+    summaries: Mapped[list["TaskSummary"]] = relationship(
+        back_populates="task",
+        order_by="TaskSummary.id.desc()",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def summary(self) -> "TaskSummary | None":
+        """Resumo mais recente do desenvolvimento (se houver)."""
+        return self.summaries[0] if self.summaries else None
+
+
+class TaskSummary(Base):
+    """Resumo estruturado do desenvolvimento, gerado por LLM dedicada e persistido.
+
+    A LLM NUNCA é fonte de verdade: é uma representação resumida dos dados reais da
+    execução (fases, eventos/timeline, arquivos, testes). Regenerar cria uma nova
+    versão; a API sempre retorna a mais recente. Falha na geração não afeta o pipeline.
+    """
+
+    __tablename__ = "task_summaries"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    summary: Mapped[str] = mapped_column(Text, default="")
+    request: Mapped[str | None] = mapped_column(Text, nullable=True)
+    implementation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changes: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    issues: Mapped[list] = mapped_column(JSON, default=list)
+    files: Mapped[list] = mapped_column(JSON, default=list)
+    tasks_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    task: Mapped[Task] = relationship(back_populates="summaries")
 
 
 class TaskProposal(Base):

@@ -72,6 +72,10 @@ const SYSTEM_KINDS = new Set([
   "task_cancelled",
   "subtask_bounce_back",
   "subtask_marked_done",
+  "task_blocked",
+  "user_intervention",
+  "execution_resumed",
+  "summary_generated",
 ]);
 
 function systemTurnFromEvent(event: RunEvent): SystemTurn | null {
@@ -135,6 +139,18 @@ function systemTurnFromEvent(event: RunEvent): SystemTurn | null {
       break;
     case "subtask_marked_done":
       text = `✅ subtarefa ${Number(payload.position ?? -1) + 1} marcada como implementada pelo agente: ${String(payload.title ?? "")}`;
+      break;
+    case "task_blocked":
+      text = `⛔ desenvolvimento bloqueado aguardando instrução — ${String(payload.reason ?? "")}`;
+      break;
+    case "user_intervention":
+      text = `👤 intervenção do usuário: "${String(payload.instruction ?? "")}"`;
+      break;
+    case "execution_resumed":
+      text = `▶ execução retomada na fase ${String(payload.step ?? "?")} após intervenção`;
+      break;
+    case "summary_generated":
+      text = `📄 resumo do desenvolvimento gerado (resultado: ${String(payload.result ?? "?")})`;
       break;
     default:
       text = `${event.kind}: ${JSON.stringify(payload)}`;

@@ -7,10 +7,19 @@ marcadores `## Descrição` e `## Critérios de aceite`.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 
 VERDICT_FILENAME = "autoia_verdict.txt"
+
+# Declaração de bloqueio do agente: quando ele NÃO consegue continuar com segurança
+# (ambiguidade, decisão, dependência, permissão, ferramenta...), escreve este arquivo
+# estruturado no checkout. O worker lê, apaga e marca a task/fase como `blocked`.
+BLOCKED_FILENAME = "autoia_blocked.json"
+
+# Resumo estruturado gerado pela LLM dedicada (contrato de saída).
+SUMMARY_FILENAME = "autoia_summary.json"
 
 # Veredictos esperados por papel
 V_READY = "READY"
@@ -22,6 +31,9 @@ V_FAIL = "FAIL"
 PM_RETRY = "retry"
 PM_CONTINUE = "continue"
 PM_ESCALATE = "escalate"
+
+# Resultados aceitos do resumo (contrato autoia_summary.json).
+SUMMARY_RESULTS = ("completed", "partial", "failed", "pending")
 
 
 def verdict_path(checkout: str) -> str:
@@ -39,6 +51,75 @@ def read_verdict(checkout: str) -> str | None:
 def remove_verdict(checkout: str) -> None:
     try:
         os.remove(verdict_path(checkout))
+    except FileNotFoundError:
+        pass
+
+
+def read_block(checkout: str) -> dict | None:
+    """Lê a declaração de bloqueio do agente (autoia_blocked.json), tolerante."""
+    path = os.path.join(checkout, BLOCKED_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    return {
+        "reason_type": str(data.get("reason_type") or "other")[:50],
+        "reason": str(data.get("reason") or "agente não conseguiu continuar")[:2000],
+        "question": str(data.get("question") or "")[:2000],
+    }
+
+
+def remove_block(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, BLOCKED_FILENAME))
+    except FileNotFoundError:
+        pass
+
+
+def read_summary(checkout: str) -> dict | None:
+    """Lê o resumo gerado pela LLM (autoia_summary.json), tolerante e com defaults."""
+    path = os.path.join(checkout, SUMMARY_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+
+    def _list(key: str) -> list[str]:
+        value = data.get(key)
+        if isinstance(value, list):
+            return [str(v) for v in value if str(v).strip()]
+        if isinstance(value, str) and value.strip():
+            return [value]
+        return []
+
+    result = str(data.get("result") or "").strip().lower()
+    if result not in SUMMARY_RESULTS:
+        result = None
+    return {
+        "summary": str(data.get("summary") or ""),
+        "request": str(data.get("request") or "").strip() or None,
+        "implementation": str(data.get("implementation") or "").strip() or None,
+        "changes": _list("changes"),
+        "result": result,
+        "issues": _list("issues"),
+        "files": _list("files"),
+        "tasks_summary": str(data.get("tasks_summary") or "").strip() or None,
+    }
+
+
+def remove_summary(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, SUMMARY_FILENAME))
     except FileNotFoundError:
         pass
 

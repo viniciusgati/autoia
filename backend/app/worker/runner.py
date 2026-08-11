@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import types
 from dataclasses import dataclass, field
@@ -27,6 +28,7 @@ from .. import budget, prompts, verdicts
 from ..config import Settings
 from ..db import Base, make_engine, make_session_factory, migrate_schema, utcnow
 from ..models import (
+    STEP_BLOCKED,
     STEP_DONE,
     STEP_FAILED,
     STEP_GUARDRAIL_BLOCKED,
@@ -233,6 +235,8 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
             trigger = execute_step(settings, session_factory, step_id)
             if trigger:
                 _maybe_pm(session_factory, settings, trigger["task_id"], trigger["reason"])
+            # Resumo automático (se o repo tiver auto_summary) a cada fase decidida.
+            _maybe_auto_summary(settings, session_factory, step_id)
         except Exception:
             log.exception("erro executando step %s", step_id)
             _fail_step_hard(session_factory, step_id)
@@ -397,6 +401,18 @@ def _build_handoff(
         "Ao terminar, documente no seu texto final: o que fez, arquivos alterados, "
         "evidência (comandos/saídas), pendências e instruções para a próxima fase."
     )
+    # Detalhes adicionados pelo usuário + instrução de retomada entram no handoff
+    # como seções próprias (diferenciadas da solicitação original).
+    if task.details:
+        sections.append(
+            f"## Detalhes adicionados pelo usuário (contexto da implementação)\n{task.details}"
+        )
+    if task.resume_instruction:
+        sections.append(
+            f"## Intervenção do usuário (retomada)\n{task.resume_instruction}\n\n"
+            "_A execução foi bloqueada e o usuário forneceu esta instrução para continuar "
+            "exatamente de onde parou._"
+        )
     return handoff.build_handoff(
         task_id=task.id,
         task_title=task.title or "",
@@ -674,6 +690,33 @@ def _handle_cancelled(s: Session, step: TaskStep, task: Task) -> bool:
     return True
 
 
+def _consume_block_declaration(s: Session, step: TaskStep, checkout: str) -> dict | None:
+    """Lê (e remove) a declaração de bloqueio do agente (autoia_blocked.json)."""
+    data = verdicts.read_block(checkout)
+    if data is None:
+        return None
+    verdicts.remove_block(checkout)
+    return data
+
+
+def _mark_blocked(s: Session, step: TaskStep, task: Task, data: dict) -> None:
+    """Marca a fase e a task como `blocked` aguardando instrução do usuário.
+
+    O agente declarou que não consegue continuar sozinho (ambiguidade, decisão,
+    dependência, permissão...). Isso NÃO é falha: a task fica parada até o usuário
+    fornecer uma instrução e retomar (POST /api/tasks/{id}/blocked/continue).
+    """
+    task.status = TASK_BLOCKED
+    task.error = data.get("reason")
+    task.block_reason_type = data.get("reason_type")
+    task.block_reason = data.get("reason")
+    task.block_question = data.get("question")
+    step.status = STEP_BLOCKED
+    step.error = data.get("reason")
+    _finish(step)
+    _system_event(s, step, "task_blocked", data)
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -686,6 +729,13 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         reason = outcome.abort_reason or ""
 
         if _handle_cancelled(s, step, task):
+            s.commit()
+            return None
+
+        # O agente declarou bloqueio aguardando instrução do usuário (autoia_blocked.json).
+        block = _consume_block_declaration(s, step, checkout)
+        if block:
+            _mark_blocked(s, step, task, block)
             s.commit()
             return None
 
@@ -948,6 +998,12 @@ def _decide_subtask_implement(
             s.commit()
             return None
 
+        block = _consume_block_declaration(s, step, checkout)
+        if block:
+            _mark_blocked(s, step, task, block)
+            s.commit()
+            return None
+
         if abort_reason:
             # Erro durante a implementação de uma subtarefa
             if "orçamento" in abort_reason:
@@ -1022,6 +1078,12 @@ def _decide_subtask_verify(
         task = step.task
 
         if _handle_cancelled(s, step, task):
+            s.commit()
+            return None
+
+        block = _consume_block_declaration(s, step, checkout)
+        if block:
+            _mark_blocked(s, step, task, block)
             s.commit()
             return None
 
@@ -1300,6 +1362,71 @@ def _pm_decide(session_factory, eff: EffectiveSettings, task_id: int, trigger: s
             task.error = f"PM escalou: {decision['reason']}"
 
         s.commit()
+
+        # Resumo automático após a decisão do PM (estado final/decisão mudou).
+        if task.repository.auto_summary:
+            _spawn_auto_summary(settings, session_factory, task_id, eff)
+
+
+# Tasks cujo resumo automático já está sendo gerado (evita sobrepor gerações).
+_SUMMARY_IN_FLIGHT: set[int] = set()
+_SUMMARY_LOCK = threading.Lock()
+
+
+def _maybe_auto_summary(settings: Settings, session_factory, step_id: int) -> None:
+    """Gera o resumo automaticamente após a decisão de uma fase, se o repo tiver
+    `auto_summary` ligado — a cada avanço de fase e nos estados finais/decisão.
+
+    Roda em thread daemon (com heartbeat próprio): não bloqueia o worker nem faz a
+    UI reportar "worker offline" durante a geração.
+    """
+    try:
+        with session_factory() as s:
+            step = s.get(TaskStep, step_id)
+            if step is None:
+                return
+            task = step.task
+            if not task.repository.auto_summary:
+                return
+            task_id = task.id
+            eff = _effective(settings, task.repository)
+    except Exception:
+        log.exception("auto-resumo: falha ao avaliar o step %s", step_id)
+        return
+
+    _spawn_auto_summary(settings, session_factory, task_id, eff)
+
+
+def _spawn_auto_summary(settings, session_factory, task_id: int, eff: EffectiveSettings) -> None:
+    """Dispara a geração do resumo em background (deduplicada por task em andamento)."""
+    with _SUMMARY_LOCK:
+        if task_id in _SUMMARY_IN_FLIGHT:
+            return
+        _SUMMARY_IN_FLIGHT.add(task_id)
+
+    def _run() -> None:
+        try:
+            from .summarizer import summarize_task
+
+            hb_path = os.path.join(eff.workspace_dir, "worker.heartbeat")
+            stop = threading.Event()
+            hb = threading.Thread(
+                target=_heartbeat_loop, args=(hb_path, stop),
+                daemon=True, name="summary-heartbeat",
+            )
+            hb.start()
+            try:
+                summarize_task(settings, session_factory, task_id)
+            finally:
+                stop.set()
+                hb.join(timeout=1)
+        except Exception:
+            log.exception("auto-resumo falhou para a task %s", task_id)
+        finally:
+            with _SUMMARY_LOCK:
+                _SUMMARY_IN_FLIGHT.discard(task_id)
+
+    threading.Thread(target=_run, daemon=True, name=f"auto-summary-{task_id}").start()
 
 
 def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) -> None:

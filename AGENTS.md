@@ -33,9 +33,10 @@ backend/app/            # pacote `app`
   models.py             # Repository, Robot, Pipeline(+Step), Task(+Step), RunEvent
   schemas.py            # Pydantic; espelha os tipos do frontend
   prompts.py            # contratos de saída por role + build_prompt()
-  verdicts.py           # contrato autoia_verdict.txt (parse PASS/FAIL/READY/PM)
+  verdicts.py           # contrato autoia_verdict.txt (parse PASS/FAIL/READY/PM) + autoia_blocked.json/autoia_summary.json
   guardrails.py         # política em tempo real de tool_calls (check_tool_call)
   budget.py             # custo por interação + limite
+  timeline.py           # derivação DETERMINÍSTICA da timeline de execução (sem LLM)
   api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard)
   worker/
     runner.py           # loop do worker: claim -> executa -> decide (bounce-back/PM)
@@ -45,6 +46,7 @@ backend/app/            # pacote `app`
     gitops.py           # clone/branch/commit/merge/push/checkout_default/diff
     project.py          # detecção de ecossistema + AGENTS.md gerado no checkout
     arch_metric.py      # métrica de mudança de arquitetura/deploy (evento arch_metric)
+    summarizer.py       # resumo estruturado do desenvolvimento via executor (autoia_summary.json)
 frontend/               # Vite + React (páginas em src/pages/, tipos em src/types.ts)
 tests/                  # pytest; fixtures compartilhadas em conftest.py
 ```
@@ -110,6 +112,28 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   diff da branch — sinaliza mudança drástica de deploy/arquitetura. O Dashboard expõe
   `notices`: tarefas que requerem atenção (guardrail, `needs_review`, bloqueadas, custo
   alto ≥ 80% do orçamento, arquitetura).
+- **Timeline de execução** (`app/timeline.py`): a UI de acompanhamento tem 3 níveis de
+  detalhe (Resumo / Acompanhamento / Técnico). A timeline é **derivada de forma
+  determinística** dos `RunEvent` (sem LLM) — cada `tool_call` vira um evento próprio
+  (pareada com o `tool_result` para `status`/`output`/`duration_ms`) e cada evento tem um
+  `summary` em PT-BR. Endpoint `GET /api/tasks/{id}/timeline`. `RunEvent` continua sendo a
+  fonte de verdade.
+- **Resumo do desenvolvimento** (`worker/summarizer.py` + `TaskSummary`): LLM dedicada
+  (via executor da task, `role=summary` — contrato `autoia_summary.json` estruturado)
+  gera um resumo persistido no banco (última versão em `Task.summaries[0]`); `GET
+  /api/tasks/{id}/summary` + `POST .../summary/regenerate` (background). Falha NUNCA
+  afeta o pipeline. A LLM só interpreta; `details`/`resume_instruction`/eventos são a
+  fonte de verdade. **`Repository.auto_summary`** (config do projeto) liga a geração
+  automática: `worker` chama `_maybe_auto_summary` a cada fase decidida e após a
+  decisão do PM, em thread daemon com heartbeat próprio (guarda `_SUMMARY_IN_FLIGHT`
+  evita gerações sobrepostas).
+- **Bloqueio + retomada por instrução**: agente escreve `autoia_blocked.json`
+  (`reason_type`/`reason`/`question`) quando não consegue continuar sozinho → worker marca
+  fase e task como `blocked` (não é falha). `POST /api/tasks/{id}/blocked/continue` grava
+  `Task.resume_instruction` (separada do contexto original), reabre a MESMA fase
+  (attempt+1) e registra `user_intervention`/`execution_resumed` na timeline. A instrução
+  entra no handoff/prompt da retomada. `Task.details` = detalhes adicionados pelo usuário
+  durante o fluxo (entram no handoff das próximas fases).
 
 ## Padrões de desenvolvimento (backend)
 

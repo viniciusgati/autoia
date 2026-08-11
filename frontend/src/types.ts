@@ -16,6 +16,7 @@ export interface Repository {
   allow_auto_tasks: boolean;
   allow_external_tasks: boolean;
   default_pipeline_id: number | null;
+  auto_summary: boolean;
 }
 
 export interface Robot {
@@ -102,6 +103,39 @@ export interface TaskProposal {
   accepted_task_id: number | null;
 }
 
+export interface TaskSummary {
+  id: number;
+  task_id: number;
+  summary: string;
+  request: string | null;
+  implementation: string | null;
+  changes: string[];
+  result: "completed" | "partial" | "failed" | "pending" | null;
+  issues: string[];
+  files: string[];
+  tasks_summary: string | null;
+  model: string | null;
+  created_at: string;
+}
+
+/** Evento da timeline cronológica de execução (resumo determinístico, sem LLM). */
+export interface TimelineEvent {
+  seq: number;
+  ts: string;
+  type: string;
+  name: string;
+  summary: string;
+  status: string | null;
+  duration_ms: number | null;
+  input: Record<string, unknown> | null;
+  output: Record<string, unknown> | null;
+  raw: { kind: string; payload: Record<string, unknown> };
+  step_id: number | null;
+  step_position: number | null;
+  step_robot: string | null;
+  step_role: string | null;
+}
+
 export interface Task {
   id: number;
   repository_id: number;
@@ -119,6 +153,12 @@ export interface Task {
   pm_decisions: number;
   feedback: string | null;
   error: string | null;
+  details: string | null;
+  resume_instruction: string | null;
+  block_reason_type: string | null;
+  block_reason: string | null;
+  block_question: string | null;
+  summary: TaskSummary | null;
   created_at: string;
   updated_at: string;
   steps: TaskStep[];

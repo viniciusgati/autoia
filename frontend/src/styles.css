@@ -1333,40 +1333,44 @@ tr:hover td {
 }
 
 /* Layout da página Execução: trilho esquerdo (sessões ativas) + conteúdo à direita */
-.exec-cols {
-  display: flex;
-  gap: 22px;
-  align-items: flex-start;
-  min-width: 0;
-}
-
-.exec-rail {
-  width: 25%;
-  min-width: 280px;
-  max-width: 380px;
-  flex-shrink: 0;
+/* Board horizontal: cards em fluxo, cabeçalhos em linha cheia, 100% da tela. */
+.exec-board {
   display: flex;
   flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+
+.exec-board .resumo-section {
+  margin: 14px 0 0;
+}
+
+.exec-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
   gap: 14px;
+  align-items: start;
+  width: 100%;
 }
 
-.exec-main {
-  flex: 1;
-  min-width: 0;
+.exec-cards .session-card {
+  margin: 0;
+  position: static;
+  padding: 14px 16px;
 }
 
-.exec-rail .session-grid {
-  grid-template-columns: 1fr;
+.session-command-time {
+  margin-top: 8px;
+  padding: 6px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-subtle);
+  color: var(--text-secondary);
+  font-size: 12px;
 }
 
 @media (max-width: 1100px) {
-  .exec-cols {
-    flex-direction: column;
-  }
-
-  .exec-rail {
-    width: 100%;
-    max-width: none;
+  .exec-cards {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -3576,4 +3580,278 @@ strong {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+/* ═══════════════════════════════════════════
+   Acompanhamento em 3 níveis (Resumo / Acompanhamento / Técnico)
+   ═══════════════════════════════════════════ */
+
+.resumo-view,
+.acompanhamento-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.resumo-kpis {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.resumo-kpis > div {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Card de resumo (Nível 1) */
+.summary-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.summary-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.summary-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+}
+
+.summary-list {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-secondary);
+}
+
+.summary-list-warn li {
+  color: var(--warn);
+}
+
+.summary-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.summary-files code {
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  font-size: 12px;
+}
+
+.summary-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.summary-full {
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.summary-result {
+  align-self: flex-start;
+  text-transform: capitalize;
+}
+
+/* Timeline de execução */
+.exec-timeline {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.exec-tl-item {
+  display: grid;
+  grid-template-columns: 64px 22px 1fr;
+  gap: 8px;
+  align-items: start;
+  padding: 5px 6px;
+  border-radius: var(--radius-sm);
+}
+
+.exec-tl-item:hover {
+  background: var(--surface-hover);
+}
+
+.exec-tl-item.exec-tl-error {
+  background: var(--err-subtle);
+}
+
+.exec-tl-item.exec-tl-blocked {
+  background: var(--warn-subtle);
+}
+
+.exec-tl-time {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  padding-top: 2px;
+}
+
+.exec-tl-icon {
+  text-align: center;
+  font-size: 13px;
+}
+
+.exec-tl-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.exec-tl-summary {
+  word-break: break-word;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.exec-tl-tool {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.exec-tl-detail {
+  margin-top: 6px;
+  padding: 8px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+}
+
+.exec-tl-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Bloqueio aguardando instrução */
+.blocked-reason {
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid var(--warn-subtle);
+  background: var(--warn-subtle);
+  border-radius: var(--radius-sm);
+}
+
+/* Fluxo de execução (Nível 2) */
+.fluxo-lista {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fluxo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+}
+
+.fluxo-item.fluxo-running {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.fluxo-item.fluxo-failed,
+.fluxo-item.fluxo-guardrail_blocked {
+  border-color: var(--err);
+  background: var(--err-subtle);
+}
+
+.fluxo-item.fluxo-blocked {
+  border-color: var(--warn);
+  background: var(--warn-subtle);
+}
+
+.fluxo-pos {
+  font-weight: 700;
+  color: var(--muted);
+  min-width: 34px;
+  text-align: center;
+}
+
+.fluxo-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.fluxo-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+/* Arquivos alterados / testes (Nível 2) */
+.diff-item {
+  border-top: 1px solid var(--surface-border);
+  padding: 8px 0;
+}
+
+.diff-item summary {
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.diff-item pre {
+  max-height: 320px;
+  overflow: auto;
+  margin: 8px 0 0;
+}
+
+.teste-item {
+  padding: 8px 0;
+  border-top: 1px solid var(--surface-border);
+}
+
+.teste-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.teste-item p {
+  margin: 4px 0 0;
+}
+
+/* Situação no Nível 1 (em execução / na fila / parada) */
+.situation-running {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+}
+
+.situation-stopped {
+  border-color: var(--warn);
+  background: var(--warn-subtle);
+}
+
+.situation-wait {
+  border-color: var(--info);
+  background: var(--info, rgba(96, 165, 250, 0.08));
 }

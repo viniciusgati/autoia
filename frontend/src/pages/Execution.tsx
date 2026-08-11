@@ -1,17 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import PhaseStepper from "../components/PhaseStepper";
 import ProposalCard from "../components/ProposalCard";
 import StatusBadge from "../components/StatusBadge";
 import TaskCard from "../components/TaskCard";
-import { formatToolCall, sessionEventLine } from "../lib/events";
-import { etapaAtualLabel, tempoDecorrido } from "../lib/tasks";
+import { formatToolCall } from "../lib/events";
 import type { Execution, Repository, RunEvent, Task } from "../types";
 
-/** Página global "Execução": sessões ativas ao vivo, atenção humana, propostas
- *  de tasks filhas (aprovação) e tasks paradas — um request/poll por vez.
- */
+/** Página global "Execução": seções em colunas horizontais ocupando 100% da tela.
+ *  Sessões ativas mostram apenas o comando atual + hora da chamada; propostas,
+ *  atenção humana, fila e paradas ficam em colunas ao lado. */
 
 const ATENCAO = ["needs_review", "waiting_approval", "blocked"];
 const PARADAS = ["paused", "created"];
@@ -62,89 +60,6 @@ export default function ExecutionPage() {
       !atencao.some((a) => a.id === t.id),
   );
 
-  const sections = (
-    <>
-      {/* Propostas de tasks filhas */}
-      {data.proposals.length > 0 && (
-        <>
-          <h3 className="resumo-section">Propostas (aprovação humana)</h3>
-          <div className="proposal-list">
-            {data.proposals.map((p) => (
-              <ProposalCard
-                key={p.id}
-                proposal={p}
-                repoNames={repoNames}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* Atenção humana */}
-      {atencao.length > 0 && (
-        <>
-          <h3 className="resumo-section">Atenção humana</h3>
-          <div className="task-grid">
-            {atencao.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                detailPath={`/${task.repository_id}/tasks`}
-                repoName={repoNames[task.repository_id]}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* Na fila */}
-      {emFila.length > 0 && (
-        <>
-          <h3 className="resumo-section">Na fila</h3>
-          <div className="task-grid">
-            {emFila.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                detailPath={`/${task.repository_id}/tasks`}
-                repoName={repoNames[task.repository_id]}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* Paradas */}
-      {paradas.length > 0 && (
-        <>
-          <h3 className="resumo-section">Paradas</h3>
-          <div className="task-grid">
-            {paradas.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                detailPath={`/${task.repository_id}/tasks`}
-                repoName={repoNames[task.repository_id]}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      {data.tasks.length === 0 && data.proposals.length === 0 && (
-        <p className="muted">Nada em execução neste momento.</p>
-      )}
-    </>
-  );
-
   return (
     <div className="resumo">
       <div className="resumo-header">
@@ -179,11 +94,13 @@ export default function ExecutionPage() {
         </select>
       </div>
 
-      {running.length > 0 ? (
-        <div className="exec-cols">
-          {/* Trilho esquerdo (~25%): sessões ativas */}
-          <div className="exec-rail">
-            <h3 className="resumo-section">Sessões ativas</h3>
+      <div className="exec-board">
+        {/* Sessões ativas */}
+        <h3 className="resumo-section">Sessões ativas</h3>
+        {running.length === 0 ? (
+          <p className="muted small">Nada em execução.</p>
+        ) : (
+          <div className="exec-cards">
             {running.map((task) => {
               const step = task.steps.find((s) => s.status === "running");
               const events = step ? data.current_events[String(step.id)] ?? [] : [];
@@ -192,18 +109,88 @@ export default function ExecutionPage() {
               );
             })}
           </div>
+        )}
 
-          {/* Conteúdo principal (75%): propostas, atenção humana, fila, paradas */}
-          <div className="exec-main">{sections}</div>
-        </div>
-      ) : (
-        sections
-      )}
+        {/* Propostas de tasks filhas */}
+        <h3 className="resumo-section">Propostas</h3>
+        {data.proposals.length === 0 ? (
+          <p className="muted small">Sem propostas aguardando aprovação.</p>
+        ) : (
+          <div className="exec-cards proposal-list">
+            {data.proposals.map((p) => (
+              <ProposalCard
+                key={p.id}
+                proposal={p}
+                repoNames={repoNames}
+                onChanged={load}
+                onError={setError}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Atenção humana */}
+        <h3 className="resumo-section">Atenção humana</h3>
+        {atencao.length === 0 ? (
+          <p className="muted small">Nada precisa de humano.</p>
+        ) : (
+          <div className="exec-cards task-grid">
+            {atencao.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                detailPath={`/${task.repository_id}/tasks`}
+                repoName={repoNames[task.repository_id]}
+                onChanged={load}
+                onError={setError}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Na fila */}
+        <h3 className="resumo-section">Na fila</h3>
+        {emFila.length === 0 ? (
+          <p className="muted small">Nada aguardando worker.</p>
+        ) : (
+          <div className="exec-cards task-grid">
+            {emFila.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                detailPath={`/${task.repository_id}/tasks`}
+                repoName={repoNames[task.repository_id]}
+                onChanged={load}
+                onError={setError}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Paradas */}
+        <h3 className="resumo-section">Paradas</h3>
+        {paradas.length === 0 ? (
+          <p className="muted small">Nenhuma tarefa parada.</p>
+        ) : (
+          <div className="exec-cards task-grid">
+            {paradas.map((task) => (
+              <TaskCard
+                key={task.id}
+                task={task}
+                detailPath={`/${task.repository_id}/tasks`}
+                repoName={repoNames[task.repository_id]}
+                onChanged={load}
+                onError={setError}
+              />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
 
-/** Card de sessão ativa: etapa atual, comando atual, feed ao vivo, próximos passos. */
+/** Card de sessão ativa (compacto): só o comando atual com a hora da chamada. */
 function RunningSession({
   task,
   events,
@@ -214,94 +201,57 @@ function RunningSession({
   repoNames: Record<number, string>;
 }) {
   const runningStep = task.steps.find((s) => s.status === "running") ?? null;
-  const toolCall = [...events].find((e) => e.kind === "tool_call");
-  const comando = toolCall ? formatToolCall(toolCall) : "";
-  const ahead = proximosPassos(task);
+  // events vêm em ordem decrescente — o primeiro tool_call é o mais recente.
+  const toolCall = [...events].find((e) => e.kind === "tool_call") ?? null;
+  const comando = toolCall ? formatToolCall(toolCall) : "aguardando interação…";
+  const hora = toolCall
+    ? new Date(toolCall.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
+    : null;
   const repoName = repoNames[task.repository_id];
 
   return (
     <div className="session-card">
       <div className="session-head">
-        <div className="session-title-wrap">
-          <span className="session-eyebrow">
-            sessão ativa{runningStep ? ` · ${runningStep.robot?.name ?? "?"}` : ""}
-          </span>
-          <Link to={`/${task.repository_id}/tasks/${task.id}`} className="resumo-title">
-            #{task.id} {task.title}
-          </Link>
-        </div>
+        <Link to={`/${task.repository_id}/tasks/${task.id}`} className="resumo-title">
+          #{task.id} {task.title}
+        </Link>
         <StatusBadge status={task.status} />
       </div>
 
       {repoName && <div className="muted small">projeto: {repoName}</div>}
 
-      <div className="session-grid">
+      <div className="session-grid" style={{ gridTemplateColumns: "1fr" }}>
         <div className="session-field">
-          <span className="session-label">Etapa atual</span>
-          <span className="session-value" title={etapaAtualLabel(task)}>
-            {etapaAtualLabel(task)}
-          </span>
+          <span className="session-label">Etapa</span>
+          <span className="session-value">{runningStep?.robot?.name ?? etapaAtual(task)}</span>
         </div>
         <div className="session-field">
           <span className="session-label">Comando atual</span>
           <span className="session-value mono" title={comando}>
-            {comando || "aguardando interação…"}
+            {comando}
           </span>
         </div>
       </div>
 
-      <PhaseStepper task={task} />
-
-      {ahead.length > 0 && (
-        <div className="session-field" style={{ marginTop: 8 }}>
-          <span className="session-label">Próximos passos</span>
-          <span className="session-value">
-            {ahead.join(" · ")}
-          </span>
+      {hora && (
+        <div className="session-command-time">
+          <span className="mono">{hora}</span> — chamada do comando
         </div>
       )}
 
       <div className="session-foot">
-        <span className="muted small">
-          gasto {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
-          {runningStep ? ` · ${tempoDecorrido(runningStep)}` : ""}
-        </span>
+        <span className="muted small">gasto {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$</span>
         <Link to={`/${task.repository_id}/tasks/${task.id}`} className="link-btn">
           ver detalhes →
         </Link>
       </div>
-
-      {events.length > 0 && (
-        <ul className="session-events">
-          {events.map((event) => (
-            <li key={event.id} className={`session-event session-event-${event.kind}`}>
-              <span className="mono time">{new Date(event.ts).toLocaleTimeString()}</span>
-              <span className="kind">{event.kind}</span>
-              <span className="session-event-text">{sessionEventLine(event)}</span>
-            </li>
-          ))}
-        </ul>
-      )}
     </div>
   );
 }
 
-/** Fases pendentes à frente da fase atual + marco de merge/push na main. */
-function proximosPassos(task: Task): string[] {
-  const steps = [...task.steps].sort((a, b) => a.position - b.position);
-  const running = steps.find((s) => s.status === "running");
-  const cur = running ?? steps.find((s) => s.status === "pending") ?? steps[task.current_step];
-  if (!cur) return [];
-  const ahead = steps.filter(
-    (s) => s.position > cur.position && s.status === "pending",
-  );
-  const lines: string[] = [];
-  const firstPost = ahead.find((s) => s.post_merge);
-  if (firstPost) {
-    lines.push("merge + push na main");
-  }
-  for (const s of ahead) {
-    lines.push(`F${s.position} ${s.robot?.name ?? "?"}`);
-  }
-  return lines;
+function etapaAtual(task: Task): string {
+  const step = task.steps.find((s) => s.status === "running")
+    ?? [...task.steps].sort((a, b) => a.position - b.position)
+      .find((s) => s.status === "pending");
+  return step?.robot?.name ?? "—";
 }

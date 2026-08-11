@@ -96,6 +96,7 @@ export default function RepoDashboard() {
         risky_patterns_extra: repo.risky_patterns_extra,
         db_rule: repo.db_rule,
         allow_external_tasks: repo.allow_external_tasks,
+        auto_summary: repo.auto_summary,
         default_pipeline_id: repo.default_pipeline_id,
       });
       setRepo(updated);
@@ -229,6 +230,14 @@ export default function RepoDashboard() {
                   />
                   receber tasks de outros projetos
                   <HelpTip>Outros repositórios podem criar tarefas neste projeto. Ex: o repo de código cria uma task de documentação no repo de docs.</HelpTip>
+                </label>
+                <label className="post-merge-label">
+                  <input type="checkbox"
+                    checked={repo.auto_summary}
+                    onChange={(e) => setRepo({ ...repo, auto_summary: e.target.checked })}
+                  />
+                  gerar resumo automaticamente
+                  <HelpTip>Gera (e regenera) o resumo do desenvolvimento por LLM a cada avanço de fase e quando a task para (final, revisão, bloqueio). O resumo é opcional — nunca afeta a execução.</HelpTip>
                 </label>
               </div>
 

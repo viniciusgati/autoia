@@ -7,9 +7,10 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from sqlalchemy import func
-from sqlalchemy.orm import Session, joinedload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..models import (
+    STEP_BLOCKED,
     STEP_FAILED,
     STEP_GUARDRAIL_BLOCKED,
     STEP_PENDING,
@@ -32,6 +33,7 @@ from ..models import (
 )
 from ..schemas import (
     ApproveStepRequest,
+    BlockedContinueRequest,
     BouncebackRequest,
     FeedbackCreate,
     RetryRequest,
@@ -39,9 +41,13 @@ from ..schemas import (
     TaskCreate,
     TaskOut,
     TaskProposalOut,
+    TaskSummaryOut,
     TaskUpdateRequest,
+    TimelineEventOut,
 )
+from ..timeline import derive_task_timeline
 from ..worker.runner import _pm_decide, _system_event, create_child_task
+from ..worker.summarizer import summarize_task
 from .deps import get_repository_or_404, get_session, get_settings
 
 log = logging.getLogger("autoia.api")
@@ -57,6 +63,7 @@ def _task_query(session: Session):
         joinedload(Task.repository),
         joinedload(Task.subtasks),
         joinedload(Task.proposals),
+        selectinload(Task.summaries),
     )
 
 
@@ -492,8 +499,15 @@ def update_task(
 
     Permitida apenas antes do fluxo (created) ou durante uma parada por
     aprovação humana (waiting_approval) — nunca no meio da execução, para não
-    divergir do que o PO refinou.
+    divergir do que o PO refinou. O campo `details` (detalhes da implementação)
+    pode ser editado a qualquer momento: complementa o contexto e entra no
+    handoff das próximas fases, diferenciado da solicitação original.
     """
+    if data.details is not None:
+        task = _get_task_or_404(session, task_id)
+        task.details = data.details
+        session.commit()
+        return _get_task_or_404(session, task_id)
     task = _get_task_or_404(session, task_id)
     if task.status not in ("created", TASK_WAITING_APPROVAL):
         raise HTTPException(
@@ -562,3 +576,112 @@ def pm_decide(
 
     background_tasks.add_task(_pm_thread)
     return task
+
+
+# ---------- Resumo do desenvolvimento (LLM dedicada) ----------
+
+
+@router.get("/{task_id}/summary", response_model=TaskSummaryOut | None)
+def get_task_summary(task_id: int, session: Session = Depends(get_session)):
+    """Resumo estruturado mais recente do desenvolvimento (None se nunca gerado)."""
+    task = _get_task_or_404(session, task_id)
+    return task.summary
+
+
+@router.post("/{task_id}/summary/regenerate", response_model=TaskSummaryOut | None)
+def regenerate_summary(
+    task_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    session: Session = Depends(get_session),
+):
+    """Regenera o resumo do desenvolvimento (em background, via executor da task).
+
+    Útil após novas fases, retorno de etapa, intervenções ou mudança de modelo.
+    A falha na geração NUNCA impede o desenvolvimento nem altera dados originais.
+    """
+    task = _get_task_or_404(session, task_id)
+
+    def _summarize() -> None:
+        try:
+            summarize_task(request.app.state.settings, request.app.state.Session, task_id)
+        except Exception:
+            log.exception("resumo falhou para a task %s", task_id)
+
+    background_tasks.add_task(_summarize)
+    return task.summary
+
+
+# ---------- Timeline cronológica da execução ----------
+
+
+@router.get("/{task_id}/timeline", response_model=list[TimelineEventOut])
+def task_timeline(task_id: int, session: Session = Depends(get_session)):
+    """Timeline cronológica do desenvolvimento (eventos determinísticos dos RunEvent)."""
+    task = _get_task_or_404(session, task_id)
+    return [TimelineEventOut(**ev) for ev in derive_task_timeline(session, task)]
+
+
+# ---------- Bloqueio + retomada por instrução ----------
+
+
+@router.post("/{task_id}/blocked/continue", response_model=TaskOut)
+def continue_blocked(
+    task_id: int,
+    data: BlockedContinueRequest,
+    session: Session = Depends(get_session),
+):
+    """Retoma uma fase bloqueada com a instrução do usuário.
+
+    O desenvolvimento volta a partir do ponto em que foi interrompido (mesma task,
+    mesma fase/etapa, mesmo contexto e histórico): a instrução é armazenada
+    separadamente do contexto original, entra no handoff/prompt da retomada e
+    aparece na timeline como intervenção do usuário.
+    """
+    task = _get_task_or_404(session, task_id)
+    if task.status != TASK_BLOCKED:
+        raise HTTPException(
+            400, f"tarefa não está bloqueada aguardando instrução (status: {task.status})"
+        )
+    blocked_steps = [st for st in task.steps if st.status == STEP_BLOCKED]
+    if not blocked_steps:
+        raise HTTPException(400, "nenhuma fase bloqueada aguardando instrução")
+    step = max(blocked_steps, key=lambda st: st.position)
+
+    # A instrução é persistida separadamente (não sobrescreve description/details).
+    task.resume_instruction = data.instruction
+    task.error = None
+    task.status = TASK_QUEUED
+
+    # Reabre a fase exata onde o desenvolvimento parou, preservando o histórico.
+    step.status = STEP_PENDING
+    step.attempt += 1
+    step.error = None
+    step.started_at = None
+    step.finished_at = None
+
+    def _event(kind: str, payload: dict) -> None:
+        max_seq = (
+            session.query(func.max(RunEvent.seq))
+            .filter(RunEvent.step_id == step.id)
+            .scalar() or 0
+        )
+        session.add(RunEvent(
+            step_id=step.id,
+            seq=max_seq + 1,
+            kind=kind,
+            payload=payload,
+        ))
+
+    _event("user_intervention", {
+        "instruction": data.instruction,
+        "blocked_step": step.position,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+    _event("execution_resumed", {
+        "step": step.position,
+        "instruction": data.instruction,
+        "ts": datetime.now(timezone.utc).isoformat(),
+    })
+    session.commit()
+    return _get_task_or_404(session, task_id)

@@ -1,17 +1,28 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
+import ArtifactThumbs from "../components/ArtifactThumbs";
+import BlockedPanel from "../components/BlockedPanel";
+import ExecTimeline from "../components/ExecTimeline";
+import FluxoSteps from "../components/FluxoSteps";
 import PhasePanel from "../components/PhasePanel";
+import PhaseStepper from "../components/PhaseStepper";
 import StatusBadge from "../components/StatusBadge";
 import TaskChat from "../components/TaskChat";
+import TaskSummaryCard from "../components/TaskSummaryCard";
 import Timeline from "../components/Timeline";
 import { buildTurns } from "../lib/chat";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
-import { etapaAtualLabel } from "../lib/tasks";
-import type { Repository, RunEvent, Task, TaskStep } from "../types";
+import { diffSummary, etapaAtualLabel, tempoDecorrido } from "../lib/tasks";
+import type { Repository, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
-/** Detalhe da task: header sticky + timeline-chat (Conversa | Técnico). */
+/** Detalhe da task em 3 níveis de acompanhamento:
+ *  - Resumo (Nível 1): "o que aconteceu?" — resumo LLM + timeline compacta;
+ *  - Acompanhamento (Nível 2): "como foi feito e qual o estado atual?" — solicitação,
+ *    contexto, tarefas, fluxo, arquivos, testes, timeline completa e intervenções;
+ *  - Técnico (Nível 3): "o que exatamente aconteceu tecnicamente?" — chat/logs/
+ *    payloads (conteúdo completo, nada escondido). */
 
 export default function TaskDetail() {
   const { repoId, taskId: taskIdStr } = useParams<{ repoId: string; taskId: string }>();
@@ -19,8 +30,9 @@ export default function TaskDetail() {
   const repoIdNum = Number(repoId);
 
   const [task, setTask] = useState<Task | null>(null);
-  const [view, setView] = useState<"conversa" | "tecnico">("conversa");
+  const [view, setView] = useState<"resumo" | "acompanhamento" | "tecnico">("resumo");
   const [eventsByStep, setEventsByStep] = useState<Record<number, RunEvent[]>>({});
+  const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [panelStep, setPanelStep] = useState<TaskStep | null>(null);
   const [runningSubtask, setRunningSubtask] = useState<{position: number; title: string} | null>(null);
   const [repoNames, setRepoNames] = useState<Record<number, string>>({});
@@ -44,6 +56,13 @@ export default function TaskDetail() {
   const [storyDesc, setStoryDesc] = useState("");
   const [storyCriteria, setStoryCriteria] = useState("");
   const [storyBusy, setStoryBusy] = useState(false);
+  // Detalhes da implementação (contexto adicional do usuário)
+  const [detailsText, setDetailsText] = useState("");
+  const [detailsBusy, setDetailsBusy] = useState(false);
+  // Resumo do desenvolvimento (LLM dedicada)
+  const [summaryBusy, setSummaryBusy] = useState(false);
+  // Retomada de fase bloqueada
+  const [continueBusy, setContinueBusy] = useState(false);
   const storyInit = useRef(false);
   const prevStatus = useRef<string | null>(null);
 
@@ -63,6 +82,7 @@ export default function TaskDetail() {
           setTask(t);
           setFeedbackText((current) => current || t.feedback || "");
           setBouncebackTarget((prev) => prev || suggestedBouncebackTarget(t));
+          setDetailsText((current) => current || t.details || "");
           const gated = t.steps.find((s) => s.status === "pending" && s.pause_before);
           if (
             !storyInit.current ||
@@ -114,6 +134,13 @@ export default function TaskDetail() {
           }
         })
         .catch((e) => setError(String(e)));
+    load();
+    const timer = setInterval(load, 1500);
+    return () => clearInterval(timer);
+  }, [taskId]);
+
+  useEffect(() => {
+    const load = () => api.getTaskTimeline(taskId).then(setTimeline).catch(() => {});
     load();
     const timer = setInterval(load, 1500);
     return () => clearInterval(timer);
@@ -276,6 +303,45 @@ export default function TaskDetail() {
     }
   };
 
+  const saveDetails = async () => {
+    setDetailsBusy(true);
+    try {
+      await api.updateTaskStory(taskId, { details: detailsText });
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setDetailsBusy(false);
+    }
+  };
+
+  const regenerateSummary = async () => {
+    setSummaryBusy(true);
+    try {
+      await api.regenerateSummary(taskId);
+      window.setTimeout(refresh, 2500);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSummaryBusy(false);
+    }
+  };
+
+  const continueBlocked = async (instruction: string) => {
+    setContinueBusy(true);
+    try {
+      await api.continueBlocked(taskId, instruction);
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setContinueBusy(false);
+    }
+  };
+
+  const scrollToBlocked = () => {
+    document.getElementById("bloqueio-instrucao")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
   const scrollToApproval = () => {
     document.getElementById("aprovacao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
@@ -294,7 +360,7 @@ export default function TaskDetail() {
   const live = runningStep
     ? { step: runningStep, toolCall: runningToolCall, events: runningEvents }
     : null;
-  const pmCandidates = ["failed", "blocked", "needs_review"].includes(task.status);
+  const blocked = task.status === "blocked" && task.block_reason != null;
 
   function subtaskAlert(task: Task): {message: string; level: "critical" | "warning"} | null {
     const subs = task.subtasks || [];
@@ -316,6 +382,9 @@ export default function TaskDetail() {
   }
 
   const subAlert = subtaskAlert(task);
+  const subtasksDone = (task.subtasks || []).filter((s) => s.status === "done").length;
+  const verifySteps = steps.filter((s) => s.robot?.role === "verify" && (s.summary || s.error));
+  const changedSteps = steps.filter((s) => s.diff_stat);
 
   return (
     <div>
@@ -369,9 +438,9 @@ export default function TaskDetail() {
         {task.subtasks && task.subtasks.length > 0 && (
           <div className="meta" style={{ marginTop: 4 }}>
             <span>
-              Subtarefas:{" "}
+              Tarefas:{" "}
               <strong>
-                {task.subtasks.filter((s) => s.status === "done").length}/{task.subtasks.length}
+                {subtasksDone}/{task.subtasks.length}
               </strong>{" "}
               concluídas
             </span>
@@ -398,7 +467,7 @@ export default function TaskDetail() {
             </div>
             {runningSubtask && (
               <div>
-                <span className="session-label">Subtarefa atual</span>
+                <span className="session-label">Tarefa atual</span>
                 <span className="task-live-value">
                   {runningSubtask.position + 1}/{task.subtasks?.length ?? "?"} · {runningSubtask.title}
                 </span>
@@ -424,6 +493,12 @@ export default function TaskDetail() {
             <button onClick={scrollToApproval}>ir para a aprovação ↓</button>
           </div>
         )}
+        {blocked && (
+          <div className="sticky-alert sticky-alert-critical">
+            <span>⛔ Desenvolvimento bloqueado — aguardando sua instrução para continuar</span>
+            <button onClick={scrollToBlocked}>dar instrução ↓</button>
+          </div>
+        )}
         {task.status === "paused" && (
           <div className="sticky-alert">
             <span>⏸ Tarefa pausada — o pipeline não avança até retomar</span>
@@ -443,59 +518,640 @@ export default function TaskDetail() {
 
       {task.error && <div className="error">{task.error}</div>}
 
-      {/* Pipeline: Conversa | Técnico */}
+      {/* Níveis de acompanhamento */}
       <div className="meta" style={{ margin: "12px 0" }}>
         <div className="view-toggle">
           <button
-            className={view === "conversa" ? "view-active" : ""}
-            onClick={() => setView("conversa")}
+            className={view === "resumo" ? "view-active" : ""}
+            onClick={() => setView("resumo")}
+            title="O que aconteceu?"
           >
-            conversa
+            resumo
+          </button>
+          <button
+            className={view === "acompanhamento" ? "view-active" : ""}
+            onClick={() => setView("acompanhamento")}
+            title="Como o trabalho foi realizado e qual é o estado atual?"
+          >
+            acompanhamento
           </button>
           <button
             className={view === "tecnico" ? "view-active" : ""}
             onClick={() => setView("tecnico")}
+            title="O que exatamente aconteceu tecnicamente (auditoria)?"
           >
             técnico
           </button>
         </div>
       </div>
 
-      {view === "conversa" ? (
-        <TaskChat
-          task={task}
-          turns={turns}
-          repoNames={repoNames}
-          live={live}
-          onProposalsChanged={refresh}
-          onError={setError}
-        />
-      ) : (
-        <>
-          <h3>Pipeline</h3>
-          <Timeline
+      {/* ─────────────── Nível 1: Resumo ─────────────── */}
+      {view === "resumo" && (
+        <div className="resumo-view">
+          <SituacaoCard
+            task={task}
+            runningStep={runningStep}
+            runningToolCall={runningToolCall}
+            onGoAcompanhamento={() => setView("acompanhamento")}
+          />
+
+          {blocked && (
+            <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} />
+          )}
+
+          <TaskSummaryCard summary={task.summary} onRegenerate={regenerateSummary} busy={summaryBusy} />
+
+          <div className="card">
+            <div className="card-title">
+              <strong>Estado atual</strong>
+            </div>
+            <div className="resumo-kpis">
+              <div>
+                <span className="form-label">Resultado</span>
+                <StatusBadge status={task.status} />
+              </div>
+              <div>
+                <span className="form-label">Etapa atual</span>
+                <span>{etapaAtualLabel(task) || "—"}</span>
+              </div>
+              {task.subtasks.length > 0 && (
+                <div>
+                  <span className="form-label">Tarefas</span>
+                  <span>{subtasksDone} concluídas · {task.subtasks.length - subtasksDone} pendentes</span>
+                </div>
+              )}
+              <div>
+                <span className="form-label">Custo</span>
+                <span>{task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$</span>
+              </div>
+            </div>
+            {changedSteps.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <span className="form-label">Principais alterações</span>
+                <ul className="summary-list">
+                  {changedSteps.map((s) => (
+                    <li key={s.id}>
+                      Fase {s.position} ({s.robot?.name ?? "?"}) · {diffSummary(s.diff_stat) ?? "arquivos alterados"}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+
+          {/* Etapas com retorno (re-executa a partir da fase escolhida) */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Etapas</strong>
+              <button className="link-btn" onClick={() => setView("acompanhamento")}>
+                ver acompanhamento →
+              </button>
+            </div>
+            <PhaseStepper task={task} showLabels />
+            <FluxoSteps
+              task={task}
+              steps={steps}
+              onRetry={retry}
+              repoId={repoIdNum}
+              taskId={taskId}
+            />
+            <p className="muted small" style={{ margin: "8px 0 0" }}>
+              "Voltar para esta fase" re-executa a partir dela: a nova execução aparece
+              no fim da timeline e o histórico anterior é preservado.
+            </p>
+          </div>
+
+          {/* Screenshots por fase (thumbs expandíveis) */}
+          {steps.some((s) => (s.artifacts ?? []).length > 0) && (
+            <div className="card">
+              <div className="card-title">
+                <strong>Screenshots</strong>
+                <span className="muted small">evidência visual gerada pelos robôs · clique para ampliar</span>
+              </div>
+              {steps.map((s) => (
+                <ArtifactThumbs
+                  key={s.id}
+                  artifacts={s.artifacts ?? []}
+                  label={`Fase ${s.position} · ${s.robot?.name ?? "?"}`}
+                />
+              ))}
+            </div>
+          )}
+
+          <div className="card">
+            <div className="card-title">
+              <strong>O que aconteceu (timeline)</strong>
+              <button className="link-btn" onClick={() => setView("acompanhamento")}>
+                ver detalhes →
+              </button>
+            </div>
+            <ExecTimeline events={timeline} level={1} />
+          </div>
+
+          {/* Ações de intervenção humana disponíveis direto no resumo */}
+          <HumanIntervention
+            task={task}
             steps={steps}
-            selectedId={panelStep?.id ?? null}
-            onSelect={(id) => {
-              const step = steps.find((s) => s.id === id) ?? null;
-              setPanelStep(step);
-            }}
-            onRetry={retry}
+            extraBudget={extraBudget}
+            setExtraBudget={setExtraBudget}
+            bouncebackTarget={bouncebackTarget}
+            setBouncebackTarget={setBouncebackTarget}
+            bouncebackNote={bouncebackNote}
+            setBouncebackNote={setBouncebackNote}
+            reviewedBy={reviewedBy}
+            setReviewedBy={setReviewedBy}
+            bouncebackBusy={bouncebackBusy}
+            bounceback={bounceback}
+            review={review}
+            approvalNote={approvalNote}
+            setApprovalNote={setApprovalNote}
+            approvalBusy={approvalBusy}
+            approveGate={approveGate}
+            voltarTarget={voltarTarget}
+            setVoltarTarget={setVoltarTarget}
+            voltarFase={voltarFase}
+            pmBusy={pmBusy}
+            pmDecide={pmDecide}
+            storyDesc={storyDesc}
+            setStoryDesc={setStoryDesc}
+            storyCriteria={storyCriteria}
+            setStoryCriteria={setStoryCriteria}
+            storyBusy={storyBusy}
+            saveStory={saveStory}
           />
-          <PhasePanel
-            step={panelStep}
-            repoId={repoIdNum}
-            taskId={taskId}
-            taskStatus={task.status}
-            onClose={() => setPanelStep(null)}
-            onRetry={retry}
+        </div>
+      )}
+
+      {/* ─────────────── Nível 2: Acompanhamento ─────────────── */}
+      {view === "acompanhamento" && (
+        <div className="acompanhamento-view">
+          {blocked && (
+            <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} />
+          )}
+
+          {/* Solicitação */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Solicitação</strong>
+              <span className="muted small">contexto original</span>
+            </div>
+            {task.description ? (
+              <Markdown text={task.description} />
+            ) : (
+              <p className="muted">Sem descrição.</p>
+            )}
+            {task.acceptance_criteria && (
+              <>
+                <div className="form-label" style={{ marginTop: 8 }}>Critérios de aceite</div>
+                <Markdown text={task.acceptance_criteria} />
+              </>
+            )}
+          </div>
+
+          {/* Contexto adicional (detalhes do usuário) */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Detalhes adicionados pelo usuário</strong>
+              <span className="muted small">contexto da implementação — entra no handoff das próximas fases</span>
+            </div>
+            <div className="form-field">
+              <textarea
+                rows={3}
+                value={detailsText}
+                onChange={(e) => setDetailsText(e.target.value)}
+                placeholder="Complemente ou corrija o contexto antes ou durante o desenvolvimento…"
+              />
+            </div>
+            <div className="form-actions">
+              <button disabled={detailsBusy} onClick={saveDetails}>
+                {detailsBusy ? "salvando…" : "salvar detalhes"}
+              </button>
+            </div>
+          </div>
+
+          {/* Fluxo de execução */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Fluxo de execução</strong>
+              <span className="muted small">etapa atual destacada</span>
+            </div>
+            <PhaseStepper task={task} showLabels />
+            <FluxoSteps
+              task={task}
+              steps={steps}
+              onRetry={retry}
+              repoId={repoIdNum}
+              taskId={taskId}
+            />
+          </div>
+
+          {/* Tarefas */}
+          {task.subtasks.length > 0 && (
+            <div className="card">
+              <div className="card-title">
+                <strong>Tarefas</strong>
+                <span className="muted small">origem: plano do PO · o agente pode sugerir outras</span>
+              </div>
+              <div className="subtask-list">
+                {[...task.subtasks].sort((a, b) => a.position - b.position).map((st) => (
+                  <div key={st.id} className={`subtask-card subtask-${st.status}`}>
+                    <span className="subtask-pos">{st.position + 1}</span>
+                    <div className="subtask-body">
+                      <div className="subtask-head">
+                        <strong>{st.title}</strong>
+                        <StatusBadge status={st.status} />
+                        <span className="muted small">tentativa {st.attempt}</span>
+                        {st.verdict && <span className="muted small">· veredicto: {st.verdict}</span>}
+                      </div>
+                      {st.description && <p className="muted small">{st.description}</p>}
+                      {st.summary && (
+                        <details className="subtask-summary">
+                          <summary>resumo da fase</summary>
+                          <Markdown text={st.summary} />
+                        </details>
+                      )}
+                      {st.error && <div className="error small">{st.error}</div>}
+                    </div>
+                    <div className="subtask-actions">
+                      {(st.status === "failed" || st.status === "implementing" || st.status === "verifying" || (st.status === "pending" && st.attempt > 1)) && (
+                        <button className="danger small" onClick={() => subtaskRetry(st.position)}>
+                          repetir
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              {task.proposals.filter((p) => p.status === "pending").length > 0 && (
+                <p className="muted small" style={{ marginTop: 8 }}>
+                  🧩 {task.proposals.filter((p) => p.status === "pending").length} proposta(s) de tarefa
+                  sugerida(s) pelo agente aguardando aprovação — veja na aba técnica.
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Arquivos alterados */}
+          {changedSteps.length > 0 && (
+            <div className="card">
+              <div className="card-title">
+                <strong>Arquivos alterados</strong>
+              </div>
+              {changedSteps.map((s) => (
+                <details key={s.id} className="diff-item">
+                  <summary>
+                    Fase {s.position} ({s.robot?.name ?? "?"}) · {diffSummary(s.diff_stat) ?? "diff"}
+                  </summary>
+                  <pre className="step-error">{s.diff_stat}</pre>
+                </details>
+              ))}
+            </div>
+          )}
+
+          {/* Resultado dos testes */}
+          {verifySteps.length > 0 && (
+            <div className="card">
+              <div className="card-title">
+                <strong>Resultado dos testes</strong>
+              </div>
+              {verifySteps.map((s) => (
+                <div key={s.id} className="teste-item">
+                  <div className="teste-head">
+                    <strong>{s.robot?.name ?? "Tester"}</strong>
+                    <StatusBadge status={s.status} />
+                    {s.verdict && <span className="muted small">veredicto: {s.verdict}</span>}
+                  </div>
+                  {s.summary && <p className="muted small">{s.summary.slice(0, 400)}{s.summary.length > 400 ? "…" : ""}</p>}
+                  {s.error && <div className="error small">{s.error}</div>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Timeline completa */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Timeline da execução</strong>
+              <span className="muted small">todas as ações do agente</span>
+            </div>
+            <ExecTimeline events={timeline} level={2} />
+          </div>
+
+          {/* Intervenções humanas (revisão/aprovação/PM) + feedback */}
+          <HumanIntervention
+            task={task}
+            steps={steps}
+            extraBudget={extraBudget}
+            setExtraBudget={setExtraBudget}
+            bouncebackTarget={bouncebackTarget}
+            setBouncebackTarget={setBouncebackTarget}
+            bouncebackNote={bouncebackNote}
+            setBouncebackNote={setBouncebackNote}
+            reviewedBy={reviewedBy}
+            setReviewedBy={setReviewedBy}
+            bouncebackBusy={bouncebackBusy}
+            bounceback={bounceback}
+            review={review}
+            approvalNote={approvalNote}
+            setApprovalNote={setApprovalNote}
+            approvalBusy={approvalBusy}
+            approveGate={approveGate}
+            voltarTarget={voltarTarget}
+            setVoltarTarget={setVoltarTarget}
+            voltarFase={voltarFase}
+            pmBusy={pmBusy}
+            pmDecide={pmDecide}
+            storyDesc={storyDesc}
+            setStoryDesc={setStoryDesc}
+            storyCriteria={storyCriteria}
+            setStoryCriteria={setStoryCriteria}
+            storyBusy={storyBusy}
+            saveStory={saveStory}
           />
+        </div>
+      )}
+
+      {/* ─────────────── Nível 3: Técnico ─────────────── */}
+      {view === "tecnico" && (
+        <>
+          <div className="card">
+            <div className="card-title">
+              <strong>Execução técnica</strong>
+              <span className="muted small">
+                prompt completo, respostas, tool calls, retornos, logs — auditoria e debug
+              </span>
+            </div>
+            <TaskChat
+              task={task}
+              turns={turns}
+              repoNames={repoNames}
+              live={live}
+              onProposalsChanged={refresh}
+              onError={setError}
+            />
+            <h3 style={{ marginTop: 18 }}>Fases (pipeline)</h3>
+            <Timeline
+              steps={steps}
+              selectedId={panelStep?.id ?? null}
+              onSelect={(id) => {
+                const step = steps.find((s) => s.id === id) ?? null;
+                setPanelStep(step);
+              }}
+              onRetry={retry}
+            />
+            <PhasePanel
+              step={panelStep}
+              repoId={repoIdNum}
+              taskId={taskId}
+              taskStatus={task.status}
+              onClose={() => setPanelStep(null)}
+              onRetry={retry}
+            />
+          </div>
         </>
       )}
 
+      {/* Relações */}
+      {(task.children && task.children.length > 0) || task.parent_task_id ? (
+        <>
+          <h3>Relações</h3>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+            {task.parent_task_id && (
+              <div className="muted small">
+                ← tarefa pai:{" "}
+                <Link to={`/${repoId}/tasks/${task.parent_task_id}`}>
+                  #{task.parent_task_id}
+                </Link>
+              </div>
+            )}
+            {task.children && task.children.length > 0 && task.children.map((child) => (
+              <div
+                key={child.id}
+                className="resumo-card"
+                style={{ margin: 0, padding: "10px 14px" }}
+              >
+                <div className="resumo-line">
+                  <span className="resumo-title">
+                    {child.status === "created" && "📝 "}
+                    #{child.id} {child.title}
+                  </span>
+                  <StatusBadge status={child.status} />
+                </div>
+                <div className="muted small" style={{ marginTop: 4 }}>
+                  {child.repository_id !== task.repository_id && (
+                    <span>repo #{child.repository_id} · </span>
+                  )}
+                  {child.kind} · {child.cost_spent.toFixed(2)} US$
+                </div>
+                {child.status === "created" && (
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <button
+                      onClick={async () => {
+                        try { await api.startTask(child.id); await refresh(); }
+                        catch (e) { setError(String(e)); }
+                      }}
+                    >
+                      aprovar e iniciar
+                    </button>
+                    <button
+                      className="danger"
+                      onClick={async () => {
+                        if (!confirm(`Recusar tarefa #${child.id} "${child.title}"?`)) return;
+                        try { await api.deleteTask(child.id); await refresh(); }
+                        catch (e) { setError(String(e)); }
+                      }}
+                    >
+                      recusar
+                    </button>
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </>
+      ) : null}
+
+      {/* Feedback externo */}
+      <h3>Feedback externo</h3>
+      <div className="feedback-box">
+        <div className="form-field">
+          <label className="form-label">Nota de feedback</label>
+          <textarea
+            className="feedback-input"
+            rows={3}
+            placeholder="Erro de deploy, pedido de ajuste, info do ambiente… (entra no handoff das próximas fases)"
+            value={feedbackText}
+            onChange={(e) => setFeedbackText(e.target.value)}
+          />
+        </div>
+        <div className="form-actions">
+          <button disabled={feedbackBusy || !feedbackText.trim()} onClick={saveFeedback}>
+            salvar nota
+          </button>
+          <button className="danger" disabled={feedbackBusy || !task.feedback} onClick={clearFeedback}>
+            limpar
+          </button>
+          <span className="muted small" style={{ alignSelf: "center" }}>
+            {task.feedback ? "a nota entra no handoff das próximas fases" : "sem nota ativa"}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Card de situação no Nível 1: deixa claro se a tarefa está em execução, na fila
+ *  ou parada (e por quê), com atalho para as ações de intervenção. */
+function SituacaoCard({
+  task,
+  runningStep,
+  runningToolCall,
+  onGoAcompanhamento,
+}: {
+  task: Task;
+  runningStep: TaskStep | null;
+  runningToolCall: RunEvent | null;
+  onGoAcompanhamento: () => void;
+}) {
+  const running = task.status === "in_progress" && runningStep != null;
+  const queued = task.status === "queued";
+  const parada = ["needs_review", "waiting_approval", "blocked", "paused"].includes(task.status);
+
+  if (running) {
+    return (
+      <div className="card situation-running">
+        <div className="card-title">
+          <strong>● Em execução</strong>
+          <StatusBadge status={task.status} />
+        </div>
+        <p className="muted small" style={{ margin: 0 }}>
+          A tarefa <strong>não está parada</strong> — o robô está trabalhando agora.
+        </p>
+        <div className="resumo-kpis" style={{ marginTop: 10 }}>
+          <div>
+            <span className="form-label">Etapa em execução</span>
+            <span>{etapaAtualLabel(task)}</span>
+          </div>
+          <div>
+            <span className="form-label">Tempo em execução</span>
+            <span>{tempoDecorrido(runningStep)}</span>
+          </div>
+          <div>
+            <span className="form-label">Comando atual</span>
+            <span className="mono">
+              {runningToolCall ? formatToolCall(runningToolCall) : "aguardando interação…"}
+            </span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (queued) {
+    return (
+      <div className="card situation-wait">
+        <div className="card-title">
+          <strong>● Na fila</strong>
+          <StatusBadge status={task.status} />
+        </div>
+        <p className="muted small" style={{ margin: 0 }}>
+          A tarefa está aguardando uma vaga de worker. Com{" "}
+          <span className="mono">--workers N</span> em execução, ela roda quando uma fase
+          ativa terminar. <span className="mono">Etapa: {etapaAtualLabel(task)}</span>
+        </p>
+      </div>
+    );
+  }
+
+  if (parada) {
+    const msg =
+      task.status === "needs_review"
+        ? "parada aguardando revisão humana"
+        : task.status === "waiting_approval"
+          ? "parada aguardando aprovação humana (gate do pipeline)"
+          : task.status === "blocked"
+            ? "parada: o agente não conseguiu continuar sozinho"
+            : "pausada pelo usuário";
+    return (
+      <div className="card situation-stopped">
+        <div className="card-title">
+          <strong>⏸ {msg}</strong>
+          <StatusBadge status={task.status} />
+        </div>
+        {task.error && <div className="error">{task.error}</div>}
+        <p className="muted small" style={{ margin: 0 }}>
+          Veja o motivo e a ação disponível abaixo ou no acompanhamento.
+        </p>
+        <div style={{ marginTop: 8 }}>
+          <button className="link-btn" onClick={onGoAcompanhamento}>
+            ir para o acompanhamento ↓
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card">
+      <div className="card-title">
+        <strong>Situação</strong>
+        <StatusBadge status={task.status} />
+      </div>
+      {task.error && <div className="error">{task.error}</div>}
+      <p className="muted small" style={{ margin: 0 }}>
+        Status final: <span className="mono">{task.status}</span>
+      </p>
+    </div>
+  );
+}
+
+/** Intervenções humanas (revisão de needs_review, aprovação de gate, PM, edição
+ *  da história) — reagrupadas na aba Acompanhamento. */
+function HumanIntervention(props: {
+  task: Task;
+  steps: TaskStep[];
+  extraBudget: number;
+  setExtraBudget: (n: number) => void;
+  bouncebackTarget: number;
+  setBouncebackTarget: (n: number) => void;
+  bouncebackNote: string;
+  setBouncebackNote: (s: string) => void;
+  reviewedBy: string;
+  setReviewedBy: (s: string) => void;
+  bouncebackBusy: boolean;
+  bounceback: (e: FormEvent) => void;
+  review: (e: FormEvent, action: "approve" | "cancel") => void;
+  approvalNote: string;
+  setApprovalNote: (s: string) => void;
+  approvalBusy: boolean;
+  approveGate: (position: number) => void;
+  voltarTarget: number;
+  setVoltarTarget: (n: number) => void;
+  voltarFase: (position: number) => void;
+  pmBusy: boolean;
+  pmDecide: () => void;
+  storyDesc: string;
+  setStoryDesc: (s: string) => void;
+  storyCriteria: string;
+  setStoryCriteria: (s: string) => void;
+  storyBusy: boolean;
+  saveStory: () => void;
+}) {
+  const {
+    task, steps, extraBudget, setExtraBudget,
+    bouncebackTarget, setBouncebackTarget, bouncebackNote, setBouncebackNote,
+    reviewedBy, setReviewedBy, bouncebackBusy, bounceback, review,
+    approvalNote, setApprovalNote, approvalBusy, approveGate,
+    voltarTarget, setVoltarTarget, voltarFase,
+    pmBusy, pmDecide, storyDesc, setStoryDesc, storyCriteria, setStoryCriteria,
+    storyBusy, saveStory,
+  } = props;
+
+  return (
+    <>
       {/* Revisão humana */}
       {task.status === "needs_review" && (() => {
-        const sorted = [...task.steps].sort((a, b) => a.position - b.position);
+        const sorted = [...steps].sort((a, b) => a.position - b.position);
         const lastExecuted = sorted.filter((s) => s.status !== "pending").pop();
         const maxPos = lastExecuted ? lastExecuted.position : sorted.length - 1;
         const candidates = sorted.filter(
@@ -604,7 +1260,7 @@ export default function TaskDetail() {
             </div>
             <p className="muted">
               O pipeline parou antes da fase acima (gate configurado no pipeline).
-              Revise o trabalho das fases anteriores na conversa acima e decida:
+              Revise o trabalho das fases anteriores na aba técnica e decida:
               aprovar para liberar o robô, ou voltar uma fase para refazer com
               ajustes. Você também pode editar a história abaixo.
             </p>
@@ -656,7 +1312,7 @@ export default function TaskDetail() {
       })()}
 
       {/* PM decide */}
-      {pmCandidates && (
+      {["failed", "blocked", "needs_review"].includes(task.status) && (
         <div className="card">
           <div className="card-title">
             <strong>Robô PM (controle do projeto)</strong>
@@ -668,112 +1324,8 @@ export default function TaskDetail() {
         </div>
       )}
 
-      {/* Subtarefas */}
-      {task.subtasks && task.subtasks.length > 0 && (
-        <>
-          <h3>Subtarefas</h3>
-          <div className="subtask-list">
-            {[...task.subtasks].sort((a, b) => a.position - b.position).map((st) => (
-              <div key={st.id} className={`subtask-card subtask-${st.status}`}>
-                <span className="subtask-pos">{st.position + 1}</span>
-                <div className="subtask-body">
-                  <div className="subtask-head">
-                    <strong>{st.title}</strong>
-                    <StatusBadge status={st.status} />
-                    <span className="muted small">tentativa {st.attempt}</span>
-                    {st.verdict && <span className="muted small">· veredicto: {st.verdict}</span>}
-                  </div>
-                  {st.description && <p className="muted small">{st.description}</p>}
-                  {st.summary && (
-                    <details className="subtask-summary">
-                      <summary>resumo da fase</summary>
-                      <Markdown text={st.summary} />
-                    </details>
-                  )}
-                  {st.error && <div className="error small">{st.error}</div>}
-                  {st.acceptance_criteria && (
-                    <details className="muted small" style={{ marginTop: 4 }}>
-                      <summary>critérios ({st.acceptance_criteria.length} chars)</summary>
-                      <pre className="step-error">{st.acceptance_criteria}</pre>
-                    </details>
-                  )}
-                </div>
-                <div className="subtask-actions">
-                  {(st.status === "failed" || st.status === "implementing" || st.status === "verifying" || (st.status === "pending" && st.attempt > 1)) && (
-                    <button className="danger small" onClick={() => subtaskRetry(st.position)}>
-                      repetir
-                    </button>
-                  )}
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      )}
-
-      {/* Tasks filhas / pai */}
-      {(task.children && task.children.length > 0) || task.parent_task_id ? (
-        <>
-          <h3>Relações</h3>
-          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
-            {task.parent_task_id && (
-              <div className="muted small">
-                ← tarefa pai:{" "}
-                <Link to={`/${repoId}/tasks/${task.parent_task_id}`}>
-                  #{task.parent_task_id}
-                </Link>
-              </div>
-            )}
-            {task.children && task.children.length > 0 && task.children.map((child) => (
-              <div
-                key={child.id}
-                className="resumo-card"
-                style={{ margin: 0, padding: "10px 14px" }}
-              >
-                <div className="resumo-line">
-                  <span className="resumo-title">
-                    {child.status === "created" && "📝 "}
-                    #{child.id} {child.title}
-                  </span>
-                  <StatusBadge status={child.status} />
-                </div>
-                <div className="muted small" style={{ marginTop: 4 }}>
-                  {child.repository_id !== task.repository_id && (
-                    <span>repo #{child.repository_id} · </span>
-                  )}
-                  {child.kind} · {child.cost_spent.toFixed(2)} US$
-                </div>
-                {child.status === "created" && (
-                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                    <button
-                      onClick={async () => {
-                        try { await api.startTask(child.id); await refresh(); }
-                        catch (e) { setError(String(e)); }
-                      }}
-                    >
-                      aprovar e iniciar
-                    </button>
-                    <button
-                      className="danger"
-                      onClick={async () => {
-                        if (!confirm(`Recusar tarefa #${child.id} "${child.title}"?`)) return;
-                        try { await api.deleteTask(child.id); await refresh(); }
-                        catch (e) { setError(String(e)); }
-                      }}
-                    >
-                      recusar
-                    </button>
-                  </div>
-                )}
-              </div>
-            ))}
-          </div>
-        </>
-      ) : null}
-
-      {/* História */}
-      <h3>História</h3>
-      {task.status === "waiting_approval" ? (
+      {/* Edição da história (só em waiting_approval) */}
+      {task.status === "waiting_approval" && (
         <div className="card">
           <div className="card-title">
             <strong>Editar história antes de aprovar</strong>
@@ -803,53 +1355,7 @@ export default function TaskDetail() {
             </div>
           </div>
         </div>
-      ) : (
-        <>
-        {task.description && (
-          <div className="card">
-            <div className="card-title">
-              <strong>Descrição</strong>
-            </div>
-            <Markdown text={task.description} />
-          </div>
-        )}
-
-        {task.acceptance_criteria && (
-          <div className="card">
-            <div className="card-title">
-              <strong>Critérios de aceite</strong>
-            </div>
-            <Markdown text={task.acceptance_criteria} />
-          </div>
-        )}
-        </>
       )}
-
-      {/* Feedback externo */}
-      <h3>Feedback externo</h3>
-      <div className="feedback-box">
-        <div className="form-field">
-          <label className="form-label">Nota de feedback</label>
-          <textarea
-            className="feedback-input"
-            rows={3}
-            placeholder="Erro de deploy, pedido de ajuste, info do ambiente… (entra no handoff das próximas fases)"
-            value={feedbackText}
-            onChange={(e) => setFeedbackText(e.target.value)}
-          />
-        </div>
-        <div className="form-actions">
-          <button disabled={feedbackBusy || !feedbackText.trim()} onClick={saveFeedback}>
-            salvar nota
-          </button>
-          <button className="danger" disabled={feedbackBusy || !task.feedback} onClick={clearFeedback}>
-            limpar
-          </button>
-          <span className="muted small" style={{ alignSelf: "center" }}>
-            {task.feedback ? "a nota entra no handoff das próximas fases" : "sem nota ativa"}
-          </span>
-        </div>
-      </div>
-    </div>
+    </>
   );
 }
