@@ -89,6 +89,9 @@ export const api = {
     }),
   logout: () => request<void>("/api/auth/logout", { method: "POST" }),
   me: () => request<User>("/api/auth/me"),
+  // Bootstrap: só aceito com `users` vazio (primeiro registro vira admin global).
+  register: (data: { name: string; email: string; password: string }) =>
+    request<User>("/api/auth/register", { method: "POST", body: JSON.stringify(data) }),
 
   // usuários (admin global)
   listUsers: () => request<User[]>("/api/users"),
