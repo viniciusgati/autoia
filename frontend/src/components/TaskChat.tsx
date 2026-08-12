@@ -17,6 +17,7 @@ export default function TaskChat({
   live,
   onProposalsChanged,
   onError,
+  canAct = true,
 }: {
   task: Task;
   turns: ChatTurn[];
@@ -24,6 +25,8 @@ export default function TaskChat({
   live: { step: TaskStep; toolCall: RunEvent | null; events: RunEvent[] } | null;
   onProposalsChanged: () => void;
   onError: (message: string) => void;
+  /** Permissão de atuação (responsável/admin) — repassa às propostas. */
+  canAct?: boolean;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -49,6 +52,7 @@ export default function TaskChat({
               parentRepoName={repoNames[task.repository_id]}
               onProposalsChanged={onProposalsChanged}
               onError={onError}
+              canAct={canAct}
             />
           );
         }
@@ -82,12 +86,14 @@ function TaskIntro({
   parentRepoName,
   onProposalsChanged,
   onError,
+  canAct,
 }: {
   turn: TaskTurn;
   repoNames: Record<number, string>;
   parentRepoName?: string;
   onProposalsChanged: () => void;
   onError: (message: string) => void;
+  canAct?: boolean;
 }) {
   const pending = (turn.proposals ?? []).filter((p) => p.status === "pending");
   return (
@@ -123,6 +129,7 @@ function TaskIntro({
                 parentRepoName={parentRepoName}
                 onChanged={onProposalsChanged}
                 onError={onError}
+                canAct={canAct}
               />
             ))}
           </div>

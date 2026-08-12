@@ -4288,3 +4288,267 @@ strong {
   .ws-input-row { flex-direction: column; }
   .ws-send { align-self: stretch; }
 }
+
+/* ═══════════════════════════════════════════
+   Autenticação, dashboard pessoal e responsável (task #28)
+   ═══════════════════════════════════════════ */
+
+/* Splash durante o boot da auth (App) */
+.app-splash {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-secondary);
+  font-size: 15px;
+  background: var(--bg-gradient);
+}
+
+/* ── Tela de Login ── */
+.login-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-gradient);
+}
+
+.login-card {
+  width: min(380px, 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--surface);
+  backdrop-filter: blur(16px);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-lg);
+  padding: 30px 28px;
+  box-shadow: var(--shadow-lg);
+}
+
+.login-brand {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  background: linear-gradient(135deg, var(--accent) 0%, #818cf8 60%, #a78bfa 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.login-title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.login-warning {
+  color: var(--warn);
+  background: var(--warn-subtle);
+  border: 1px solid rgba(251, 191, 36, 0.3);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+  font-weight: 550;
+}
+
+.login-error {
+  color: var(--err);
+  background: var(--err-subtle);
+  border: 1px solid rgba(248, 113, 113, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 9px 12px;
+  font-size: 13px;
+}
+
+.login-submit {
+  margin-top: 4px;
+  width: 100%;
+}
+
+/* ── Topbar: usuário logado + erro de logout ── */
+.topbar-user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.topbar-user-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--text);
+}
+
+.topbar-logout-error {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--warn);
+  background: var(--warn-subtle);
+  border: 1px solid rgba(251, 191, 36, 0.25);
+  border-radius: var(--radius-sm);
+  padding: 4px 9px;
+}
+
+/* ── Home: "Minhas tarefas" e "Meus projetos" ── */
+.my-tasks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.my-task-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: var(--surface);
+  backdrop-filter: blur(8px);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  text-decoration: none;
+  color: var(--text);
+  transition: all var(--transition);
+}
+
+.my-task-row:hover {
+  border-color: var(--surface-border-hover);
+  box-shadow: var(--shadow-md);
+  transform: translateY(-1px);
+}
+
+.my-task-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.my-task-title {
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.my-task-await {
+  box-shadow: 0 0 14px rgba(251, 191, 36, 0.25);
+}
+
+.my-task-sub {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 12.5px;
+}
+
+.my-list-skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* Erro de seção (Home) com botão "Tentar novamente" */
+.section-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: var(--err);
+  background: var(--err-subtle);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13px;
+}
+
+/* ── TaskCard: destaque "sua tarefa" + responsável ── */
+.task-card-mine {
+  border-color: rgba(91, 141, 239, 0.55);
+  box-shadow: var(--accent-glow), var(--shadow-sm);
+}
+
+.task-card-mine:hover {
+  border-color: var(--accent);
+  box-shadow: 0 0 28px rgba(91, 141, 239, 0.22), var(--shadow-md);
+}
+
+.badge-mine {
+  background: var(--accent-subtle);
+  color: var(--accent-hover);
+  border-color: rgba(91, 141, 239, 0.45);
+  font-weight: 650;
+  box-shadow: 0 0 12px rgba(91, 141, 239, 0.2);
+}
+
+.task-card-head-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.task-card-responsible {
+  color: var(--text-secondary);
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+}
+
+/* ── Controle de atribuição de responsável ── */
+.responsavel-control {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.responsavel-control-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.responsavel-control-row select {
+  min-width: 220px;
+  padding: 7px 10px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--surface-border-hover);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+}
+
+.responsavel-error {
+  color: var(--err);
+  font-size: 12.5px;
+}
+
+/* ── Workspace: voltar + responsável no header ── */
+.ws-back {
+  margin-right: auto;
+}
+
+.ws-responsavel b {
+  color: var(--text);
+}
+
+/* ── Variante crítica do sticky-alert (TaskDetail/Workspace) ── */
+.sticky-alert-critical {
+  background: rgba(248, 113, 113, 0.08);
+  border-color: rgba(248, 113, 113, 0.35);
+  color: var(--err);
+}
+
+.sticky-alert-critical button {
+  background: var(--err);
+  color: #fff;
+}

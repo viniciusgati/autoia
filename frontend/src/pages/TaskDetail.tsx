@@ -385,7 +385,6 @@ export default function TaskDetail() {
     document.getElementById("revisao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  if (error) return <p className="error">{error}</p>;
   if (!task) return <p>Carregando…</p>;
 
   // Permissão de atuação: sem responsável qualquer autenticado atua; com
@@ -434,6 +433,13 @@ export default function TaskDetail() {
 
   return (
     <div>
+      {/* Erro (ex.: 403 sem permissão) exibido sem sair da tela — descartável. */}
+      {error && (
+        <div className="sticky-alert sticky-alert-critical">
+          <span>{error}</span>
+          <button className="link-btn" onClick={() => setError("")}>×</button>
+        </div>
+      )}
       <p>
         <Link to={`/${repoId}`}>← projeto</Link>
         {" · "}

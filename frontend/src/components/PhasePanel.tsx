@@ -5,6 +5,7 @@ import DiffView from "./DiffView";
 import HelpTip from "./HelpTip";
 import StatusBadge from "./StatusBadge";
 import Markdown from "../lib/markdown";
+import { MSG_SEM_PERMISSAO } from "../lib/tasks";
 import type { TaskStep } from "../types";
 
 interface PhasePanelProps {
@@ -14,11 +15,14 @@ interface PhasePanelProps {
   taskStatus: string;
   onClose: () => void;
   onRetry: (position: number) => void;
+  /** Permissão de atuação (responsável/admin) — desabilita retry/voltar. */
+  canAct?: boolean;
 }
 
-export default function PhasePanel({ step, repoId, taskId, taskStatus, onClose, onRetry }: PhasePanelProps) {
+export default function PhasePanel({ step, repoId, taskId, taskStatus, onClose, onRetry, canAct = true }: PhasePanelProps) {
   const [expanded, setExpanded] = useState(false);
   const open = step != null;
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   if (!step) return null;
 
@@ -143,12 +147,12 @@ export default function PhasePanel({ step, repoId, taskId, taskStatus, onClose, 
           <div style={{ flex: 1 }} />
 
           {canRetry && (
-            <button className="danger" onClick={() => onRetry(step.position)}>
+            <button className="danger" onClick={() => onRetry(step.position)} disabled={!canAct} title={actTitle}>
               repetir fase
             </button>
           )}
           {canBounceBack && (
-            <button className="warn-btn" onClick={() => onRetry(step.position)}>
+            <button className="warn-btn" onClick={() => onRetry(step.position)} disabled={!canAct} title={actTitle}>
               ← voltar para esta fase
             </button>
           )}
