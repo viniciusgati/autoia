@@ -258,7 +258,13 @@ def test_assign_responsible_upserts_membership(aflow):
     # upsert idempotente de repository_users (outro passa a constar, sem duplicar)
     members = aflow["client_admin"].get("/api/repositories/1/members").json()
     assert sum(1 for m in members if m["user_id"] == outro_id) == 1
-    aflow["client_r"].put(f"/api/tasks/{task_id}/responsible", json={"user_id": outro_id})
+    outro_as_member = next(m for m in members if m["user_id"] == outro_id)
+    assert outro_as_member["role"] == "member"
+    # o responsável atual (outro) reatribui para si mesmo → 200, sem duplicar
+    resp = aflow["client_outro"].put(
+        f"/api/tasks/{task_id}/responsible", json={"user_id": outro_id}
+    )
+    assert resp.status_code == 200, resp.text
     members = aflow["client_admin"].get("/api/repositories/1/members").json()
     assert sum(1 for m in members if m["user_id"] == outro_id) == 1
 
@@ -268,6 +274,20 @@ def test_assign_responsible_upserts_membership(aflow):
     )
     assert resp.status_code == 200, resp.text
     assert resp.json()["responsible_id"] == admin_id
+
+
+def test_assign_responsible_keeps_repo_admin_role(aflow):
+    """Atribuir um admin do projeto como responsável NÃO rebaixa o papel dele."""
+    task_id = aflow["task_id"]
+    repoadmin_id = aflow["ids"]["repoadmin@ex.com"]
+    resp = aflow["client_r"].put(
+        f"/api/tasks/{task_id}/responsible", json={"user_id": repoadmin_id}
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["responsible_id"] == repoadmin_id
+    members = aflow["client_admin"].get("/api/repositories/1/members").json()
+    repoadmin = next(m for m in members if m["user_id"] == repoadmin_id)
+    assert repoadmin["role"] == "admin"
 
 
 def test_assign_responsible_to_unknown_user_404(aflow):

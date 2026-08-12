@@ -149,7 +149,12 @@ def _get_task_or_404(session: Session, task_id: int) -> Task:
 
 
 def _upsert_repo_member(session: Session, repo_id: int, user_id: int, role: str = "member") -> RepositoryUser:
-    """Upsert idempotente de `repository_users(repo, user, role)` — não duplica."""
+    """Upsert idempotente de `repository_users(repo, user, role)` — não duplica.
+
+    Membro já existente mantém o papel atual: reatribuir a tarefa para um admin
+    do projeto nunca rebaixa o papel dele para `member` (idempotência real —
+    a 2ª chamada não altera o estado).
+    """
     member = (
         session.query(RepositoryUser)
         .filter(
@@ -161,8 +166,6 @@ def _upsert_repo_member(session: Session, repo_id: int, user_id: int, role: str 
     if member is None:
         member = RepositoryUser(repository_id=repo_id, user_id=user_id, role=role)
         session.add(member)
-    else:
-        member.role = role
     return member
 
 
