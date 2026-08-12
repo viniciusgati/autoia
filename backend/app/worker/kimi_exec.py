@@ -23,6 +23,7 @@ from .exec_common import (
     drain_stderr,
     kill_group,
     make_no_progress_watchdog,
+    make_stop_watchdog,
     make_watchdog,
     register_proc,
     unregister_proc,
@@ -52,12 +53,17 @@ def run_kimi(
     cost_per_interaction: float,
     no_progress_timeout: int = 0,
     resume_session_id: str | None = None,
+    repo_id: int | None = None,
+    stop_file: str | None = None,
     skills_dir: str | None = None,
     on_event,
 ) -> KimiOutcome:
     """Roda o kimi e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
 
     Se `on_event` retornar uma string (ex.: orçamento estourado), o run é abortado.
+    `repo_id` identifica o projeto (kill seletivo na exclusão) e `stop_file`, quando
+    fornecido, dispara a parada cooperativa: se o arquivo `.stop-<repo_id>` aparecer,
+    o processo é morto e o run retorna abortado.
     Síncrono: chamar de um thread/processo dedicado.
 
     `skills_dir` (opcional): diretório no checkout com as skills do projeto
@@ -83,7 +89,7 @@ def run_kimi(
             bufsize=1,
             start_new_session=True,
         )
-        register_proc(proc)
+        register_proc(proc, repo_id=repo_id)
 
         stderr_thread = threading.Thread(
             target=drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
@@ -96,6 +102,12 @@ def run_kimi(
         stall_stop = (
             make_no_progress_watchdog(no_progress_timeout, proc, last_activity, stalled)
             if no_progress_timeout > 0
+            else None
+        )
+        stopped = threading.Event()
+        stop_watch = (
+            make_stop_watchdog(stop_file, proc, stopped)
+            if stop_file
             else None
         )
 
@@ -213,12 +225,20 @@ def run_kimi(
             watchdog.cancel()
             if stall_stop is not None:
                 stall_stop.set()
+            if stop_watch is not None:
+                stop_watch.set()
+            # Sai do registro em QUALQUER caminho — inclusive nos returns do
+            # `_abort` (guardrail/timeout/erro), que pulavam o unregister e
+            # deixavam procs mortos registrados para sempre.
+            unregister_proc(proc)
 
         proc.wait()
         stderr_thread.join(timeout=10)
-        unregister_proc(proc)
 
-    if stalled.is_set() and not outcome.aborted:
+    if stopped.is_set() and not outcome.aborted:
+        outcome.aborted = True
+        outcome.abort_reason = "projeto excluído durante a execução"
+    elif stalled.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True
         outcome.abort_reason = f"timeout sem progresso ({no_progress_timeout}s sem saída)"

@@ -19,6 +19,13 @@ export interface Repository {
   auto_summary: boolean;
 }
 
+/** Informações para o diálogo de confirmação de exclusão do projeto
+ *  (GET /api/repositories/{id}/delete-info). */
+export interface RepositoryDeleteInfo {
+  active_tasks: number;
+  checkout_path: string | null;
+}
+
 export interface Robot {
   id: number;
   repository_id: number | null;
