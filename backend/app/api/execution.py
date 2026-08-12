@@ -32,6 +32,7 @@ from ..schemas import ExecutionOut, RunEventOut, TaskProposalOut, WorkerStatusOu
 from .dashboard import _build_notices, _user_repo_ids
 from .deps import get_session, get_settings, require_auth
 from .etag import conditional
+from .scope import make_scoped
 from .tasks import _task_list_item
 
 router = APIRouter(prefix="/api/execution", tags=["execution"])
@@ -65,28 +66,25 @@ def execution(
     settings: Settings = Depends(get_settings),
     user: User | None = Depends(require_auth),
 ):
-    # Com auth ON, a página global fica restrita aos projetos do usuário.
+    # Com auth ON, a página global fica restrita ao escopo de visibilidade do
+    # usuário: participa do projeto da task OU é o responsável dela OU a task
+    # não tem responsável (espelha `_ensure_can_act`). O escopo vale também
+    # para propostas, avisos, eventos ao vivo e o token de cache.
     repo_ids: list[int] | None = None
+    user_id: int | None = None
     if user is not None:
         repo_ids = _user_repo_ids(session, user.id)
+        user_id = user.id
+    scoped = make_scoped(repo_ids, user_id, repository_id)
 
-    def _scoped(q):
-        if repository_id is not None:
-            return q.filter(Task.repository_id == repository_id)
-        if repo_ids is not None:
-            return q.filter(Task.repository_id.in_(repo_ids))
-        return q
-
-    max_task_ts = _scoped(session.query(func.max(Task.updated_at))).scalar()
+    max_task_ts = scoped(session.query(func.max(Task.updated_at))).scalar()
     event_q = (
         session.query(func.max(RunEvent.id))
         .join(TaskStep, RunEvent.step_id == TaskStep.id)
         .join(Task, TaskStep.task_id == Task.id)
     )
-    if repository_id is not None:
-        event_q = event_q.filter(Task.repository_id == repository_id)
-    max_event_id = event_q.scalar()
-    max_proposal_id, pending_proposals = _scoped(
+    max_event_id = scoped(event_q).scalar()
+    max_proposal_id, pending_proposals = scoped(
         session.query(
             func.max(TaskProposal.id),
             func.count(TaskProposal.id).filter(TaskProposal.status == "pending"),
@@ -104,9 +102,9 @@ def execution(
     if not_modified is not None:
         return not_modified
 
-    # Tasks ativas (filtro opcional por projeto / projetos do usuário)
+    # Tasks ativas (escopo de visibilidade + filtro opcional por projeto)
     tasks = (
-        _scoped(session.query(Task))
+        scoped(session.query(Task))
         .filter(Task.status.in_(ACTIVE_STATUSES))
         .order_by(Task.updated_at.desc())
         .limit(50)
@@ -114,7 +112,7 @@ def execution(
     )
 
     # Eventos ao vivo das fases running (últimos ~30 por fase)
-    running_q = _scoped(session.query(TaskStep).join(Task)).filter(TaskStep.status == "running")
+    running_q = scoped(session.query(TaskStep).join(Task)).filter(TaskStep.status == "running")
     current_events: dict[str, list[RunEventOut]] = {}
     for step in running_q.order_by(TaskStep.id.desc()).limit(10).all():
         events = (
@@ -126,22 +124,16 @@ def execution(
         )
         current_events[str(step.id)] = [RunEventOut.model_validate(e) for e in events]
 
-    # Propostas pendentes de aprovação humana
-    proposal_q = session.query(TaskProposal).filter(TaskProposal.status == "pending")
-    if repository_id is not None:
-        proposal_q = proposal_q.join(Task, TaskProposal.task_id == Task.id).filter(
-            Task.repository_id == repository_id
-        )
-    elif repo_ids is not None:
-        proposal_q = proposal_q.join(Task, TaskProposal.task_id == Task.id).filter(
-            Task.repository_id.in_(repo_ids)
-        )
+    # Propostas pendentes de aprovação humana (mesmo escopo das tasks)
+    proposal_q = scoped(
+        session.query(TaskProposal).join(Task, TaskProposal.task_id == Task.id)
+    ).filter(TaskProposal.status == "pending")
     proposals = proposal_q.order_by(TaskProposal.created_at.desc()).limit(50).all()
 
     return ExecutionOut(
         tasks=[_task_list_item(t) for t in tasks],
         current_events=current_events,
         proposals=[TaskProposalOut.model_validate(p) for p in proposals],
-        notices=_build_notices(session, repo_ids),
+        notices=_build_notices(session, scoped),
         worker=_worker_status(settings),
     )

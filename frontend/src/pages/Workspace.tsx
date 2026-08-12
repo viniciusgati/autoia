@@ -83,6 +83,31 @@ function stopMeta(kind: string): { label: string; cls: string } {
   }
 }
 
+/** Ícone do evento de subtarefa pelo nome do marcador (da timeline). */
+function subtaskIcon(name: string): { icon: string; cls: string } {
+  if (name.includes("falhou")) return { icon: "✕", cls: "ws-sub-err" };
+  if (name.includes("concluída")) return { icon: "✓", cls: "ws-sub-ok" };
+  if (name.includes("implementada")) return { icon: "✅", cls: "ws-sub-ok" };
+  if (name.includes("iniciada")) return { icon: "▸", cls: "ws-sub-run" };
+  return { icon: "•", cls: "" };
+}
+
+/** Subtarefas com atividade nesta ocorrência (dos eventos da timeline). */
+function occurrenceSubtasks(occ: WorkspaceOccurrence) {
+  // marcadores de EXECUÇÃO de subtarefa ("tarefa iniciada/implementada/..."),
+  // excluindo o resumo "tarefas propostas pelo agente" (plural).
+  return occ.system_activity.filter((a) => a.name.startsWith("tarefa "));
+}
+
+const SUB_LABELS: Record<string, { label: string; cls: string }> = {
+  pending: { label: "pendente", cls: "badge-muted" },
+  implementing: { label: "implementando", cls: "badge-run" },
+  implemented: { label: "implementada", cls: "badge-ok" },
+  verifying: { label: "verificando", cls: "badge-run" },
+  done: { label: "concluída", cls: "badge-ok" },
+  failed: { label: "falhou", cls: "badge-err" },
+};
+
 const fmtCost = (v: number) => `R$ ${(v ?? 0).toFixed(2).replace(".", ",")}`;function fmtTime(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
@@ -194,6 +219,7 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
   const meta = occStatusMeta(occ.status);
   const running = occ.status === "running";
   const deliveredText = occ.delivered?.summary || occ.delivered_text;
+  const subtasks = occurrenceSubtasks(occ);
 
   return (
     <article className={`ws-occ ws-occ-${occ.status}`}>
@@ -261,6 +287,24 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
           <div className="ws-delivered">
             <Markdown text={deliveredText} />
           </div>
+        </section>
+      )}
+
+      {subtasks.length > 0 && (
+        <section className="ws-occ-section">
+          <h4 className="ws-section-title">Subtarefas desta execução</h4>
+          <ul className="ws-subtasks">
+            {subtasks.map((a, i) => {
+              const si = subtaskIcon(a.name);
+              return (
+                <li key={i} className={`ws-subtask-item ${si.cls}`}>
+                  <span className="ws-sub-icon">{si.icon}</span>
+                  <span>{a.summary}</span>
+                  <span className="muted small">{fmtTime(a.ts)}</span>
+                </li>
+              );
+            })}
+          </ul>
         </section>
       )}
 
@@ -613,6 +657,32 @@ export default function Workspace() {
               ))}
             </div>
             <p className="muted small">ou responda no campo abaixo e envie.</p>
+          </section>
+        ) : null}
+
+        {ws?.task.subtasks.length ? (
+          <section className="ws-subtasks-panel">
+            <h4 className="ws-section-title">
+              Subtarefas
+              <span className="muted small">
+                ({ws.task.subtasks.filter((s) => s.status === "done").length}/{ws.task.subtasks.length} concluídas)
+              </span>
+            </h4>
+            <ul className="ws-subtasks-global">
+              {[...ws.task.subtasks].sort((a, b) => a.position - b.position).map((s) => {
+                const lb = SUB_LABELS[s.status] ?? { label: s.status, cls: "badge-muted" };
+                return (
+                  <li key={s.position} className="ws-subtask-global-item">
+                    <span className="ws-sub-pos">{s.position + 1}</span>
+                    <span className="ws-sub-title">{s.title}</span>
+                    <span className={`badge ${lb.cls}`}>{lb.label}</span>
+                    {s.attempt > 1 && <span className="muted small">tentativa {s.attempt}</span>}
+                    {s.verdict && <span className="muted small">{s.verdict}</span>}
+                    {s.error && <span className="ws-sub-error" title={s.error}>{s.error}</span>}
+                  </li>
+                );
+              })}
+            </ul>
           </section>
         ) : null}
 
