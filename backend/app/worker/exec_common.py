@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import threading
+import time
 from dataclasses import dataclass
 
 # Registro global de subprocessos ativos (kimi/opencode). Permite matar todos
@@ -48,6 +49,7 @@ class ExecOutcome:
     aborted: bool = False
     timed_out: bool = False
     abort_reason: str | None = None
+    session_id: str | None = None
 
 
 def kill_group(proc: subprocess.Popen) -> None:
@@ -88,3 +90,30 @@ def make_watchdog(timeout: int, proc: subprocess.Popen) -> tuple[threading.Timer
     timer.daemon = True
     timer.start()
     return timer, timed_out
+
+
+def make_no_progress_watchdog(
+    stall_seconds: int,
+    proc: subprocess.Popen,
+    last_activity: list[float],
+    stalled: threading.Event,
+) -> threading.Event:
+    """Watchdog de "sem progresso": mata o processo se ficar `stall_seconds`s sem
+    NENHUMA saída no stdout (o executor atualiza `last_activity[0]` a cada linha).
+
+    Cobre casos de hang do CLI/LLM (ex.: kimi estagnado em reasoning) que o timeout
+    total só pegaria no fim. Retorna um `Event` de parada p/ o chamador cancelar.
+    """
+    stop = threading.Event()
+
+    def _watch() -> None:
+        while not stop.is_set():
+            if time.monotonic() - last_activity[0] > stall_seconds:
+                stalled.set()
+                kill_group(proc)
+                return
+            stop.wait(timeout=5)
+
+    t = threading.Thread(target=_watch, daemon=True, name="no-progress-watchdog")
+    t.start()
+    return stop

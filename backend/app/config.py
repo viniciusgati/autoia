@@ -149,6 +149,12 @@ class Settings:
     # Gera o resumo de cada fase concluída ("O que foi entregue") via LLM de resumo
     # (zero custo contábil; usa tokens do executor da task). Desligar evita chamadas.
     step_summary: bool = field(default_factory=lambda: _env("AUTOIA_STEP_SUMMARY", "1") == "1")
+    # Watchdog de "sem progresso": se o executor ficar `no_progress_timeout` segundos
+    # sem emitir NENHUMA saída no stdout (ex.: kimi travado em reasoning), o processo
+    # é morto e tratado como timeout (bounce-back/retry). 0 = desligado.
+    no_progress_timeout: int = field(
+        default_factory=lambda: _int("AUTOIA_NO_PROGRESS_TIMEOUT", 300)
+    )
 
     def ensure_dirs(self) -> None:
         for d in (self.workspace_dir, self.log_dir, _sqlite_parent(self.database_url)):

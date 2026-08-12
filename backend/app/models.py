@@ -295,6 +295,10 @@ class TaskStep(Base):
     # Objetivo legível da fase ("O que será feito") derivado deterministicamente
     # da mission do robô + título da task no momento da execução.
     goal: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Sessão do executor (kimi `-S`) desta fase: permite RETOMAR a mesma conversa
+    # numa re-execução (timeout/stall), preservando o contexto do LLM. Limpo
+    # (na prática) quando a fase conclui com sucesso.
+    session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     diff_stat: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)

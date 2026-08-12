@@ -78,6 +78,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("diff_stat", "TEXT"),
         ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("goal", "TEXT"),
+        ("session_id", "VARCHAR(200)"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),

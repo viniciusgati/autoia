@@ -85,6 +85,7 @@ class EffectiveSettings:
     workspace_dir: str
     branch_prefix: str
     max_identical_calls: int
+    no_progress_timeout: int
 
 
 def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
@@ -113,6 +114,7 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         branch_prefix=settings.branch_prefix,
         workspace_dir=settings.workspace_dir,
         max_identical_calls=settings.max_identical_calls,
+        no_progress_timeout=settings.no_progress_timeout,
     )
 
 
@@ -340,6 +342,105 @@ def _finish(step: TaskStep) -> None:
     step.finished_at = utcnow()
 
 
+def _tool_call_target(arguments) -> str:
+    """Extrai o alvo (arquivo/comando/query) de argumentos de tool call (kimi/opencode)."""
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except (json.JSONDecodeError, TypeError):
+            return ""
+    if not isinstance(arguments, dict):
+        return ""
+    for key in ("command", "path", "pattern", "query", "url", "file", "skill", "agent", "description"):
+        value = arguments.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _step_prior_activity(s: Session, step: TaskStep, limit: int = 40) -> str:
+    """Atividade das tentativas ANTERIORES da MESMA fase, para retomada pós-abort.
+
+    Quando uma execução morre (timeout/stall), a conversa do LLM se perde — o novo
+    kimi começa do zero. Esta seção reconstrói (determinístico, sem LLM), a partir
+    dos RunEvent anteriores ao `attempt_started` atual, o que a fase já fez nesta
+    tentativa: tool calls + textos + guardrails. Na primeira execução, retorna vazio.
+    """
+    if not isinstance(step, TaskStep):
+        return ""
+    events = (
+        s.query(RunEvent)
+        .filter(RunEvent.step_id == step.id)
+        .order_by(RunEvent.seq)
+        .all()
+    )
+    start = 0
+    for i, ev in enumerate(events):
+        if ev.kind == "attempt_started":
+            start = i
+            break
+    if not events[start:]:
+        return ""
+    lines: list[str] = []
+    for ev in events[start:][-limit:]:
+        p = ev.payload or {}
+        if ev.kind == "tool_call":
+            tc = p.get("tool_call") or {}
+            fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
+            name = fn.get("name") if isinstance(fn, dict) else (p.get("tool") or "?")
+            args = fn.get("arguments") if isinstance(fn, dict) else p.get("input")
+            target = _tool_call_target(args)
+            lines.append(f"- {name}: {target}" if target else f"- {name}")
+        elif ev.kind == "assistant_text":
+            text = str(p.get("content") or "")
+            first = next((l for l in text.splitlines() if l.strip()), "")
+            if first:
+                lines.append(f"> {first[:180]}")
+        elif ev.kind == "guardrail_blocked":
+            lines.append(f"! guardrail bloqueou: {p.get('detail') or p.get('pattern') or ''}")
+    return "\n".join(lines)
+
+
+def _should_resume(s: Session, step: TaskStep) -> str | None:
+    """Session_id do kimi a retomar se a fase foi INTERROMPIDA (timeout/stall) sem
+    concluir — para continuar a MESMA conversa (contexto preservado).
+
+    Se a última execução concluiu (`phase_done`/`merged`), retorna None: re-execução
+    manual após conclusão recomeça do zero.
+    """
+    if not step.session_id:
+        return None
+    completed = False
+    in_run = False
+    for ev in (
+        s.query(RunEvent)
+        .filter(RunEvent.step_id == step.id)
+        .order_by(RunEvent.seq)
+        .all()
+    ):
+        if ev.kind == "attempt_started":
+            in_run = True
+            completed = False
+        elif in_run and ev.kind in ("phase_done", "merged"):
+            completed = True
+    return None if completed else step.session_id
+
+
+def _resume_prompt(step: TaskStep, task: Task) -> str:
+    return (
+        "CONTINUAÇÃO — a execução anterior desta fase foi interrompida antes de concluir "
+        "e você está retomando a MESMA sessão (o contexto das suas ações anteriores está "
+        "preservado aqui).\n\n"
+        "1. Leia o autoia_handoff.md na raiz (pode ter sido atualizado com a atividade da "
+        "execução anterior e o estado do checkout).\n"
+        "2. Retome EXATAMENTE de onde parou: confira o que já foi feito "
+        f"(git status/diff) e continue o trabalho desta fase ('{task.title}') até concluir.\n"
+        "3. Ao terminar, produza o texto final/documentação da fase como instruído no "
+        "prompt original (O que foi feito / Arquivos alterados / Evidência / Pendências / "
+        "Para a próxima fase)."
+    )
+
+
 def _build_step_context(
     s: Session, task: Task, current_step: TaskStep, checkout: str, base: str, branch: str
 ) -> str:
@@ -369,6 +470,13 @@ def _build_step_context(
             context += f"\nDiff atual:\n{diff}"
     except gitops.GitError:
         pass
+    prior = _step_prior_activity(s, current_step)
+    if prior:
+        context += (
+            f"\n\n## Atividade da execução anterior desta fase (tentativas anteriores)\n"
+            f"Uma execução anterior desta MESMA fase foi interrompida. O que já foi feito "
+            f"nela (continue a partir daqui, sem refazer):\n{prior}"
+        )
     return context
 
 
@@ -412,6 +520,16 @@ def _build_handoff(
     if task.subtasks:
         sections.append(_subtask_progress_summary(task, post_merge=current_step.post_merge))
 
+    # Atividade das tentativas anteriores da MESMA fase (retomada pós-abort)
+    prior = _step_prior_activity(s, current_step)
+    if prior:
+        sections.append(
+            f"## Atividade da execução anterior desta fase (tentativas anteriores)\n"
+            "_Uma execução anterior desta MESMA fase foi interrompida (ex.: timeout). "
+            "O que já foi feito nela — continue a partir daqui, sem refazer:_\n\n"
+            f"{prior}"
+        )
+
     current = (
         f"**Fase {current_step.position} — {current_step.robot.name if current_step.robot else '?'} "
         f"({current_step.robot.role if current_step.robot else '?'})**\n"
@@ -452,6 +570,7 @@ def _run_executor(
     model: str | None = None,
     on_event=None,
     kimi_cost_per_interaction: float | None = None,
+    resume_session_id: str | None = None,
 ):
     """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`."""
     if executor == "opencode":
@@ -466,8 +585,9 @@ def _run_executor(
             checkout_path=cwd,
             whitelisted_hosts=eff.whitelisted_hosts,
             model=model,
-            on_event=on_event,
-        )
+        no_progress_timeout=eff.no_progress_timeout,
+        on_event=on_event,
+    )
     return kimi_exec.run_kimi(
         prompt,
         cwd=cwd,
@@ -483,6 +603,8 @@ def _run_executor(
             if kimi_cost_per_interaction is not None
             else eff.cost_per_interaction
         ),
+        no_progress_timeout=eff.no_progress_timeout,
+        resume_session_id=resume_session_id,
         on_event=on_event,
     )
 
@@ -562,9 +684,15 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
                 checkout,
                 exc_info=True,
             )
-        prompt = prompts.build_prompt(
-            step.robot, task, step_context, base, project_info=project_info
-        )
+        resume_session_id = _should_resume(s, step)
+        if resume_session_id:
+            # Retoma a MESMA conversa do kimi (contexto preservado) — sem o prompt
+            # original inteiro de novo (já está na sessão).
+            prompt = _resume_prompt(step, task)
+        else:
+            prompt = prompts.build_prompt(
+                step.robot, task, step_context, base, project_info=project_info
+            )
         log_path = os.path.join(eff.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
         # Marca o início da tentativa nos eventos: uma fase pode ser re-executada
@@ -630,12 +758,17 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         log_path=log_path,
         model=step.robot.model if step.robot else None,
         on_event=on_event,
+        resume_session_id=resume_session_id,
     )
 
     with session_factory() as s:
         step = s.get(TaskStep, step_id)
         if step is None:
             return None
+        # Captura a sessão do kimi p/ retomar a mesma conversa se a fase for
+        # re-executada após interrupção (timeout/stall).
+        if outcome.session_id:
+            step.session_id = outcome.session_id
         verdict_label = _consume_verdict(s, step, checkout)
         s.commit()
     return _decide(eff, session_factory, step_id, checkout, outcome, verdict_label)
@@ -985,7 +1118,13 @@ def _handle_failure(eff: EffectiveSettings, s: Session, step: TaskStep, task: Ta
 
     Retorna um gatilho de PM quando a task precisa de decisão automática.
     """
-    _system_event(s, step, kind, {"reason": reason})
+    payload: dict = {"reason": reason}
+    if kind == "verdict" and step.summary:
+        # Em reprovação de revisão/verificação, `step.summary` guarda o conteúdo
+        # COMPLETO do autoia_verdict.txt (a reprovação com os pontos) — persiste no
+        # evento para a timeline mostrar o MOTIVO real da falha por ocorrência.
+        payload["detail"] = step.summary
+    _system_event(s, step, kind, payload)
     step.status = step_status
     step.error = reason
     _finish(step)
