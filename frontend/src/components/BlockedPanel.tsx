@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { MSG_SEM_PERMISSAO } from "../lib/tasks";
 import type { Task } from "../types";
 
 /** Painel de bloqueio aguardando instrução (Nível 2).
@@ -9,12 +10,15 @@ export default function BlockedPanel({
   task,
   onContinue,
   busy,
+  canAct,
 }: {
   task: Task;
   onContinue: (instruction: string) => void;
   busy: boolean;
+  canAct: boolean;
 }) {
   const [instruction, setInstruction] = useState(task.resume_instruction ?? "");
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   return (
     <div className="card warn" id="bloqueio-instrucao">
@@ -55,7 +59,11 @@ export default function BlockedPanel({
         />
       </div>
       <div className="form-actions">
-        <button disabled={busy || !instruction.trim()} onClick={() => onContinue(instruction.trim())}>
+        <button
+          disabled={busy || !instruction.trim() || !canAct}
+          title={actTitle}
+          onClick={() => onContinue(instruction.trim())}
+        >
           {busy ? "retomando…" : "▶ continuar execução"}
         </button>
         <span className="muted small">

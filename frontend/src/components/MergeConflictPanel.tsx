@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { MSG_SEM_PERMISSAO } from "../lib/tasks";
 import type { Task, TaskStep } from "../types";
 
 /** Painel de conflito de merge (task `blocked` por conflito na integração).
@@ -11,16 +12,19 @@ export default function MergeConflictPanel({
   steps,
   onInstructAndRetry,
   busy,
+  canAct,
 }: {
   task: Task;
   steps: TaskStep[];
   onInstructAndRetry: (instruction: string, position: number) => void;
   busy: boolean;
+  canAct: boolean;
 }) {
   const sorted = [...steps].sort((a, b) => a.position - b.position);
   const merger = sorted.find((s) => s.robot?.role === "merge") ?? null;
   const developer = sorted.find((s) => s.robot?.role === "implement" && !s.post_merge) ?? null;
   const [instruction, setInstruction] = useState(task.feedback ?? task.error ?? "");
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   if (!merger) return null;
 
@@ -53,7 +57,8 @@ export default function MergeConflictPanel({
       <div className="form-inline" style={{ gap: 8 }}>
         {merger && (
           <button
-            disabled={busy || !instruction.trim()}
+            disabled={busy || !instruction.trim() || !canAct}
+            title={actTitle}
             onClick={() => onInstructAndRetry(instruction.trim(), merger.position)}
           >
             {busy ? "reenviando…" : `enviar e repetir o ${merger.robot?.name ?? "merger"}`}
@@ -62,7 +67,8 @@ export default function MergeConflictPanel({
         {developer && (
           <button
             className="warn-btn"
-            disabled={busy || !instruction.trim()}
+            disabled={busy || !instruction.trim() || !canAct}
+            title={actTitle}
             onClick={() => onInstructAndRetry(instruction.trim(), developer.position)}
           >
             retornar ao developer (resolver na branch)

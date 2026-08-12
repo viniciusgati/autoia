@@ -28,12 +28,14 @@ from ..models import (
     TASK_WAITING_APPROVAL,
     Pipeline,
     Repository,
+    RepositoryUser,
     RunEvent,
     StepSummary,
     SubTask,
     Task,
     TaskProposal,
     TaskStep,
+    User,
 )
 from ..schemas import (
     ApproveStepRequest,
@@ -41,6 +43,7 @@ from ..schemas import (
     BouncebackRequest,
     FeedbackCreate,
     InstructionRequest,
+    ResponsibleUpdate,
     RetryRequest,
     ReviewRequest,
     StepDiffOut,
@@ -59,7 +62,7 @@ from ..timeline import derive_task_occurrences, derive_task_timeline
 from ..worker import gitops
 from ..worker.runner import _effective, _pm_decide, _system_event, _task_workspace, create_child_task
 from ..worker.summarizer import summarize_task
-from .deps import get_repository_or_404, get_session, get_settings
+from .deps import get_repository_or_404, get_session, get_settings, is_repo_admin, require_auth
 from .etag import conditional
 
 log = logging.getLogger("autoia.api")
@@ -75,6 +78,7 @@ def _task_query(session: Session):
         joinedload(Task.repository),
         joinedload(Task.subtasks),
         joinedload(Task.proposals),
+        joinedload(Task.responsible),
         selectinload(Task.summaries),
     )
 
@@ -83,6 +87,7 @@ def _task_list_query(session: Session):
     """Query leve p/ listagens: sem resumos LLM, propostas e subtarefas."""
     return session.query(Task).options(
         joinedload(Task.steps).joinedload(TaskStep.robot),
+        joinedload(Task.responsible),
     )
 
 
@@ -113,6 +118,8 @@ def _task_list_item(task: Task) -> TaskListItem:
         created_at=task.created_at,
         updated_at=task.updated_at,
         parent_task_id=task.parent_task_id,
+        responsible_id=task.responsible_id,
+        responsible=task.responsible,
         steps=[
             TaskStepListOut(
                 id=st.id,
@@ -141,11 +148,50 @@ def _get_task_or_404(session: Session, task_id: int) -> Task:
     return task
 
 
+def _upsert_repo_member(session: Session, repo_id: int, user_id: int, role: str = "member") -> RepositoryUser:
+    """Upsert idempotente de `repository_users(repo, user, role)` — não duplica."""
+    member = (
+        session.query(RepositoryUser)
+        .filter(
+            RepositoryUser.repository_id == repo_id,
+            RepositoryUser.user_id == user_id,
+        )
+        .first()
+    )
+    if member is None:
+        member = RepositoryUser(repository_id=repo_id, user_id=user_id, role=role)
+        session.add(member)
+    else:
+        member.role = role
+    return member
+
+
+def _ensure_can_act(session: Session, task: Task, user: User | None) -> None:
+    """Permissão de atuação numa tarefa (TODAS as mutações da lista fechada).
+
+    - `user=None` (auth OFF): permite — comportamento legado preservado.
+    - Sem responsável definido: qualquer autenticado atua.
+    - Com responsável: só ele, admin do projeto ou admin global (403 caso contrário).
+    """
+    if user is None:
+        return
+    if task.responsible_id is None:
+        return
+    if user.id == task.responsible_id or user.is_admin:
+        return
+    if is_repo_admin(session, user, task.repository_id):
+        return
+    raise HTTPException(
+        403, "somente o responsável ou admin do projeto pode atuar nesta tarefa"
+    )
+
+
 @router.post("", response_model=TaskOut, status_code=201)
 def create_task(
     data: TaskCreate,
     session: Session = Depends(get_session),
     settings=Depends(get_settings),
+    user: User | None = Depends(require_auth),
 ):
     get_repository_or_404(session, data.repository_id)
     pipeline = session.get(Pipeline, data.pipeline_id)
@@ -164,6 +210,8 @@ def create_task(
         kind=data.kind,
         executor=data.executor,
         budget_limit=data.budget_limit if data.budget_limit is not None else settings.task_budget,
+        # Default = criador; com auth OFF (user=None) fica NULL até reatribuição.
+        responsible_id=user.id if user else None,
     )
     for step in sorted(pipeline.steps, key=lambda x: x.position):
         task.steps.append(
@@ -216,6 +264,30 @@ def get_task(task_id: int, session: Session = Depends(get_session)):
     return _get_task_or_404(session, task_id)
 
 
+@router.put("/{task_id}/responsible", response_model=TaskOut)
+def assign_responsible(
+    task_id: int,
+    data: ResponsibleUpdate,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Reatribui o responsável por uma tarefa.
+
+    Permissão: admin global, admin do projeto ou o próprio responsável atual
+    (mesma regra de `_ensure_can_act`). O usuário alvo vira membro do projeto
+    (upsert idempotente de `repository_users`, role `member`).
+    """
+    task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
+    target = session.get(User, data.user_id)
+    if target is None:
+        raise HTTPException(404, "usuário não encontrado")
+    task.responsible_id = target.id
+    _upsert_repo_member(session, task.repository_id, target.id)
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
 # ---------- Propostas de tasks filhas (aprovação humana) ----------
 
 
@@ -237,10 +309,12 @@ def accept_proposal(
     task_id: int,
     proposal_id: int,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Aprova a proposta e cria a task filha real (valida `allow_external_tasks`
     quando a proposta mira outro repositório)."""
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     proposal = _get_proposal_or_404(task, proposal_id)
     if proposal.status != "pending":
         raise HTTPException(400, f"proposta já foi {proposal.status}")
@@ -278,8 +352,10 @@ def reject_proposal(
     task_id: int,
     proposal_id: int,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     proposal = _get_proposal_or_404(task, proposal_id)
     if proposal.status != "pending":
         raise HTTPException(400, f"proposta já foi {proposal.status}")
@@ -297,8 +373,10 @@ def start_task(
     task_id: int,
     session: Session = Depends(get_session),
     settings=Depends(get_settings),
+    user: User | None = Depends(require_auth),
 ):
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status != TASK_CREATED:
         raise HTTPException(400, f"tarefa não está em 'created' (status atual: {task.status})")
     task.branch = f"{settings.branch_prefix}/task-{task.id}"
@@ -309,9 +387,14 @@ def start_task(
 
 
 @router.post("/{task_id}/pause", response_model=TaskOut)
-def pause_task(task_id: int, session: Session = Depends(get_session)):
+def pause_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
     """Pausa uma tarefa em andamento (worker para de reclamar fases)."""
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status not in (TASK_QUEUED, TASK_IN_PROGRESS):
         raise HTTPException(
             400, f"só dá para pausar tarefa em andamento (status atual: {task.status})"
@@ -324,9 +407,14 @@ def pause_task(task_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/{task_id}/resume", response_model=TaskOut)
-def resume_task(task_id: int, session: Session = Depends(get_session)):
+def resume_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
     """Retoma uma tarefa pausada (volta para a fila; fases pendentes re-executam)."""
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status != TASK_PAUSED:
         raise HTTPException(400, f"tarefa não está pausada (status atual: {task.status})")
     task.status = TASK_QUEUED
@@ -337,9 +425,14 @@ def resume_task(task_id: int, session: Session = Depends(get_session)):
 
 
 @router.post("/{task_id}/cancel", response_model=TaskOut)
-def cancel_task(task_id: int, session: Session = Depends(get_session)):
+def cancel_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
     """Cancela uma tarefa: terminal, o pipeline não avança nem integra mais."""
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status in (TASK_DONE, TASK_FAILED, TASK_CANCELLED):
         raise HTTPException(
             400, f"tarefa em estado terminal '{task.status}' não pode ser cancelada"
@@ -360,9 +453,13 @@ def _anchor_step(task: Task) -> TaskStep:
 
 @router.post("/{task_id}/review", response_model=TaskOut)
 def review_task(
-    task_id: int, data: ReviewRequest, session: Session = Depends(get_session)
+    task_id: int,
+    data: ReviewRequest,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status != TASK_NEEDS_REVIEW:
         raise HTTPException(400, f"tarefa não está aguardando revisão (status: {task.status})")
 
@@ -389,6 +486,7 @@ def bounceback_task(
     task_id: int,
     data: BouncebackRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Retorna o pipeline para uma fase anterior a partir de ``needs_review``.
 
@@ -404,6 +502,7 @@ def bounceback_task(
     bounce-back automático do worker).
     """
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status != TASK_NEEDS_REVIEW:
         raise HTTPException(400, f"tarefa não está aguardando revisão (status: {task.status})")
 
@@ -476,6 +575,7 @@ def retry_step(
     position: int,
     data: RetryRequest | None = None,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Reabre uma fase para re-execução, opcionalmente com uma nota (feedback externo).
 
@@ -487,6 +587,7 @@ def retry_step(
     que vale apenas para o bounce-back automático do worker.
     """
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status == "created":
         raise HTTPException(400, "tarefa ainda não foi iniciada")
     step = next((st for st in task.steps if st.position == position), None)
@@ -514,6 +615,7 @@ def approve_step(
     task_id: int,
     data: ApproveStepRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Aprovação humana de uma fase com `pause_before` (gate no pipeline).
 
@@ -522,6 +624,7 @@ def approve_step(
     entra no handoff da fase aprovada.
     """
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status != TASK_WAITING_APPROVAL:
         raise HTTPException(
             400,
@@ -567,6 +670,7 @@ def update_task(
     task_id: int,
     data: TaskUpdateRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Edição humana da história (descrição + critérios de aceite).
 
@@ -578,10 +682,12 @@ def update_task(
     """
     if data.details is not None:
         task = _get_task_or_404(session, task_id)
+        _ensure_can_act(session, task, user)
         task.details = data.details
         session.commit()
         return _get_task_or_404(session, task_id)
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status not in ("created", TASK_WAITING_APPROVAL):
         raise HTTPException(
             400,
@@ -598,27 +704,41 @@ def update_task(
 
 @router.post("/{task_id}/feedback", response_model=TaskOut)
 def set_feedback(
-    task_id: int, data: FeedbackCreate, session: Session = Depends(get_session)
+    task_id: int,
+    data: FeedbackCreate,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Anexa/sobrescreve uma nota externa (erro de deploy, pedido de ajuste...) que as
     próximas fases recebem no handoff e no prompt."""
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     task.feedback = data.text
     session.commit()
     return _get_task_or_404(session, task_id)
 
 
 @router.delete("/{task_id}/feedback", response_model=TaskOut)
-def clear_feedback(task_id: int, session: Session = Depends(get_session)):
+def clear_feedback(
+    task_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     task.feedback = None
     session.commit()
     return _get_task_or_404(session, task_id)
 
 
 @router.delete("/{task_id}", status_code=204)
-def delete_task(task_id: int, session: Session = Depends(get_session)):
+def delete_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status not in ("created",):
         raise HTTPException(400, f"só é possível excluir tasks com status 'created' (atual: {task.status})")
     session.delete(task)
@@ -631,9 +751,11 @@ def pm_decide(
     request: Request,
     background_tasks: BackgroundTasks,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Dispara o robô PM para decidir o rumo de uma tarefa travada (em background)."""
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status not in (TASK_FAILED, TASK_NEEDS_REVIEW, TASK_BLOCKED):
         raise HTTPException(
             400, f"PM só decide em tarefas travadas (status atual: {task.status})"
@@ -703,6 +825,7 @@ def continue_blocked(
     task_id: int,
     data: BlockedContinueRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Retoma uma fase bloqueada com a instrução do usuário.
 
@@ -712,6 +835,7 @@ def continue_blocked(
     aparece na timeline como intervenção do usuário.
     """
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status != TASK_BLOCKED:
         raise HTTPException(
             400, f"tarefa não está bloqueada aguardando instrução (status: {task.status})"
@@ -975,6 +1099,7 @@ def send_instruction(
     task_id: int,
     data: InstructionRequest,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
     """Canal de trabalho do workspace: envia uma instrução ao agente e continua.
 
@@ -983,6 +1108,7 @@ def send_instruction(
     (nova execução — o histórico anterior permanece intacto).
     """
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     if task.status == "created":
         raise HTTPException(400, "tarefa ainda não foi iniciada")
     instruction = data.instruction.strip()

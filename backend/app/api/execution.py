@@ -26,10 +26,11 @@ from ..models import (
     Task,
     TaskProposal,
     TaskStep,
+    User,
 )
 from ..schemas import ExecutionOut, RunEventOut, TaskProposalOut, WorkerStatusOut
-from .dashboard import _build_notices
-from .deps import get_session, get_settings
+from .dashboard import _build_notices, _user_repo_ids
+from .deps import get_session, get_settings, require_auth
 from .etag import conditional
 from .tasks import _task_list_item
 
@@ -62,10 +63,19 @@ def execution(
     response: Response = None,
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
+    user: User | None = Depends(require_auth),
 ):
-    # Token barato (304): versão de tasks + eventos + propostas + heartbeat do worker.
+    # Com auth ON, a página global fica restrita aos projetos do usuário.
+    repo_ids: list[int] | None = None
+    if user is not None:
+        repo_ids = _user_repo_ids(session, user.id)
+
     def _scoped(q):
-        return q.filter(Task.repository_id == repository_id) if repository_id is not None else q
+        if repository_id is not None:
+            return q.filter(Task.repository_id == repository_id)
+        if repo_ids is not None:
+            return q.filter(Task.repository_id.in_(repo_ids))
+        return q
 
     max_task_ts = _scoped(session.query(func.max(Task.updated_at))).scalar()
     event_q = (
@@ -94,21 +104,17 @@ def execution(
     if not_modified is not None:
         return not_modified
 
-    # Tasks ativas (filtro opcional por projeto)
-    task_q = session.query(Task)
-    if repository_id is not None:
-        task_q = task_q.filter(Task.repository_id == repository_id)
+    # Tasks ativas (filtro opcional por projeto / projetos do usuário)
     tasks = (
-        task_q.filter(Task.status.in_(ACTIVE_STATUSES))
+        _scoped(session.query(Task))
+        .filter(Task.status.in_(ACTIVE_STATUSES))
         .order_by(Task.updated_at.desc())
         .limit(50)
         .all()
     )
 
     # Eventos ao vivo das fases running (últimos ~30 por fase)
-    running_q = session.query(TaskStep).join(Task).filter(TaskStep.status == "running")
-    if repository_id is not None:
-        running_q = running_q.filter(Task.repository_id == repository_id)
+    running_q = _scoped(session.query(TaskStep).join(Task)).filter(TaskStep.status == "running")
     current_events: dict[str, list[RunEventOut]] = {}
     for step in running_q.order_by(TaskStep.id.desc()).limit(10).all():
         events = (
@@ -126,12 +132,16 @@ def execution(
         proposal_q = proposal_q.join(Task, TaskProposal.task_id == Task.id).filter(
             Task.repository_id == repository_id
         )
+    elif repo_ids is not None:
+        proposal_q = proposal_q.join(Task, TaskProposal.task_id == Task.id).filter(
+            Task.repository_id.in_(repo_ids)
+        )
     proposals = proposal_q.order_by(TaskProposal.created_at.desc()).limit(50).all()
 
     return ExecutionOut(
         tasks=[_task_list_item(t) for t in tasks],
         current_events=current_events,
         proposals=[TaskProposalOut.model_validate(p) for p in proposals],
-        notices=_build_notices(session),
+        notices=_build_notices(session, repo_ids),
         worker=_worker_status(settings),
     )

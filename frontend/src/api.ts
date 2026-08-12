@@ -2,8 +2,11 @@ import type {
   Artifact,
   Dashboard,
   Execution,
+  MyProject,
+  MyTask,
   Pipeline,
   Repository,
+  RepositoryMember,
   Robot,
   RunEvent,
   StepDiff,
@@ -13,12 +16,30 @@ import type {
   TaskProposal,
   TaskSummary,
   TimelineEvent,
+  User,
   Workspace,
 } from "./types";
 
 /** Cache de ETag/body em memória: reenvia If-None-Match e reaproveita o corpo em 304. */
 const etagCache = new Map<string, { etag: string; body: unknown }>();
 const ETAG_CACHE_MAX = 200;
+
+/** Callback global de sessão expirada (401 em qualquer rota protegida) —
+ *  registrado pelo `AuthProvider` via `setOnUnauthorized`. */
+let onUnauthorized: (() => void) | null = null;
+
+/** Registra o tratador global de 401 (limpe com `setOnUnauthorized(null)`). */
+export function setOnUnauthorized(fn: (() => void) | null): void {
+  onUnauthorized = fn;
+}
+
+/** Rotas cujo 401 NÃO representa sessão expirada: login = credencial inválida,
+ *  `me`/`auth/config` = parte do boot da auth (o próprio fluxo trata). */
+const NO_UNAUTHORIZED_CALLBACK = new Set([
+  "/api/auth/login",
+  "/api/auth/me",
+  "/api/auth/config",
+]);
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const method = init?.method ?? "GET";
@@ -28,7 +49,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const cached = etagCache.get(path);
   if (isGet && cached) headers.set("If-None-Match", cached.etag);
 
-  const response = await fetch(path, { ...init, headers });
+  const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
+  if (response.status === 401 && !NO_UNAUTHORIZED_CALLBACK.has(path)) {
+    // Sessão inválida/expirada durante o uso → avisa o AuthProvider (Login).
+    onUnauthorized?.();
+  }
   if (response.status === 304 && cached) {
     return cached.body as T;
   }
@@ -55,6 +80,36 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const api = {
+  // auth (cookie autoia_session)
+  getAuthConfig: () => request<{ enabled: boolean }>("/api/auth/config"),
+  login: (email: string, password: string) =>
+    request<User>("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password }),
+    }),
+  logout: () => request<void>("/api/auth/logout", { method: "POST" }),
+  me: () => request<User>("/api/auth/me"),
+
+  // usuários (admin global)
+  listUsers: () => request<User[]>("/api/users"),
+  createUser: (data: { name: string; email: string; password: string; role?: string }) =>
+    request<User>("/api/users", { method: "POST", body: JSON.stringify(data) }),
+  updateUser: (id: number, data: { name?: string; email?: string; password?: string; role?: string; active?: boolean }) =>
+    request<User>(`/api/users/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+
+  // dashboard pessoal
+  getMyTasks: (signal?: AbortSignal) => request<MyTask[]>("/api/me/tasks", { signal }),
+  getMyProjects: (signal?: AbortSignal) => request<MyProject[]>("/api/me/projects", { signal }),
+
+  // membros do projeto + atribuição de responsável
+  listMembers: (repoId: number, signal?: AbortSignal) =>
+    request<RepositoryMember[]>(`/api/repositories/${repoId}/members`, { signal }),
+  assignResponsible: (taskId: number, userId: number) =>
+    request<Task>(`/api/tasks/${taskId}/responsible`, {
+      method: "PUT",
+      body: JSON.stringify({ user_id: userId }),
+    }),
+
   // repositories
   listRepositories: (signal?: AbortSignal) => request<Repository[]>("/api/repositories", { signal }),
   createRepository: (data: { name: string; url: string; default_branch: string }) =>
@@ -193,7 +248,7 @@ export const api = {
     return request<RunEvent[]>(`/api/steps/${stepId}/events${query}`, { signal });
   },
   getLog: async (stepId: number): Promise<string> => {
-    const response = await fetch(`/api/steps/${stepId}/log`);
+    const response = await fetch(`/api/steps/${stepId}/log`, { credentials: "same-origin" });
     return response.text();
   },
 
@@ -218,4 +273,7 @@ export const api = {
   getArtifactUrl: (artifactId: number) => `/api/steps/artifacts/${artifactId}/file`,
   deleteArtifacts: (stepId: number) =>
     request<{ deleted: number }>(`/api/steps/${stepId}/artifacts`, { method: "DELETE" }),
+
+  // tratador global de 401 (sessão expirada)
+  setOnUnauthorized,
 };

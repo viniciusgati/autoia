@@ -67,6 +67,65 @@ class Repository(Base):
     tasks: Mapped[list["Task"]] = relationship(back_populates="repository")
 
 
+class User(Base):
+    """Usuário humano da plataforma (autenticação por sessão de cookie).
+
+    O primeiro registro (bootstrap via `POST /api/auth/register` com `users`
+    vazio) vira admin global; os demais são criados por admin via API.
+    """
+
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100))
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
+    password_hash: Mapped[str] = mapped_column(String(255))
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    active: Mapped[bool] = mapped_column(default=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    @property
+    def is_admin(self) -> bool:
+        """Admin global: gerencia usuários e atua em qualquer tarefa."""
+        return self.role == "admin"
+
+
+class Session(Base):
+    """Sessão de autenticação (cookie `autoia_session`)."""
+
+    __tablename__ = "sessions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    token: Mapped[str] = mapped_column(String(128), unique=True, index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    expires_at: Mapped[datetime] = mapped_column()
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    user: Mapped[User] = relationship()
+
+
+class RepositoryUser(Base):
+    """Participação de um usuário em um projeto (papel `member` | `admin`).
+
+    Upsertado automaticamente ao reatribuir uma tarefa (role `member`) e
+    gerenciável por admin do projeto via `/api/repositories/{id}/members`.
+    """
+
+    __tablename__ = "repository_users"
+    __table_args__ = (
+        UniqueConstraint("repository_id", "user_id", name="uq_repo_user"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repository_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"))
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"))
+    role: Mapped[str] = mapped_column(String(20), default="member")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    user: Mapped[User] = relationship()
+    repository: Mapped[Repository] = relationship()
+
+
 class Robot(Base):
     __tablename__ = "robots"
     __table_args__ = (
@@ -138,6 +197,9 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
     parent_task_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tasks.id"), nullable=True)
+    # Responsável explícito pela tarefa (default = criador). NULL em tasks
+    # pré-existentes até reatribuição: "sem responsável = qualquer autenticado atua".
+    responsible_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
 
     # Detalhes da implementação adicionados MANUALMENTE pelo usuário durante o
     # fluxo (complementam o contexto original, diferenciados de description).
@@ -156,6 +218,7 @@ class Task(Base):
     pipeline: Mapped[Pipeline] = relationship()
     parent: Mapped["Task | None"] = relationship(remote_side="Task.id", back_populates="children")
     children: Mapped[list["Task"]] = relationship(back_populates="parent")
+    responsible: Mapped["User | None"] = relationship(foreign_keys=[responsible_id])
     steps: Mapped[list["TaskStep"]] = relationship(
         back_populates="task",
         order_by="TaskStep.position",
@@ -299,9 +362,14 @@ class TaskStep(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Snapshot do responsável da task no momento do claim + quem concluiu a fase.
+    responsible_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    finished_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
 
     task: Mapped[Task] = relationship(back_populates="steps")
     robot: Mapped[Robot] = relationship()
+    responsible: Mapped["User | None"] = relationship(foreign_keys=[responsible_id])
+    finished_by: Mapped["User | None"] = relationship(foreign_keys=[finished_by_id])
     step_summaries: Mapped[list["StepSummary"]] = relationship(
         back_populates="step",
         order_by="StepSummary.id.desc()",

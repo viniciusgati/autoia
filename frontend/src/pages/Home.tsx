@@ -1,9 +1,10 @@
 import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import StatusBadge from "../components/StatusBadge";
 import { usePolling } from "../lib/polling";
-import type { Dashboard as DashboardData, Repository, TaskListItem, TaskStepListItem } from "../types";
+import type { Dashboard as DashboardData, MyProject, MyTask, Repository, TaskListItem, TaskStepListItem } from "../types";
 
 /** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
 function faseAtual(task: TaskListItem): TaskStepListItem | null {
@@ -13,6 +14,15 @@ function faseAtual(task: TaskListItem): TaskStepListItem | null {
     steps.find((s) => s.status === "pending") ??
     steps[task.current_step] ??
     null
+  );
+}
+
+/** Tarefa minha que precisa de ação humana (vai primeiro, com selo). */
+function aguardaMinha(t: MyTask): boolean {
+  return (
+    t.status === "needs_review" ||
+    t.status === "waiting_approval" ||
+    t.status === "blocked"
   );
 }
 
@@ -46,6 +56,7 @@ function tempoRelativo(iso: string): string {
 }
 
 export default function Home() {
+  const { user } = useAuth();
   const [dash, setDash] = useState<DashboardData | null>(null);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
@@ -53,6 +64,14 @@ export default function Home() {
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
   const [branch, setBranch] = useState("main");
+
+  // Dashboard pessoal (auth ON): tarefas do usuário + participações.
+  const [myTasks, setMyTasks] = useState<MyTask[] | null>(null);
+  const [myProjects, setMyProjects] = useState<MyProject[] | null>(null);
+  const [myTasksError, setMyTasksError] = useState("");
+  const [myProjectsError, setMyProjectsError] = useState("");
+  const [myTasksLoading, setMyTasksLoading] = useState(false);
+  const [myProjectsLoading, setMyProjectsLoading] = useState(false);
 
   const load = (signal?: AbortSignal) =>
     Promise.all([api.getDashboard(undefined, signal), api.listRepositories(signal), api.listTasks(undefined, signal)])
@@ -64,8 +83,45 @@ export default function Home() {
       })
       .catch((e) => setError(String(e)));
 
+  const loadMyTasks = (signal?: AbortSignal) => {
+    setMyTasksLoading(true);
+    return api
+      .getMyTasks(signal)
+      .then((t) => {
+        setMyTasks(t);
+        setMyTasksError("");
+      })
+      .catch((e) => setMyTasksError(String(e)))
+      .finally(() => setMyTasksLoading(false));
+  };
+
+  const loadMyProjects = (signal?: AbortSignal) => {
+    setMyProjectsLoading(true);
+    return api
+      .getMyProjects(signal)
+      .then((p) => {
+        setMyProjects(p);
+        setMyProjectsError("");
+      })
+      .catch((e) => setMyProjectsError(String(e)))
+      .finally(() => setMyProjectsLoading(false));
+  };
+
+  const loggedIn = user != null;
+
   // Poll global da Home: 10s (dados agregados + listas leves).
   usePolling(load, 10000, []);
+
+  // Poll das seções pessoais (só com usuário logado).
+  usePolling(
+    (signal) => {
+      if (!loggedIn) return;
+      void loadMyTasks(signal);
+      void loadMyProjects(signal);
+    },
+    10000,
+    [loggedIn],
+  );
 
   const addRepo = async (e: FormEvent) => {
     e.preventDefault();
@@ -79,6 +135,123 @@ export default function Home() {
       setError(String(err));
     }
   };
+
+  // ── Dashboard pessoal (auth ON): tarefas do usuário + participações ──
+  if (user) {
+    const sortedMyTasks = [...(myTasks ?? [])].sort((a, b) => {
+      const aW = aguardaMinha(a) ? 1 : 0;
+      const bW = aguardaMinha(b) ? 1 : 0;
+      if (aW !== bW) return bW - aW;
+      return new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime();
+    });
+    const awaitCount = (myTasks ?? []).filter(aguardaMinha).length;
+
+    return (
+      <div>
+        <h2>Olá, {user.name}</h2>
+
+        <div className="cards">
+          <div className="card">
+            <div className="card-value">{myProjects?.length ?? "…"}</div>
+            <div className="card-label">projetos</div>
+          </div>
+          <div className="card">
+            <div className="card-value">{myTasks?.length ?? "…"}</div>
+            <div className="card-label">tarefas</div>
+          </div>
+          <div className="card">
+            <div className="card-value">{awaitCount}</div>
+            <div className="card-label">aguardando você</div>
+          </div>
+        </div>
+
+        {/* Minhas tarefas */}
+        <h3>Minhas tarefas</h3>
+        {myTasksLoading && myTasks === null ? (
+          <div className="my-list-skeleton">
+            <div className="skeleton" style={{ height: 52 }} />
+            <div className="skeleton" style={{ height: 52 }} />
+            <div className="skeleton" style={{ height: 52 }} />
+          </div>
+        ) : myTasksError ? (
+          <div className="section-error">
+            <span>{myTasksError}</span>
+            <button onClick={() => void loadMyTasks()}>Tentar novamente</button>
+          </div>
+        ) : myTasks === null ? (
+          <p className="muted">carregando…</p>
+        ) : myTasks.length === 0 ? (
+          <p className="muted">Nenhuma tarefa atribuída a você</p>
+        ) : (
+          <div className="my-tasks">
+            {sortedMyTasks.map((t) => (
+              <Link
+                key={t.id}
+                to={`/${t.repository_id}/tasks/${t.id}`}
+                className="my-task-row"
+              >
+                <div className="my-task-line">
+                  <span className="my-task-title">#{t.id} {t.title}</span>
+                  {aguardaMinha(t) && (
+                    <span className="badge badge-warn my-task-await">aguardando você</span>
+                  )}
+                  <StatusBadge status={t.status} />
+                </div>
+                <div className="my-task-sub">
+                  <span>{t.repository_name}</span>
+                  <span className="mono">{t.cost_spent.toFixed(2)} US$</span>
+                  <span className="muted">{tempoRelativo(t.updated_at)}</span>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+
+        {/* Meus projetos */}
+        <h3>Meus projetos</h3>
+        {myProjectsLoading && myProjects === null ? (
+          <div className="my-list-skeleton">
+            <div className="skeleton" style={{ height: 88 }} />
+            <div className="skeleton" style={{ height: 88 }} />
+          </div>
+        ) : myProjectsError ? (
+          <div className="section-error">
+            <span>{myProjectsError}</span>
+            <button onClick={() => void loadMyProjects()}>Tentar novamente</button>
+          </div>
+        ) : myProjects === null ? (
+          <p className="muted">carregando…</p>
+        ) : myProjects.length === 0 ? (
+          <p className="muted">Você ainda não participa de nenhum projeto</p>
+        ) : (
+          <div className="project-grid">
+            {myProjects.map((p) => (
+              <Link key={p.id} to={`/${p.id}`} className="project-card">
+                <div className="project-card-head">
+                  <span className="project-card-name">{p.name}</span>
+                  <span className="project-card-arrow">→</span>
+                </div>
+                <div className="project-card-meta">
+                  <span className="muted small">
+                    {p.role === "admin" ? "admin do projeto" : "membro"}
+                  </span>
+                </div>
+                <div className="project-card-stats">
+                  <span>{p.my_tasks_total} tarefas</span>
+                  {p.my_tasks_active > 0 && (
+                    <span className="project-card-active">{p.my_tasks_active} ativas</span>
+                  )}
+                  {p.my_tasks_pending > 0 && (
+                    <span className="project-card-active">{p.my_tasks_pending} aguardando</span>
+                  )}
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   if (!dash || !repos.length === undefined) return <p>Carregando…</p>;
 

@@ -30,6 +30,48 @@ export interface Robot {
   created_at: string;
 }
 
+/** Usuário do sistema (auth ON). */
+export interface User {
+  id: number;
+  name: string;
+  email: string;
+  role: "admin" | "member";
+  active: boolean;
+  created_at: string;
+}
+
+/** Participação de um usuário em um projeto (GET /api/repositories/{id}/members). */
+export interface RepositoryMember {
+  id: number;
+  repository_id: number;
+  user_id: number;
+  role: string;
+  created_at: string;
+  user: User | null;
+}
+
+/** Tarefa do usuário no dashboard pessoal (GET /api/me/tasks). */
+export interface MyTask {
+  id: number;
+  repository_id: number;
+  repository_name: string;
+  title: string;
+  status: string;
+  cost_spent: number;
+  budget_limit: number;
+  updated_at: string;
+}
+
+/** Participação do usuário em um projeto (GET /api/me/projects). */
+export interface MyProject {
+  id: number;
+  name: string;
+  role: string;
+  my_tasks_total: number;
+  my_tasks_active: number;
+  my_tasks_pending: number;
+}
+
 export interface PipelineStep {
   id: number;
   position: number;
@@ -162,6 +204,8 @@ export interface Task {
   summary: TaskSummary | null;
   created_at: string;
   updated_at: string;
+  responsible_id: number | null;
+  responsible: User | null;
   steps: TaskStep[];
   subtasks: SubTask[];
   proposals: TaskProposal[];
@@ -204,6 +248,8 @@ export interface TaskListItem {
   created_at: string;
   updated_at: string;
   parent_task_id: number | null;
+  responsible_id: number | null;
+  responsible: User | null;
   steps: TaskStepListItem[];
 }
 
@@ -235,6 +281,10 @@ export interface Dashboard {
   guardrail_events: number;
   recent_guardrails: RunEvent[];
   notices: Notice[];
+  // Dashboard pessoal (auth ON): usuário logado, tarefas dele e participações.
+  user: User | null;
+  my_tasks: MyTask[];
+  projects: MyProject[];
 }
 
 export interface WorkerStatus {

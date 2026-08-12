@@ -318,7 +318,12 @@ def claim_next(session_factory) -> int | None:
                     TaskStep.id != step.id,
                 ),
             )
-            .values(status=STEP_RUNNING, started_at=utcnow())
+            .values(
+                status=STEP_RUNNING,
+                started_at=utcnow(),
+                # Snapshot do responsável da task no momento do claim.
+                responsible_id=step.task.responsible_id,
+            )
         )
         if result.rowcount != 1:
             return None
@@ -338,6 +343,10 @@ def _system_event(s: Session, step: TaskStep | None, kind: str, payload: dict) -
 
 def _finish(step: TaskStep) -> None:
     step.finished_at = utcnow()
+    # Quem "concluiu" a fase: o responsável snapshotado no claim (o worker executa
+    # em nome do dono da task). Nunca sobrescreve uma conclusão já registrada.
+    if step.finished_by_id is None:
+        step.finished_by_id = step.responsible_id
 
 
 def _build_step_context(
@@ -1711,6 +1720,8 @@ def create_child_task(
         executor=parent.executor,
         budget_limit=target_repo.task_budget if target_repo.task_budget is not None else parent.budget_limit,
         parent_task_id=parent.id,
+        # Tarefas geradas por spawn herdam o responsável da task pai (se definido).
+        responsible_id=parent.responsible_id,
     )
     s.add(child)
     s.flush()  # para obter child.id

@@ -1,4 +1,4 @@
-"""Endpoints de repositórios (registro + clone + config)."""
+"""Endpoints de repositórios (registro + clone + config + membros)."""
 
 from __future__ import annotations
 
@@ -9,14 +9,36 @@ import shutil
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
-from ..models import Repository
-from ..schemas import RepositoryCreate, RepositoryOut, RepositoryUpdate
+from ..models import Repository, RepositoryUser, User
+from ..schemas import (
+    RepositoryCreate,
+    RepositoryMemberCreate,
+    RepositoryOut,
+    RepositoryUpdate,
+    RepositoryUserOut,
+    RepositoryUserUpdate,
+)
 from ..worker import gitops
-from .deps import get_repository_or_404, get_session, get_settings
+from .deps import (
+    get_repository_or_404,
+    get_session,
+    get_settings,
+    is_repo_admin,
+    require_auth,
+)
 
 log = logging.getLogger("autoia.api")
 
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
+
+
+def _ensure_repo_admin(session: Session, user: User | None, repo: Repository) -> None:
+    """POST/PATCH/DELETE de membros exige admin global ou admin do projeto."""
+    if user is None:
+        return
+    if user.is_admin or is_repo_admin(session, user, repo.id):
+        return
+    raise HTTPException(403, "apenas admin global ou admin do projeto gerencia membros")
 
 
 @router.post("", response_model=RepositoryOut, status_code=201)
@@ -102,4 +124,107 @@ def update_repository(
 def delete_repository(repo_id: int, session: Session = Depends(get_session)):
     repo = get_repository_or_404(session, repo_id)
     session.delete(repo)
+    session.commit()
+
+
+# ---------- Membros do projeto ----------
+
+
+@router.get("/{repo_id}/members", response_model=list[RepositoryUserOut])
+def list_members(
+    repo_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Participações do projeto (qualquer autenticado pode listar — alimenta o
+    controle de atribuição de tarefas; gestão exige admin do projeto)."""
+    get_repository_or_404(session, repo_id)
+    return (
+        session.query(RepositoryUser)
+        .filter(RepositoryUser.repository_id == repo_id)
+        .order_by(RepositoryUser.id)
+        .all()
+    )
+
+
+@router.post("/{repo_id}/members", response_model=RepositoryUserOut, status_code=201)
+def add_member(
+    repo_id: int,
+    data: RepositoryMemberCreate,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Adiciona um usuário como membro do projeto (admin global ou do projeto)."""
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo)
+    target = session.get(User, data.user_id)
+    if target is None:
+        raise HTTPException(404, "usuário não encontrado")
+    member = (
+        session.query(RepositoryUser)
+        .filter(
+            RepositoryUser.repository_id == repo_id,
+            RepositoryUser.user_id == data.user_id,
+        )
+        .first()
+    )
+    if member is not None:
+        raise HTTPException(409, "usuário já é membro do projeto")
+    member = RepositoryUser(
+        repository_id=repo_id, user_id=data.user_id, role=data.role
+    )
+    session.add(member)
+    session.commit()
+    session.refresh(member)
+    return member
+
+
+@router.patch("/{repo_id}/members/{user_id}", response_model=RepositoryUserOut)
+def update_member(
+    repo_id: int,
+    user_id: int,
+    data: RepositoryUserUpdate,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Altera o papel de um membro (admin global ou do projeto)."""
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo)
+    member = (
+        session.query(RepositoryUser)
+        .filter(
+            RepositoryUser.repository_id == repo_id,
+            RepositoryUser.user_id == user_id,
+        )
+        .first()
+    )
+    if member is None:
+        raise HTTPException(404, "usuário não é membro do projeto")
+    member.role = data.role
+    session.commit()
+    session.refresh(member)
+    return member
+
+
+@router.delete("/{repo_id}/members/{user_id}", status_code=204)
+def remove_member(
+    repo_id: int,
+    user_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Remove um usuário do projeto (admin global ou do projeto)."""
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo)
+    member = (
+        session.query(RepositoryUser)
+        .filter(
+            RepositoryUser.repository_id == repo_id,
+            RepositoryUser.user_id == user_id,
+        )
+        .first()
+    )
+    if member is None:
+        raise HTTPException(404, "usuário não é membro do projeto")
+    session.delete(member)
     session.commit()
