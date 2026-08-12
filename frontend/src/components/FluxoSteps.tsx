@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import StatusBadge from "./StatusBadge";
+import { MSG_SEM_PERMISSAO } from "../lib/tasks";
 import type { Task, TaskStep } from "../types";
 
 /** Lista das etapas (fases) da task com ações: repetir (falha), voltar para esta
@@ -11,13 +12,16 @@ export default function FluxoSteps({
   onRetry,
   repoId,
   taskId,
+  canAct,
 }: {
   task: Task;
   steps: TaskStep[];
   onRetry: (position: number) => void;
   repoId: number;
   taskId: number;
+  canAct: boolean;
 }) {
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
   return (
     <div className="fluxo-lista">
       {steps.map((s) => (
@@ -33,7 +37,12 @@ export default function FluxoSteps({
           </div>
           <div className="fluxo-actions">
             {(s.status === "failed" || s.status === "guardrail_blocked") && (
-              <button className="danger small" onClick={() => onRetry(s.position)}>
+              <button
+                className="danger small"
+                onClick={() => onRetry(s.position)}
+                disabled={!canAct}
+                title={actTitle}
+              >
                 repetir
               </button>
             )}
@@ -41,7 +50,8 @@ export default function FluxoSteps({
               <button
                 className="warn-btn small"
                 onClick={() => onRetry(s.position)}
-                title={`Re-executar a partir da fase ${s.position}. A nova execução aparece no fim da timeline; o histórico anterior é preservado.`}
+                disabled={!canAct}
+                title={canAct ? `Re-executar a partir da fase ${s.position}. A nova execução aparece no fim da timeline; o histórico anterior é preservado.` : actTitle}
               >
                 ← voltar para esta fase
               </button>

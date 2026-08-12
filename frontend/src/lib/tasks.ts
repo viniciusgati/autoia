@@ -1,4 +1,23 @@
-import type { TaskListItem, TaskStepListItem } from "../types";
+import type { TaskListItem, TaskStepListItem, User } from "../types";
+
+/** Tooltip dos botões de ação sem permissão (não é responsável nem admin). */
+export const MSG_SEM_PERMISSAO = "Somente o responsável ou admin do projeto pode atuar";
+
+/** Permissão de atuação numa tarefa (mutações). Com auth OFF (user null) libera —
+ *  comportamento legado. Com responsável definido: só ele, admin do projeto ou
+ *  admin global; sem responsável, qualquer autenticado atua. */
+export function podeAtuar(
+  user: User | null,
+  responsibleId: number | null,
+  isRepoAdmin: boolean,
+): boolean {
+  if (!user) return true;
+  if (responsibleId == null) return true;
+  if (user.id === responsibleId) return true;
+  if (user.role === "admin") return true;
+  if (isRepoAdmin) return true;
+  return false;
+}
 
 /** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
 export function faseAtual(task: TaskListItem): TaskStepListItem | null {

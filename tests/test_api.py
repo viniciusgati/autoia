@@ -156,6 +156,7 @@ def test_register_repository_relative_workspace(bare_repo, tmp_path, monkeypatch
             database_url=f"sqlite:///{tmp_path}/rel.db",
             workspace_dir="data/workspaces",
             log_dir="data/logs",
+            auth_enabled=False,  # comportamento legado: rotas sem sessão
         )
     )
     client = TestClient(app)

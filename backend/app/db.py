@@ -71,6 +71,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("block_reason", "TEXT"),
         ("block_question", "TEXT"),
         ("block_options", "JSON"),
+        ("responsible_id", "INTEGER REFERENCES users(id)"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
@@ -78,6 +79,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("diff_stat", "TEXT"),
         ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("goal", "TEXT"),
+        ("responsible_id", "INTEGER REFERENCES users(id)"),
+        ("finished_by_id", "INTEGER REFERENCES users(id)"),
         ("session_id", "VARCHAR(200)"),
     ],
     "pipeline_steps": [

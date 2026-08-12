@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import PhaseStepper from "./PhaseStepper";
 import StatusBadge from "./StatusBadge";
 import { faseAtual } from "../lib/tasks";
@@ -36,6 +37,7 @@ export default function TaskCard({
   onError: (message: string) => void;
 }) {
   const [busy, setBusy] = useState(false);
+  const { user } = useAuth();
 
   const alert = precisaHumano(task);
   const hasGuardrail = task.steps.some((s) => s.status === "guardrail_blocked");
@@ -48,6 +50,8 @@ export default function TaskCard({
       : "—";
   const costPct = task.budget_limit > 0 ? task.cost_spent / task.budget_limit : 0;
   const costHigh = costPct >= 0.8 && task.status !== "done";
+  // Minha tarefa (auth ON): destaque visual + selo "sua tarefa".
+  const isMine = user != null && task.responsible_id === user.id;
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -68,12 +72,19 @@ export default function TaskCard({
   };
 
   return (
-    <div className={`task-card${alert ? (isErr ? " task-card-err" : " task-card-warn") : ""}`}>
+    <div className={`task-card${alert ? (isErr ? " task-card-err" : " task-card-warn") : ""}${isMine ? " task-card-mine" : ""}`}>
       <div className="task-card-head">
         <Link to={`${detailPath}/${task.id}`} className="task-card-title">
           #{task.id} {task.title}
         </Link>
-        <StatusBadge status={task.status} />
+        <div className="task-card-head-right">
+          {isMine && (
+            <span className="badge badge-mine" title="você é o responsável por esta tarefa">
+              sua tarefa
+            </span>
+          )}
+          <StatusBadge status={task.status} />
+        </div>
       </div>
 
       {alert && (
@@ -91,6 +102,9 @@ export default function TaskCard({
 
       <div className="task-card-meta">
         {repoName && <span className="muted">{repoName}</span>}
+        <span className="task-card-responsible" title="responsável pela tarefa">
+          {task.responsible?.name ?? "Não atribuída"}
+        </span>
         <span className="task-card-executor" title={`executor: ${task.executor}`}>
           {task.executor === "opencode" ? "opencode" : "kimi"}
         </span>

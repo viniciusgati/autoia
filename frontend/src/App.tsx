@@ -1,8 +1,10 @@
 import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { api } from "./api";
+import { useAuth } from "./auth";
 import { DashboardIcon, PipelinesIcon, ProjectsIcon, RobotsIcon, TasksIcon, TerminalIcon } from "./components/Icons";
 import Home from "./pages/Home";
+import Login from "./pages/Login";
 import Repositories from "./pages/Repositories";
 import Robots from "./pages/Robots";
 import Pipelines from "./pages/Pipelines";
@@ -35,24 +37,35 @@ function RepoScoped({ route }: { route: "/robots" | "/pipelines" }) {
 }
 
 export default function App() {
+  const { user, authEnabled, loading, logout, logoutError } = useAuth();
   const repoId = useRepoId();
   const location = useLocation();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [workerAlive, setWorkerAlive] = useState<boolean | null>(null);
 
+  // App renderizado (não é splash nem Login): auth OFF (legado) ou usuário logado.
+  const showApp = !authEnabled || user != null;
+  // Só chama a API (rotas protegidas) com o app de fato visível: durante o boot
+  // da auth (`loading`) a flag `authEnabled` ainda é false e chamadas protegidas
+  // responderiam 401 — o que acionaria o callback global de sessão expirada e
+  // mostraria "Sessão expirada" na PRIMEIRA visita, sem nunca ter logado.
+  const appReady = !loading && showApp;
+
   useEffect(() => {
+    if (!appReady) return;
     api.listRepositories().then(setRepos).catch(() => {});
-  }, [location.pathname]);
+  }, [location.pathname, appReady]);
 
   usePolling(
     (signal) => {
+      if (!appReady) return;
       api
         .getWorkerStatus(signal)
         .then((s) => setWorkerAlive(s.alive))
         .catch(() => setWorkerAlive(false));
     },
     5000,
-    [],
+    [appReady],
   );
 
   const currentRepo = repoId != null ? repos.find((r) => r.id === repoId) : null;
@@ -66,12 +79,38 @@ export default function App() {
     );
   };
 
+  if (loading) {
+    return <div className="app-splash">Carregando…</div>;
+  }
+  if (authEnabled && !user) {
+    // Auth ON sem sessão: só a tela de Login (nenhuma rota protegida acessível).
+    return <Login />;
+  }
+
   return (
     <div className="layout">
       <header className="topbar">
         <span className="topbar-brand">autoia</span>
         <div className="topbar-right">
           <Notifications />
+          {user && (
+            <div className="topbar-user">
+              <span className="topbar-user-name" title={user.email}>
+                {user.name}
+              </span>
+              <button className="link-btn" onClick={() => void logout()}>
+                sair
+              </button>
+            </div>
+          )}
+          {logoutError && (
+            <span className="topbar-logout-error" title={logoutError}>
+              Não foi possível sair.
+              <button className="link-btn" onClick={() => void logout()}>
+                tentar novamente
+              </button>
+            </span>
+          )}
           <div className="worker-status">
             <span className={`worker-dot${workerAlive === null ? "" : workerAlive ? " worker-dot-on" : " worker-dot-off"}`} />
             <span className="worker-label">

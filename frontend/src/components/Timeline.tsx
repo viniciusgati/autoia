@@ -1,4 +1,5 @@
 import StatusBadge from "./StatusBadge";
+import { MSG_SEM_PERMISSAO } from "../lib/tasks";
 import type { TaskStep } from "../types";
 
 function bulletState(step: TaskStep): string {
@@ -15,10 +16,13 @@ interface TimelineProps {
   selectedId: number | null;
   onSelect: (id: number) => void;
   onRetry?: (position: number) => void;
+  /** Permissão de atuação (responsável/admin) — desabilita o retry. */
+  canAct?: boolean;
 }
 
-export default function Timeline({ steps, selectedId, onSelect, onRetry }: TimelineProps) {
+export default function Timeline({ steps, selectedId, onSelect, onRetry, canAct = true }: TimelineProps) {
   const sorted = [...steps].sort((a, b) => a.position - b.position);
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   return (
     <div className="timeline">
@@ -56,7 +60,8 @@ export default function Timeline({ steps, selectedId, onSelect, onRetry }: Timel
                 <button
                   className="danger timeline-retry-btn"
                   onClick={(e) => { e.stopPropagation(); onRetry(step.position); }}
-                  title="Repetir esta fase"
+                  disabled={!canAct}
+                  title={actTitle ?? "Repetir esta fase"}
                 >
                   repetir
                 </button>

@@ -1,10 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import DiffView from "../components/DiffView";
+import ResponsavelControl from "../components/ResponsavelControl";
 import { usePolling } from "../lib/polling";
+import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
-import type { StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
+import type { RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
 function statusMeta(status: string): { label: string; cls: string } {
@@ -100,12 +103,14 @@ function availablePositions(task: Task): { position: number; label: string }[] {
   }));
 }
 
-function ProposalRow({ proposal, onChanged, onError }: {
+function ProposalRow({ proposal, onChanged, onError, canAct }: {
   proposal: TaskProposal;
   onChanged: () => void;
   onError: (msg: string) => void;
+  canAct: boolean;
 }) {
   const [busy, setBusy] = useState(false);
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -123,10 +128,10 @@ function ProposalRow({ proposal, onChanged, onError }: {
       {proposal.description && <div className="ws-proposal-desc">{proposal.description}</div>}
       {proposal.status === "pending" ? (
         <div className="ws-proposal-actions">
-          <button disabled={busy} onClick={() => run(() => api.acceptProposal(proposal.task_id, proposal.id))}>
+          <button disabled={busy || !canAct} title={actTitle} onClick={() => run(() => api.acceptProposal(proposal.task_id, proposal.id))}>
             {busy ? "…" : "Aceitar"}
           </button>
-          <button className="danger" disabled={busy} onClick={() => run(() => api.rejectProposal(proposal.task_id, proposal.id))}>
+          <button className="danger" disabled={busy || !canAct} title={actTitle} onClick={() => run(() => api.rejectProposal(proposal.task_id, proposal.id))}>
             Recusar
           </button>
         </div>
@@ -179,11 +184,12 @@ function DiffModal({ taskId, position, onClose }: {
   );
 }
 
-function OccurrenceCard({ occ, onChanged, onError, onOpenDiff }: {
+function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
   occ: WorkspaceOccurrence;
   onChanged: () => void;
   onError: (msg: string) => void;
   onOpenDiff: (position: number) => void;
+  canAct: boolean;
 }) {
   const meta = occStatusMeta(occ.status);
   const running = occ.status === "running";
@@ -274,7 +280,7 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff }: {
           <h4 className="ws-section-title">Tarefas propostas</h4>
           <div className="ws-proposals">
             {occ.proposals.map((p) => (
-              <ProposalRow key={p.id} proposal={p} onChanged={onChanged} onError={onError} />
+              <ProposalRow key={p.id} proposal={p} onChanged={onChanged} onError={onError} canAct={canAct} />
             ))}
           </div>
         </section>
@@ -331,6 +337,9 @@ export default function Workspace() {
   const taskId = Number(taskIdStr);
   const repoId = Number(repoIdStr);
 
+  const { user } = useAuth();
+  const [members, setMembers] = useState<RepositoryMember[]>([]);
+
   const [ws, setWs] = useState<Workspace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [instruction, setInstruction] = useState("");
@@ -343,6 +352,21 @@ export default function Workspace() {
   // Segue automaticamente o fim da timeline conforme a execução avança; pausa
   // quando o usuário rola para cima (ler histórico) e volta quando chega ao fim.
   const [followLatest, setFollowLatest] = useState(true);
+
+  // Membros do projeto: define admin do projeto (permissão de atuação) e
+  // alimenta o controle de atribuição de responsável.
+  useEffect(() => {
+    let active = true;
+    api
+      .listMembers(repoId)
+      .then((m) => {
+        if (active) setMembers(m);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [repoId]);
 
   const refresh = () => {
     api
@@ -385,6 +409,13 @@ export default function Workspace() {
     return [...task.steps].sort((a, b) => a.position - b.position).find((s) => s.status === "pending") ?? null;
   }, [task]);
 
+  // Permissão de atuação: sem responsável qualquer autenticado atua; com
+  // responsável, só ele, admin do projeto ou admin global (auth OFF libera).
+  const isRepoAdmin =
+    user != null && members.some((m) => m.role === "admin" && m.user_id === user.id);
+  const canAct = podeAtuar(user, task?.responsible_id ?? null, isRepoAdmin);
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
+
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -398,6 +429,11 @@ export default function Workspace() {
   };
 
   const focusInput = () => inputRef.current?.focus();
+
+  /** Atribuição de responsável salva: atualiza o header sem recarregar a página. */
+  const handleAssigned = (updated: Task) => {
+    setWs((prev) => (prev ? { ...prev, task: updated } : prev));
+  };
 
   const summarize = () => {
     setSummaryBusy(true);
@@ -482,6 +518,9 @@ export default function Workspace() {
                 Custo total: <b>{fmtCost(task.cost_spent)}</b>
                 <span className="muted small"> / {fmtCost(task.budget_limit)}</span>
               </span>
+              <span className="ws-responsavel" title="responsável pela tarefa">
+                responsável: <b>{task.responsible?.name ?? "Não atribuída"}</b>
+              </span>
               <span className="muted small">{task.executor === "opencode" ? "opencode" : "kimi code"}</span>
               {runningOcc ? (
                 <span className="ws-etapa-atual ws-etapa-running" title="fase em execução agora">
@@ -503,7 +542,8 @@ export default function Workspace() {
               <button
                 key={c.label}
                 className={c.cls ?? ""}
-                disabled={busy || summaryBusy}
+                disabled={busy || summaryBusy || !canAct}
+                title={actTitle}
                 onClick={c.onClick}
               >
                 {summaryBusy && c.label === "Resumir" ? "resumindo…" : c.label}
@@ -511,6 +551,14 @@ export default function Workspace() {
             ))}
           </div>
         </div>
+
+        {task && (
+          <ResponsavelControl
+            task={task}
+            repoId={repoId}
+            onAssigned={handleAssigned}
+          />
+        )}
 
         {(task?.status === "blocked" || task?.status === "failed" || task?.status === "needs_review") && task.error && (
           <div className={`ws-header-alert ${task.status === "blocked" ? "ws-alert-critical" : ""}`}>
@@ -535,7 +583,13 @@ export default function Workspace() {
           <div className="ws-empty">
             <p className="muted">Nenhuma etapa executada ainda.</p>
             {taskStatus === "created" && (
-              <button onClick={() => act(() => api.startTask(taskId))}>Iniciar tarefa</button>
+              <button
+                onClick={() => act(() => api.startTask(taskId))}
+                disabled={!canAct}
+                title={actTitle}
+              >
+                Iniciar tarefa
+              </button>
             )}
           </div>
         )}
@@ -547,7 +601,13 @@ export default function Workspace() {
             {ws.decisions[0].context && <p className="muted small">{ws.decisions[0].context}</p>}
             <div className="ws-decision-options">
               {ws.decisions[0].options.map((opt) => (
-                <button key={opt} className="ws-option-chip" onClick={() => chooseDecision(opt)}>
+                <button
+                  key={opt}
+                  className="ws-option-chip"
+                  disabled={!canAct}
+                  title={actTitle}
+                  onClick={() => chooseDecision(opt)}
+                >
                   {opt}
                 </button>
               ))}
@@ -563,6 +623,7 @@ export default function Workspace() {
             onChanged={refresh}
             onError={setError}
             onOpenDiff={setDiffPos}
+            canAct={canAct}
           />
         ))}
       </main>
@@ -582,7 +643,12 @@ export default function Workspace() {
               }
             }}
           />
-          <button className="ws-send" disabled={busy || !instruction.trim()} onClick={() => void send()}>
+          <button
+            className="ws-send"
+            disabled={busy || !instruction.trim() || !canAct}
+            title={actTitle}
+            onClick={() => void send()}
+          >
             Enviar
           </button>
         </div>

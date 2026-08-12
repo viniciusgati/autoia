@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from app.config import _load_dotenv
+from app.config import Settings, _load_dotenv
 
 
 def test_load_dotenv_reads_values_and_escapes(tmp_path, monkeypatch):
@@ -27,3 +27,23 @@ def test_load_dotenv_reads_values_and_escapes(tmp_path, monkeypatch):
 def test_load_dotenv_missing_dir_is_noop(tmp_path, monkeypatch):
     _load_dotenv(str(tmp_path / "nao_existe"))
     assert "AUTOIA_TESTE" not in os.environ
+
+
+def test_settings_auth_defaults(monkeypatch):
+    """Sem env, auth fica ON por padrão: sessão 30 dias, cookie sem Secure."""
+    for key in ("AUTOIA_AUTH_ENABLED", "AUTOIA_SESSION_DAYS", "AUTOIA_COOKIE_SECURE"):
+        monkeypatch.delenv(key, raising=False)
+    s = Settings()
+    assert s.auth_enabled is True
+    assert s.session_days == 30
+    assert s.cookie_secure is False
+
+
+def test_settings_auth_env_overrides(monkeypatch):
+    monkeypatch.setenv("AUTOIA_AUTH_ENABLED", "0")
+    monkeypatch.setenv("AUTOIA_SESSION_DAYS", "7")
+    monkeypatch.setenv("AUTOIA_COOKIE_SECURE", "1")
+    s = Settings()
+    assert s.auth_enabled is False
+    assert s.session_days == 7
+    assert s.cookie_secure is True

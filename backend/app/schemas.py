@@ -69,6 +69,79 @@ class RepositoryOut(BaseModel):
     auto_summary: bool = False
 
 
+# ---------- Usuários / Auth ----------
+
+class UserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    email: str
+    role: str
+    active: bool
+    created_at: datetime
+
+
+class UserCreate(BaseModel):
+    """Criação de usuário por admin global (senha em texto puro, hasheada no backend)."""
+
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=6, max_length=255)
+    role: str = Field(default="member", pattern="^(member|admin)$")
+
+
+class UserUpdate(BaseModel):
+    """Edição de usuário por admin global (todos os campos opcionais)."""
+
+    name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: str | None = Field(default=None, min_length=3, max_length=255)
+    password: str | None = Field(default=None, min_length=6, max_length=255)
+    role: str | None = Field(default=None, pattern="^(member|admin)$")
+    active: bool | None = None
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class RegisterRequest(BaseModel):
+    """Bootstrap: só aceito com `users` vazio (primeiro registro vira admin global)."""
+
+    name: str = Field(min_length=1, max_length=100)
+    email: str = Field(min_length=3, max_length=255)
+    password: str = Field(min_length=6, max_length=255)
+
+
+class SessionOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    token: str
+    user_id: int
+    expires_at: datetime
+
+
+class RepositoryUserOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    repository_id: int
+    user_id: int
+    role: str
+    created_at: datetime
+    user: UserOut | None = None
+
+
+class RepositoryUserUpdate(BaseModel):
+    role: Literal["member", "admin"]
+
+
+class RepositoryMemberCreate(BaseModel):
+    user_id: int
+    role: Literal["member", "admin"] = "member"
+
+
 # ---------- Robot ----------
 
 class RobotCreate(BaseModel):
@@ -198,6 +271,10 @@ class TaskStepOut(BaseModel):
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    responsible_id: int | None = None
+    finished_by_id: int | None = None
+    responsible: UserOut | None = None
+    finished_by: UserOut | None = None
     artifacts: list[ArtifactOut] = []
 
 
@@ -239,6 +316,10 @@ class TaskStepListOut(BaseModel):
     error: str | None
     started_at: datetime | None
     finished_at: datetime | None
+    responsible_id: int | None = None
+    finished_by_id: int | None = None
+    responsible: UserOut | None = None
+    finished_by: UserOut | None = None
 
 
 class TaskListItem(BaseModel):
@@ -262,6 +343,8 @@ class TaskListItem(BaseModel):
     created_at: datetime
     updated_at: datetime
     parent_task_id: int | None = None
+    responsible_id: int | None = None
+    responsible: UserOut | None = None
     steps: list[TaskStepListOut] = []
 
 
@@ -293,6 +376,8 @@ class TaskOut(BaseModel):
     created_at: datetime
     updated_at: datetime
     parent_task_id: int | None = None
+    responsible_id: int | None = None
+    responsible: UserOut | None = None
     steps: list[TaskStepOut] = []
     subtasks: list[SubTaskOut] = []
     proposals: list[TaskProposalOut] = []
@@ -420,6 +505,12 @@ class RetryRequest(BaseModel):
     note: str | None = Field(default=None, max_length=10000)
 
 
+class ResponsibleUpdate(BaseModel):
+    """Reatribuição do responsável por uma tarefa (upsert de repository_users)."""
+
+    user_id: int
+
+
 class ReviewRequest(BaseModel):
     action: Literal["approve", "cancel"]
     extra_budget: float = Field(default=5.0, ge=0)
@@ -490,6 +581,30 @@ class NoticeOut(BaseModel):
     ts: datetime
 
 
+class MyTaskOut(BaseModel):
+    """Tarefa do usuário no dashboard pessoal (responsable == eu)."""
+
+    id: int
+    repository_id: int
+    repository_name: str
+    title: str
+    status: str
+    cost_spent: float = 0.0
+    budget_limit: float = 0.0
+    updated_at: datetime
+
+
+class MyProjectOut(BaseModel):
+    """Participação do usuário em um projeto (papel + contagem de tarefas minhas)."""
+
+    id: int
+    name: str
+    role: str
+    my_tasks_total: int = 0
+    my_tasks_active: int = 0
+    my_tasks_pending: int = 0
+
+
 class DashboardOut(BaseModel):
     tasks_by_status: dict[str, int]
     total_cost: float
@@ -497,6 +612,10 @@ class DashboardOut(BaseModel):
     guardrail_events: int
     recent_guardrails: list[RunEventOut]
     notices: list[NoticeOut] = []
+    # Dashboard pessoal (auth ON): usuário logado, tarefas dele e participações.
+    user: UserOut | None = None
+    my_tasks: list[MyTaskOut] = []
+    projects: list[MyProjectOut] = []
 
 
 # ---------- Execução (página global) ----------

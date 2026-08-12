@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
+import { MSG_SEM_PERMISSAO } from "../lib/tasks";
 import type { TaskProposal } from "../types";
 
 /** Card de proposta de task filha: título, badge kind/repo, descrição e os botões
@@ -13,6 +14,7 @@ export default function ProposalCard({
   parentDetailPath,
   onChanged,
   onError,
+  canAct = true,
 }: {
   proposal: TaskProposal;
   /** Nome dos repositórios por id (para exibir o alvo cross-repo). */
@@ -23,8 +25,11 @@ export default function ProposalCard({
   parentDetailPath?: string;
   onChanged: () => void;
   onError: (message: string) => void;
+  /** Permissão de atuação (responsável/admin) — desabilita aceitar/rejeitar. */
+  canAct?: boolean;
 }) {
   const [busy, setBusy] = useState(false);
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -83,14 +88,16 @@ export default function ProposalCard({
         <div className="proposal-actions">
           <button
             onClick={() => run(() => api.acceptProposal(proposal.task_id, proposal.id))}
-            disabled={busy}
+            disabled={busy || !canAct}
+            title={actTitle}
           >
             {busy ? "…" : "aceitar"}
           </button>
           <button
             className="danger"
             onClick={() => run(() => api.rejectProposal(proposal.task_id, proposal.id))}
-            disabled={busy}
+            disabled={busy || !canAct}
+            title={actTitle}
           >
             rejeitar
           </button>

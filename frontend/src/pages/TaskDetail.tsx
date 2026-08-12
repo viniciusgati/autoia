@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import ArtifactThumbs from "../components/ArtifactThumbs";
 import BlockedPanel from "../components/BlockedPanel";
 import ExecTimeline from "../components/ExecTimeline";
@@ -8,6 +9,7 @@ import FluxoSteps from "../components/FluxoSteps";
 import MergeConflictPanel from "../components/MergeConflictPanel";
 import PhasePanel from "../components/PhasePanel";
 import PhaseStepper from "../components/PhaseStepper";
+import ResponsavelControl from "../components/ResponsavelControl";
 import StatusBadge from "../components/StatusBadge";
 import TaskChat from "../components/TaskChat";
 import TaskSummaryCard from "../components/TaskSummaryCard";
@@ -15,9 +17,9 @@ import Timeline from "../components/Timeline";
 import { buildTurns } from "../lib/chat";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
-import { diffSummary, etapaAtualLabel, tempoDecorrido } from "../lib/tasks";
+import { diffSummary, etapaAtualLabel, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
-import type { Repository, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
+import type { Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
 /** Detalhe da task em 3 níveis de acompanhamento:
  *  - Resumo (Nível 1): "o que aconteceu?" — resumo LLM + timeline compacta;
@@ -30,6 +32,9 @@ export default function TaskDetail() {
   const { repoId, taskId: taskIdStr } = useParams<{ repoId: string; taskId: string }>();
   const taskId = Number(taskIdStr);
   const repoIdNum = Number(repoId);
+
+  const { user } = useAuth();
+  const [members, setMembers] = useState<RepositoryMember[]>([]);
 
   const [task, setTask] = useState<Task | null>(null);
   const [view, setView] = useState<"resumo" | "acompanhamento" | "tecnico">("resumo");
@@ -75,6 +80,21 @@ export default function TaskDetail() {
       setRepoNames(m);
     }).catch(() => {});
   }, []);
+
+  // Membros do projeto: admin do projeto (permissão de atuação) + alimenta o
+  // controle de atribuição de responsável.
+  useEffect(() => {
+    let active = true;
+    api
+      .listMembers(repoIdNum)
+      .then((m) => {
+        if (active) setMembers(m);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [repoIdNum]);
 
   usePolling(
     (signal) =>
@@ -365,8 +385,14 @@ export default function TaskDetail() {
     document.getElementById("revisao-humana")?.scrollIntoView({ behavior: "smooth", block: "start" });
   };
 
-  if (error) return <p className="error">{error}</p>;
   if (!task) return <p>Carregando…</p>;
+
+  // Permissão de atuação: sem responsável qualquer autenticado atua; com
+  // responsável, só ele, admin do projeto ou admin global (auth OFF libera).
+  const isRepoAdmin =
+    user != null && members.some((m) => m.role === "admin" && m.user_id === user.id);
+  const canAct = podeAtuar(user, task.responsible_id, isRepoAdmin);
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
   const runningStep = steps.find((s) => s.status === "running") ?? null;
@@ -407,6 +433,13 @@ export default function TaskDetail() {
 
   return (
     <div>
+      {/* Erro (ex.: 403 sem permissão) exibido sem sair da tela — descartável. */}
+      {error && (
+        <div className="sticky-alert sticky-alert-critical">
+          <span>{error}</span>
+          <button className="link-btn" onClick={() => setError("")}>×</button>
+        </div>
+      )}
       <p>
         <Link to={`/${repoId}`}>← projeto</Link>
         {" · "}
@@ -426,6 +459,9 @@ export default function TaskDetail() {
             executor: {task.executor === "opencode" ? "opencode" : "kimi code"}
           </span>
           <span>
+            responsável: <strong>{task.responsible?.name ?? "Não atribuída"}</strong>
+          </span>
+          <span>
             branch: <code>{task.branch ?? "—"}</code>
           </span>
           <span>
@@ -434,23 +470,25 @@ export default function TaskDetail() {
           </span>
           <span className="muted">decisões PM: {task.pm_decisions}</span>
         </div>
+        <ResponsavelControl task={task} repoId={repoIdNum} onAssigned={setTask} />
         {["created", "queued", "in_progress", "paused", "needs_review", "waiting_approval", "blocked"].includes(
           task.status,
         ) && (
           <div className="meta" style={{ marginTop: 4 }}>
             {task.status === "paused" ? (
-              <button onClick={() => taskAction("resume")} disabled={actionBusy}>
+              <button onClick={() => taskAction("resume")} disabled={actionBusy || !canAct} title={actTitle}>
                 retomar
               </button>
             ) : task.status === "queued" || task.status === "in_progress" ? (
-              <button onClick={() => taskAction("pause")} disabled={actionBusy}>
+              <button onClick={() => taskAction("pause")} disabled={actionBusy || !canAct} title={actTitle}>
                 pausar
               </button>
             ) : null}
             <button
               className="danger"
               onClick={() => taskAction("cancel")}
-              disabled={actionBusy}
+              disabled={actionBusy || !canAct}
+              title={actTitle}
             >
               cancelar tarefa
             </button>
@@ -586,10 +624,10 @@ export default function TaskDetail() {
           />
 
           {agentBlocked && (
-            <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} />
+            <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} canAct={canAct} />
           )}
           {mergeConflict && (
-            <MergeConflictPanel task={task} steps={steps} onInstructAndRetry={instructAndRetry} busy={continueBusy} />
+            <MergeConflictPanel task={task} steps={steps} onInstructAndRetry={instructAndRetry} busy={continueBusy} canAct={canAct} />
           )}
 
           <TaskSummaryCard summary={task.summary} onRegenerate={regenerateSummary} busy={summaryBusy} />
@@ -647,6 +685,7 @@ export default function TaskDetail() {
               onRetry={retry}
               repoId={repoIdNum}
               taskId={taskId}
+              canAct={canAct}
             />
             <p className="muted small" style={{ margin: "8px 0 0" }}>
               "Voltar para esta fase" re-executa a partir dela: a nova execução aparece
@@ -711,6 +750,7 @@ export default function TaskDetail() {
             setStoryCriteria={setStoryCriteria}
             storyBusy={storyBusy}
             saveStory={saveStory}
+            canAct={canAct}
           />
         </div>
       )}
@@ -719,10 +759,10 @@ export default function TaskDetail() {
       {view === "acompanhamento" && (
         <div className="acompanhamento-view">
           {agentBlocked && (
-            <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} />
+            <BlockedPanel task={task} onContinue={continueBlocked} busy={continueBusy} canAct={canAct} />
           )}
           {mergeConflict && (
-            <MergeConflictPanel task={task} steps={steps} onInstructAndRetry={instructAndRetry} busy={continueBusy} />
+            <MergeConflictPanel task={task} steps={steps} onInstructAndRetry={instructAndRetry} busy={continueBusy} canAct={canAct} />
           )}
 
           {/* Solicitação */}
@@ -759,7 +799,7 @@ export default function TaskDetail() {
               />
             </div>
             <div className="form-actions">
-              <button disabled={detailsBusy} onClick={saveDetails}>
+              <button disabled={detailsBusy || !canAct} title={actTitle} onClick={saveDetails}>
                 {detailsBusy ? "salvando…" : "salvar detalhes"}
               </button>
             </div>
@@ -778,6 +818,7 @@ export default function TaskDetail() {
               onRetry={retry}
               repoId={repoIdNum}
               taskId={taskId}
+              canAct={canAct}
             />
           </div>
 
@@ -810,7 +851,12 @@ export default function TaskDetail() {
                     </div>
                     <div className="subtask-actions">
                       {(st.status === "failed" || st.status === "implementing" || st.status === "verifying" || (st.status === "pending" && st.attempt > 1)) && (
-                        <button className="danger small" onClick={() => subtaskRetry(st.position)}>
+                        <button
+                          className="danger small"
+                          onClick={() => subtaskRetry(st.position)}
+                          disabled={!canAct}
+                          title={actTitle}
+                        >
                           repetir
                         </button>
                       )}
@@ -903,6 +949,7 @@ export default function TaskDetail() {
             setStoryCriteria={setStoryCriteria}
             storyBusy={storyBusy}
             saveStory={saveStory}
+            canAct={canAct}
           />
         </div>
       )}
@@ -924,6 +971,7 @@ export default function TaskDetail() {
               live={live}
               onProposalsChanged={refresh}
               onError={setError}
+              canAct={canAct}
             />
             <h3 style={{ marginTop: 18 }}>Fases (pipeline)</h3>
             <Timeline
@@ -934,6 +982,7 @@ export default function TaskDetail() {
                 setPanelStep(step);
               }}
               onRetry={retry}
+              canAct={canAct}
             />
             <PhasePanel
               step={panelStep}
@@ -942,6 +991,7 @@ export default function TaskDetail() {
               taskStatus={task.status}
               onClose={() => setPanelStep(null)}
               onRetry={retry}
+              canAct={canAct}
             />
           </div>
         </>
@@ -982,6 +1032,8 @@ export default function TaskDetail() {
                 {child.status === "created" && (
                   <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                     <button
+                      disabled={!canAct}
+                      title={actTitle}
                       onClick={async () => {
                         try { await api.startTask(child.id); await refresh(); }
                         catch (e) { setError(String(e)); }
@@ -991,6 +1043,8 @@ export default function TaskDetail() {
                     </button>
                     <button
                       className="danger"
+                      disabled={!canAct}
+                      title={actTitle}
                       onClick={async () => {
                         if (!confirm(`Recusar tarefa #${child.id} "${child.title}"?`)) return;
                         try { await api.deleteTask(child.id); await refresh(); }
@@ -1021,10 +1075,19 @@ export default function TaskDetail() {
           />
         </div>
         <div className="form-actions">
-          <button disabled={feedbackBusy || !feedbackText.trim()} onClick={saveFeedback}>
+          <button
+            disabled={feedbackBusy || !feedbackText.trim() || !canAct}
+            title={actTitle}
+            onClick={saveFeedback}
+          >
             salvar nota
           </button>
-          <button className="danger" disabled={feedbackBusy || !task.feedback} onClick={clearFeedback}>
+          <button
+            className="danger"
+            disabled={feedbackBusy || !task.feedback || !canAct}
+            title={actTitle}
+            onClick={clearFeedback}
+          >
             limpar
           </button>
           <span className="muted small" style={{ alignSelf: "center" }}>
@@ -1146,7 +1209,8 @@ function SituacaoCard({
 }
 
 /** Intervenções humanas (revisão de needs_review, aprovação de gate, PM, edição
- *  da história) — reagrupadas na aba Acompanhamento. */
+ *  da história) — reagrupadas na aba Acompanhamento. `canAct` desabilita as ações
+ *  quando o usuário não é responsável/admin (tooltip explica o motivo). */
 function HumanIntervention(props: {
   task: Task;
   steps: TaskStep[];
@@ -1176,6 +1240,7 @@ function HumanIntervention(props: {
   setStoryCriteria: (s: string) => void;
   storyBusy: boolean;
   saveStory: () => void;
+  canAct: boolean;
 }) {
   const {
     task, steps, extraBudget, setExtraBudget,
@@ -1184,8 +1249,9 @@ function HumanIntervention(props: {
     approvalNote, setApprovalNote, approvalBusy, approveGate,
     voltarTarget, setVoltarTarget, voltarFase,
     pmBusy, pmDecide, storyDesc, setStoryDesc, storyCriteria, setStoryCriteria,
-    storyBusy, saveStory,
+    storyBusy, saveStory, canAct,
   } = props;
+  const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
   return (
     <>
@@ -1264,12 +1330,14 @@ function HumanIntervention(props: {
                 </div>
               </div>
               <div className="form-inline" style={{ gap: 8 }}>
-                <button type="submit" disabled={bouncebackBusy}>
+                <button type="submit" disabled={bouncebackBusy || !canAct} title={actTitle}>
                   {bouncebackBusy ? "retornando…" : "confirmar retorno"}
                 </button>
                 <button
                   type="button"
                   className="danger"
+                  disabled={!canAct}
+                  title={actTitle}
                   onClick={(e) => review(e as unknown as FormEvent, "cancel")}
                 >
                   cancelar tarefa
@@ -1294,7 +1362,7 @@ function HumanIntervention(props: {
                   className="short"
                 />
               </div>
-              <button type="submit">aprovar e continuar</button>
+              <button type="submit" disabled={!canAct} title={actTitle}>aprovar e continuar</button>
             </form>
           </div>
         </div>
@@ -1334,7 +1402,8 @@ function HumanIntervention(props: {
             </div>
             <div className="form-inline" style={{ gap: 8 }}>
               <button
-                disabled={approvalBusy || !gated}
+                disabled={approvalBusy || !gated || !canAct}
+                title={actTitle}
                 onClick={() => gated && approveGate(gated.position)}
               >
                 {approvalBusy ? "liberando…" : "aprovar e liberar o robô"}
@@ -1355,7 +1424,8 @@ function HumanIntervention(props: {
                   </select>
                   <button
                     className="warn-btn"
-                    disabled={approvalBusy}
+                    disabled={approvalBusy || !canAct}
+                    title={actTitle}
                     onClick={() => voltarFase(voltarTarget)}
                   >
                     voltar para fase anterior
@@ -1377,7 +1447,7 @@ function HumanIntervention(props: {
             <strong>Robô PM (controle do projeto)</strong>
             <span className="muted">decide: retry · continuar (orçamento) · escalar para humano</span>
           </div>
-          <button onClick={pmDecide} disabled={pmBusy}>
+          <button onClick={pmDecide} disabled={pmBusy || !canAct} title={actTitle}>
             {pmBusy ? "PM analisando…" : "🤖 PM decide agora"}
           </button>
         </div>
@@ -1408,7 +1478,7 @@ function HumanIntervention(props: {
               />
             </div>
             <div className="form-actions">
-              <button disabled={storyBusy} onClick={saveStory}>
+              <button disabled={storyBusy || !canAct} title={actTitle} onClick={saveStory}>
                 {storyBusy ? "salvando…" : "salvar alterações"}
               </button>
             </div>

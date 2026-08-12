@@ -149,6 +149,13 @@ class Settings:
     # Gera o resumo de cada fase concluída ("O que foi entregue") via LLM de resumo
     # (zero custo contábil; usa tokens do executor da task). Desligar evita chamadas.
     step_summary: bool = field(default_factory=lambda: _env("AUTOIA_STEP_SUMMARY", "1") == "1")
+    # Autenticação por sessão: ON exige sessão válida em TODOS os routers /api/*
+    # (401 sem cookie); OFF preserva o comportamento atual (require_auth -> None).
+    auth_enabled: bool = field(default_factory=lambda: _env("AUTOIA_AUTH_ENABLED", "1") == "1")
+    # Validade do cookie autoia_session (dias).
+    session_days: int = field(default_factory=lambda: _int("AUTOIA_SESSION_DAYS", 30))
+    # Cookie com flag Secure (força também quando o request vier de https).
+    cookie_secure: bool = field(default_factory=lambda: _env("AUTOIA_COOKIE_SECURE", "0") == "1")
     # Watchdog de "sem progresso": se o executor ficar `no_progress_timeout` segundos
     # sem emitir NENHUMA saída no stdout (ex.: kimi travado em reasoning), o processo
     # é morto e tratado como timeout (bounce-back/retry). 0 = desligado.

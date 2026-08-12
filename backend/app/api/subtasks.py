@@ -17,9 +17,10 @@ from ..models import (
     SubTask,
 )
 from ..schemas import SubTaskIn, SubTaskOut, SubTaskUpdate
+from ..models import User
 from ..worker.runner import _pm_decide
-from .deps import get_session, get_settings
-from .tasks import _get_task_or_404
+from .deps import get_session, get_settings, require_auth
+from .tasks import _ensure_can_act, _get_task_or_404
 
 log = logging.getLogger("autoia.api")
 
@@ -85,6 +86,7 @@ def retry_subtask(
     position: int,
     session: Session = Depends(get_session),
     settings=Depends(get_settings),
+    user: User | None = Depends(require_auth),
 ):
     """Reabre uma subtarefa específica para re-execução.
 
@@ -92,6 +94,7 @@ def retry_subtask(
     reencaminha a task para execução (implement → verify para esta subtarefa).
     """
     task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
     st = next((s for s in task.subtasks if s.position == position), None)
     if st is None:
         raise HTTPException(404, "subtarefa não encontrada")

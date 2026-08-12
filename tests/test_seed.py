@@ -62,3 +62,28 @@ def test_seed_roles_and_pipeline(settings):
     with session_factory() as s:
         assert s.query(Robot).count() == 9
         assert s.query(Pipeline).count() == 3
+
+
+def test_migrate_schema_creates_auth_tables_and_new_columns(settings):
+    """Migração aditiva: tabelas de auth e as 3 colunas novas existem após
+    `create_all` + `migrate_schema` (sem drop/rename de nada existente)."""
+    from sqlalchemy import inspect
+
+    from app.db import Base, make_engine, migrate_schema
+
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    migrate_schema(engine)
+
+    inspector = inspect(engine)
+    tables = set(inspector.get_table_names())
+    assert {"users", "sessions", "repository_users"} <= tables
+
+    users_cols = {c["name"] for c in inspector.get_columns("users")}
+    assert {"name", "email", "password_hash", "role", "active"} <= users_cols
+
+    tasks_cols = {c["name"] for c in inspector.get_columns("tasks")}
+    assert "responsible_id" in tasks_cols
+
+    step_cols = {c["name"] for c in inspector.get_columns("task_steps")}
+    assert {"responsible_id", "finished_by_id"} <= step_cols

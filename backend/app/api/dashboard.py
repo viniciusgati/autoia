@@ -1,8 +1,13 @@
-"""Dashboard: métricas agregadas + avisos de tarefas que requerem atenção."""
+"""Dashboard: métricas agregadas + avisos de tarefas que requerem atenção.
+
+Com autenticação ligada, `GET /api/dashboard` (e os endpoints `/api/me/*`)
+filtram métricas e avisos aos projetos do usuário; com auth OFF o dashboard
+permanece global (comportamento atual).
+"""
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request, Response
+from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -16,34 +21,150 @@ from ..models import (
     TASK_NEEDS_REVIEW,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
+    Repository,
+    RepositoryUser,
     RunEvent,
     Task,
     TaskStep,
+    User,
 )
-from ..schemas import DashboardOut, NoticeOut, RunEventOut
-from .deps import get_session
+from ..schemas import (
+    DashboardOut,
+    MyProjectOut,
+    MyTaskOut,
+    NoticeOut,
+    RunEventOut,
+)
+from .deps import get_session, get_settings, require_auth
 from .etag import conditional
 
 # Estados terminais: um aviso sobre essas tasks não pede mais ação humana.
 _TASK_TERMINAL = (TASK_DONE, TASK_FAILED, TASK_CANCELLED)
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
+# Endpoints do dashboard pessoal (precisam de sessão — 401 com auth OFF).
+me_router = APIRouter(prefix="/api/me", tags=["me"])
 
 # Níveis da métrica de arquitetura (worker/arch_metric.py) que viram aviso.
 _ARCH_NOTICE_LEVELS = {"alto": "critical", "médio": "warning"}
 
+# Status que pedem ação humana (selo "aguardando você" na Home).
+_PENDING_ACTION = (TASK_NEEDS_REVIEW, TASK_WAITING_APPROVAL, TASK_BLOCKED)
+_ACTIVE_STATUSES = (TASK_QUEUED, TASK_IN_PROGRESS)
 
-def _build_notices(session: Session) -> list[NoticeOut]:
-    """Avisos de tarefas que precisam de atenção, mais críticos primeiro."""
+
+def _user_repo_ids(session: Session, user_id: int) -> list[int]:
+    """Projetos em que o usuário participa (repository_users)."""
+    return [
+        r.repository_id
+        for r in session.query(RepositoryUser)
+        .filter(RepositoryUser.user_id == user_id)
+        .all()
+    ]
+
+
+def _my_tasks(session: Session, user_id: int) -> list[MyTaskOut]:
+    """Tarefas com `responsible_id == eu`, com o nome do projeto."""
+    rows = (
+        session.query(Task, Repository)
+        .join(Repository, Task.repository_id == Repository.id)
+        .filter(Task.responsible_id == user_id)
+        .order_by(Task.updated_at.desc())
+        .all()
+    )
+    return [
+        MyTaskOut(
+            id=task.id,
+            repository_id=task.repository_id,
+            repository_name=repo.name,
+            title=task.title,
+            status=task.status,
+            cost_spent=task.cost_spent,
+            budget_limit=task.budget_limit,
+            updated_at=task.updated_at,
+        )
+        for task, repo in rows
+    ]
+
+
+def _my_projects(session: Session, user_id: int) -> list[MyProjectOut]:
+    """Participações do usuário com papel e contagem de tarefas minhas."""
+    participations = (
+        session.query(RepositoryUser, Repository)
+        .join(Repository, RepositoryUser.repository_id == Repository.id)
+        .filter(RepositoryUser.user_id == user_id)
+        .order_by(Repository.id)
+        .all()
+    )
+    projects: list[MyProjectOut] = []
+    for ru, repo in participations:
+        counts = (
+            session.query(Task.status, func.count(Task.id))
+            .filter(
+                Task.repository_id == repo.id,
+                Task.responsible_id == user_id,
+            )
+            .group_by(Task.status)
+            .all()
+        )
+        by_status = dict(counts)
+        total = sum(by_status.values())
+        active = sum(by_status.get(s, 0) for s in _ACTIVE_STATUSES)
+        pending = sum(by_status.get(s, 0) for s in _PENDING_ACTION)
+        projects.append(
+            MyProjectOut(
+                id=repo.id,
+                name=repo.name,
+                role=ru.role,
+                my_tasks_total=total,
+                my_tasks_active=active,
+                my_tasks_pending=pending,
+            )
+        )
+    return projects
+
+
+@me_router.get("/tasks", response_model=list[MyTaskOut])
+def my_tasks(
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    if user is None:
+        raise HTTPException(401, "autenticação desabilitada")
+    return _my_tasks(session, user.id)
+
+
+@me_router.get("/projects", response_model=list[MyProjectOut])
+def my_projects(
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    if user is None:
+        raise HTTPException(401, "autenticação desabilitada")
+    return _my_projects(session, user.id)
+
+
+def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[NoticeOut]:
+    """Avisos de tarefas que precisam de atenção, mais críticos primeiro.
+
+    `repo_ids=None` (auth OFF): global; senão filtra aos projetos do usuário.
+    """
     notices: list[NoticeOut] = []
+
+    def _scoped(q):
+        if repo_ids is not None:
+            q = q.filter(Task.repository_id.in_(repo_ids))
+        return q
 
     # steps bloqueados por guardrail (a task segue, mas merece olhar)
     blocked_steps = (
-        session.query(TaskStep)
-        .join(Task)
-        .filter(
-            TaskStep.status == STEP_GUARDRAIL_BLOCKED,
-            Task.status.not_in(_TASK_TERMINAL),
+        _scoped(
+            session.query(TaskStep)
+            .join(Task)
+            .filter(
+                TaskStep.status == STEP_GUARDRAIL_BLOCKED,
+                Task.status.not_in(_TASK_TERMINAL),
+            )
         )
         .order_by(TaskStep.id.desc())
         .limit(10)
@@ -65,8 +186,7 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 
     # tasks aguardando revisão humana/PM
     review_tasks = (
-        session.query(Task)
-        .filter(Task.status == TASK_NEEDS_REVIEW)
+        _scoped(session.query(Task).filter(Task.status == TASK_NEEDS_REVIEW))
         .order_by(Task.updated_at.desc())
         .limit(10)
         .all()
@@ -87,8 +207,7 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 
     # tasks paradas em gate de aprovação humana (pause_before no pipeline)
     gate_tasks = (
-        session.query(Task)
-        .filter(Task.status == TASK_WAITING_APPROVAL)
+        _scoped(session.query(Task).filter(Task.status == TASK_WAITING_APPROVAL))
         .order_by(Task.updated_at.desc())
         .limit(10)
         .all()
@@ -116,8 +235,7 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 
     # tasks bloqueadas (ex.: conflito de merge)
     blocked_tasks = (
-        session.query(Task)
-        .filter(Task.status == TASK_BLOCKED)
+        _scoped(session.query(Task).filter(Task.status == TASK_BLOCKED))
         .order_by(Task.updated_at.desc())
         .limit(10)
         .all()
@@ -138,10 +256,11 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 
     # tasks ativas com custo perto do limite (>= 80% do orçamento)
     costly_tasks = (
-        session.query(Task)
-        .filter(
-            Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
-            Task.cost_spent >= 0.8 * Task.budget_limit,
+        _scoped(
+            session.query(Task).filter(
+                Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+                Task.cost_spent >= 0.8 * Task.budget_limit,
+            )
         )
         .order_by(Task.cost_spent.desc())
         .limit(10)
@@ -164,12 +283,14 @@ def _build_notices(session: Session) -> list[NoticeOut]:
 
     # métrica de arquitetura: mudança drástica de deploy/arquitetura
     arch_events = (
-        session.query(RunEvent, TaskStep, Task)
-        .join(TaskStep, RunEvent.step_id == TaskStep.id)
-        .join(Task, TaskStep.task_id == Task.id)
-        .filter(
-            RunEvent.kind == "arch_metric",
-            Task.status.not_in(_TASK_TERMINAL),
+        _scoped(
+            session.query(RunEvent, TaskStep, Task)
+            .join(TaskStep, RunEvent.step_id == TaskStep.id)
+            .join(Task, TaskStep.task_id == Task.id)
+            .filter(
+                RunEvent.kind == "arch_metric",
+                Task.status.not_in(_TASK_TERMINAL),
+            )
         )
         .order_by(RunEvent.id.desc())
         .limit(30)
@@ -207,72 +328,88 @@ def dashboard(
     request: Request = None,
     response: Response = None,
     session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
 ):
+    # Com auth ON, métricas e avisos ficam restritos aos projetos do usuário.
+    repo_ids: list[int] | None = None
+    if user is not None:
+        repo_ids = _user_repo_ids(session, user.id)
+
+    def _scoped_task(q):
+        if repository_id is not None:
+            q = q.filter(Task.repository_id == repository_id)
+        elif repo_ids is not None:
+            q = q.filter(Task.repository_id.in_(repo_ids))
+        return q
+
     # Token barato (304): tasks + eventos (guardrail/arch/PM mudam junto).
-    task_q = session.query(Task)
-    if repository_id is not None:
-        task_q = task_q.filter(Task.repository_id == repository_id)
-    max_task_ts, token_total = task_q.with_entities(
-        func.max(Task.updated_at), func.count(Task.id)
-    ).first()
-    max_event_id = (
+    max_task_ts, token_total = _scoped_task(
+        session.query(Task)
+    ).with_entities(func.max(Task.updated_at), func.count(Task.id)).first()
+    event_q = (
         session.query(func.max(RunEvent.id))
         .join(TaskStep, RunEvent.step_id == TaskStep.id)
         .join(Task, TaskStep.task_id == Task.id)
     )
     if repository_id is not None:
-        max_event_id = max_event_id.filter(Task.repository_id == repository_id)
-    max_event_id = max_event_id.scalar()
+        event_q = event_q.filter(Task.repository_id == repository_id)
+    elif repo_ids is not None:
+        event_q = event_q.filter(Task.repository_id.in_(repo_ids))
+    max_event_id = event_q.scalar()
     not_modified = conditional(
         request, response, "|".join(str(x) for x in (max_task_ts, token_total, max_event_id))
     )
     if not_modified is not None:
         return not_modified
 
-    # base query para Task, opcionalmente filtrada por repositório
-    task_q = session.query(Task)
-    if repository_id is not None:
-        task_q = task_q.filter(Task.repository_id == repository_id)
-
     rows = (
-        task_q.with_entities(Task.status, func.count(Task.id))
+        _scoped_task(session.query(Task))
+        .with_entities(Task.status, func.count(Task.id))
         .group_by(Task.status)
         .all()
     )
     tasks_by_status = {status: count for status, count in rows}
 
-    # custo total: filtra eventos cuja task pertence ao repositório
+    # custo total: filtra eventos cuja task pertence ao escopo
     cost_q = session.query(func.sum(RunEvent.cost))
-    if repository_id is not None:
+    if repository_id is not None or repo_ids is not None:
         cost_q = (
             cost_q.join(TaskStep, RunEvent.step_id == TaskStep.id)
             .join(Task, TaskStep.task_id == Task.id)
-            .filter(Task.repository_id == repository_id)
         )
+        if repository_id is not None:
+            cost_q = cost_q.filter(Task.repository_id == repository_id)
+        elif repo_ids is not None:
+            cost_q = cost_q.filter(Task.repository_id.in_(repo_ids))
     total_cost = cost_q.scalar() or 0.0
 
     # guardrail events
     guard_q = session.query(func.count(RunEvent.id)).filter(
         RunEvent.kind == "guardrail_blocked"
     )
-    if repository_id is not None:
+    if repository_id is not None or repo_ids is not None:
         guard_q = (
             guard_q.join(TaskStep, RunEvent.step_id == TaskStep.id)
             .join(Task, TaskStep.task_id == Task.id)
-            .filter(Task.repository_id == repository_id)
         )
+        if repository_id is not None:
+            guard_q = guard_q.filter(Task.repository_id == repository_id)
+        elif repo_ids is not None:
+            guard_q = guard_q.filter(Task.repository_id.in_(repo_ids))
     guardrail_events = guard_q.scalar() or 0
 
     recent_guardrails_q = (
-        session.query(RunEvent)
-        .filter(RunEvent.kind == "guardrail_blocked")
+        session.query(RunEvent).filter(RunEvent.kind == "guardrail_blocked")
     )
-    if repository_id is not None:
+    if repository_id is not None or repo_ids is not None:
         recent_guardrails_q = (
             recent_guardrails_q.join(TaskStep, RunEvent.step_id == TaskStep.id)
             .join(Task, TaskStep.task_id == Task.id)
-            .filter(Task.repository_id == repository_id)
         )
+        if repository_id is not None:
+            recent_guardrails_q = recent_guardrails_q.filter(Task.repository_id == repository_id)
+        elif repo_ids is not None:
+            recent_guardrails_q = recent_guardrails_q.filter(Task.repository_id.in_(repo_ids))
     recent_guardrails = (
         recent_guardrails_q.order_by(RunEvent.id.desc()).limit(10).all()
     )
@@ -284,5 +421,8 @@ def dashboard(
         total_tasks=total_tasks,
         guardrail_events=guardrail_events,
         recent_guardrails=[RunEventOut.model_validate(e) for e in recent_guardrails],
-        notices=_build_notices(session),
+        notices=_build_notices(session, repo_ids),
+        user=user,
+        my_tasks=_my_tasks(session, user.id) if user is not None else [],
+        projects=_my_projects(session, user.id) if user is not None else [],
     )

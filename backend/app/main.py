@@ -6,14 +6,15 @@ import logging
 import os
 import time
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .api import dashboard, execution, pipelines, repositories, robots, steps, subtasks, tasks
+from .api import auth, dashboard, execution, pipelines, repositories, robots, steps, subtasks, tasks, users
+from .api.deps import require_auth
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, migrate_schema
-from .models import Pipeline, PipelineStep, Robot
+from .models import Pipeline, PipelineStep, Robot, User
 from .worker.runner import acquire_worker_lock, recover_stale_steps, worker_loop
 
 log = logging.getLogger("autoia")
@@ -325,21 +326,33 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     seed(session_factory)
 
-    app.include_router(repositories.router)
-    app.include_router(robots.router)
-    app.include_router(pipelines.router)
-    app.include_router(tasks.router)
-    app.include_router(subtasks.router)
-    app.include_router(steps.router)
-    app.include_router(dashboard.router)
-    app.include_router(execution.router)
+    # Auth: register/login/logout/me e gestão de usuários ficam acessíveis sem
+    # proteção global (o próprio fluxo de auth valida a sessão quando preciso).
+    app.include_router(auth.router)
+    app.include_router(users.router)
+
+    # Com `Settings.auth_enabled=True`, TODOS os routers /api/* exigem sessão
+    # válida (401 sem cookie); com OFF, `require_auth` retorna None e o
+    # comportamento atual é preservado integralmente.
+    for r in (
+        repositories.router,
+        robots.router,
+        pipelines.router,
+        tasks.router,
+        subtasks.router,
+        steps.router,
+        dashboard.router,
+        dashboard.me_router,
+        execution.router,
+    ):
+        app.include_router(r, dependencies=[Depends(require_auth)])
 
     @app.get("/health")
     def health():
         return {"status": "ok"}
 
     @app.get("/api/worker/status")
-    def worker_status():
+    def worker_status(_user: User | None = Depends(require_auth)):
         hb = os.path.join(settings.workspace_dir, "worker.heartbeat")
         try:
             mtime = os.path.getmtime(hb)
