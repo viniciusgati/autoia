@@ -81,6 +81,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("goal", "TEXT"),
         ("responsible_id", "INTEGER REFERENCES users(id)"),
         ("finished_by_id", "INTEGER REFERENCES users(id)"),
+        ("session_id", "VARCHAR(200)"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),

@@ -156,6 +156,12 @@ class Settings:
     session_days: int = field(default_factory=lambda: _int("AUTOIA_SESSION_DAYS", 30))
     # Cookie com flag Secure (força também quando o request vier de https).
     cookie_secure: bool = field(default_factory=lambda: _env("AUTOIA_COOKIE_SECURE", "0") == "1")
+    # Watchdog de "sem progresso": se o executor ficar `no_progress_timeout` segundos
+    # sem emitir NENHUMA saída no stdout (ex.: kimi travado em reasoning), o processo
+    # é morto e tratado como timeout (bounce-back/retry). 0 = desligado.
+    no_progress_timeout: int = field(
+        default_factory=lambda: _int("AUTOIA_NO_PROGRESS_TIMEOUT", 300)
+    )
 
     def ensure_dirs(self) -> None:
         for d in (self.workspace_dir, self.log_dir, _sqlite_parent(self.database_url)):

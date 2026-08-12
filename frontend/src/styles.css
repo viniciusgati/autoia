@@ -4124,9 +4124,39 @@ strong {
   padding: 10px 12px;
 }
 .ws-stop .ws-section-title { color: var(--err); }
+.ws-stop-verdict {
+  color: var(--err);
+  font-weight: 700;
+  letter-spacing: 0.03em;
+}
+.ws-stop-guardrail { color: var(--err); font-weight: 700; }
+.ws-stop-timeout { color: var(--warn); font-weight: 700; }
 .ws-stop-reason {
-  margin: 0;
+  margin: 4px 0 0;
   font-size: 14px;
+  color: var(--text);
+}
+.ws-stop-with-detail {
+  border-color: var(--err);
+  background: var(--err, rgba(248, 113, 113, 0.08));
+}
+.ws-stop-detail {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px dashed rgba(248, 113, 113, 0.25);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  max-height: 260px;
+  overflow: auto;
+}
+.ws-stop-detail > *:first-child { margin-top: 0; }
+.ws-stop-detail pre {
+  background: var(--panel);
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  font-size: 12px;
+  overflow-x: auto;
 }
 
 .ws-tests {

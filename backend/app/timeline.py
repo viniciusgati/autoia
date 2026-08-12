@@ -455,6 +455,7 @@ _TERMINAL_BLOCK = {"task_blocked", "guardrail_blocked"}
 _TERMINAL_FAIL = {
     "timeout", "exec_exit", "verdict", "git_error", "merge_error",
     "merge_failed", "post_merge_failed", "budget_hit",
+    "subtask_bounce_back", "subtask_failed",
 }
 
 # Tipos de evento que representam "atividade do sistema" (marcos discretos) dentro
@@ -471,12 +472,32 @@ def _stop_reason(kind: str, payload: dict) -> str:
     return str(payload.get("reason") or "")
 
 
-def _new_occurrence(step: TaskStep, attempt: int) -> dict:
+def _verdict_detail_from_events(events: list[dict]) -> str:
+    """Recupera o conteúdo do autoia_verdict.txt escrito pela própria ocorrência
+    (fallback para falhas antigas cujo evento não persistiu `detail`)."""
+    for ev in events:
+        if ev["type"] != "tool_call":
+            continue
+        fn = (ev["raw"]["payload"].get("tool_call") or {}).get("function") or {}
+        if fn.get("name") != "Write":
+            continue
+        try:
+            args = json.loads(fn.get("arguments") or "")
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if str(args.get("path") or "") == "autoia_verdict.txt" and args.get("content"):
+            return str(args["content"])
+    return ""
+
+
+def _new_occurrence(step: TaskStep, attempt: int, index: int = 1) -> dict:
     return {
         "step_id": step.id,
         "position": step.position,
         "robot": {"name": step.robot.name, "role": step.robot.role} if step.robot else None,
         "attempt": attempt,
+        "run": index,
+        "is_rerun": index > 1,
         "status": "pending",
         "goal": step.goal,
         "started_at": None,
@@ -489,7 +510,7 @@ def _new_occurrence(step: TaskStep, attempt: int) -> dict:
     }
 
 
-def _finalize_occurrence(occ: dict, step: TaskStep | None) -> None:
+def _finalize_occurrence(occ: dict, step: TaskStep | None, is_last: bool) -> None:
     events = sorted(occ["events"], key=lambda e: (e["ts"], e["seq"]))
     occ["events"] = events
     if events:
@@ -521,30 +542,46 @@ def _finalize_occurrence(occ: dict, step: TaskStep | None) -> None:
     if last_terminal is not None:
         occ["status"], kind, payload = last_terminal
         if occ["status"] != "done":
-            occ["stop"] = {"kind": kind, "reason": _stop_reason(kind, payload)}
+            detail = str(payload.get("detail") or "")
+            if kind == "verdict" and not detail:
+                detail = _verdict_detail_from_events(events)
+            occ["stop"] = {
+                "kind": kind,
+                "reason": _stop_reason(kind, payload),
+                # Detalhe completo do motivo (ex.: conteúdo do autoia_verdict.txt
+                # numa reprovação de revisão/verificação).
+                "detail": detail,
+            }
         return
-    if step is not None and step.attempt > occ["attempt"]:
-        # Execução MAIS ANTIGA que não terminou (ex.: restart do worker no meio):
-        # sem veredicto/merge — o histórico continua, mas esta tentativa foi interrompida.
+    if step is not None and not is_last:
+        # Execução MAIS ANTIGA que não terminou (ex.: restart do worker no meio,
+        # ou nova execução iniciada depois): o histórico continua, mas esta
+        # execução foi interrompida.
         occ["status"] = "interrupted"
         return
     st = step.status if step else "pending"
     occ["status"] = "blocked" if st == STEP_GUARDRAIL_BLOCKED else st
+    if occ["status"] in ("failed", "guardrail_blocked", "blocked") and step is not None and step.error:
+        # Fallback: falha sem evento terminal específico (ex.: verificação de
+        # subtarefas) — usa o erro do step como motivo.
+        occ["stop"] = {"kind": occ["status"], "reason": step.error, "detail": step.summary or ""}
 
 
 def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
     """Deriva as OCOrrências de fase ("execuções") da task a partir da timeline.
 
-    Cada fase vira UMA ocorrência por execução/tentativa, na ordem cronológica
-    (da mais antiga para a mais nova). Um evento `attempt_started` com `attempt>1`
-    (ou manual retry/bounce-back) marca uma NOVA ocorrência da mesma fase — o
-    histórico anterior nunca é apagado. Determinístico, sem LLM.
+    Cada `attempt_started` marca UMA nova ocorrência da fase, na ordem cronológica
+    (da mais antiga para a mais nova) — mesmo que o contador `attempt` da fase se
+    repita (ex.: bounce-back reabre a fase anterior e a fase seguinte é re-executada
+    sem incrementar o próprio `attempt`). O histórico anterior nunca é apagado.
+    Determinístico, sem LLM.
     """
     steps = {st.id: st for st in task.steps}
     tl = derive_task_timeline(session, task)
 
     groups: dict[tuple[int, int], dict] = {}
     current_key: dict[int, tuple[int, int]] = {}
+    counters: dict[int, int] = {}
     order: list[tuple[int, int]] = []
 
     for ev in tl:
@@ -561,11 +598,12 @@ def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
                 attempt = max(int(payload.get("attempt") or 1), 1)
             except (TypeError, ValueError):
                 attempt = 1
-            key = (step_id, attempt)
-            if key not in groups:
-                groups[key] = _new_occurrence(step, attempt)
-                order.append(key)
+            index = counters.get(step_id, 0) + 1
+            counters[step_id] = index
+            key = (step_id, index)
+            groups[key] = _new_occurrence(step, attempt, index)
             current_key[step_id] = key
+            order.append(key)
         else:
             key = current_key.get(step_id)
             if key is None or key not in groups:
@@ -577,8 +615,11 @@ def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
                 continue
             groups[key]["events"].append(ev)
 
-    for key in order:
-        _finalize_occurrence(groups[key], steps.get(key[0]))
+    last_index: dict[int, int] = {}
+    for (step_id, index) in order:
+        last_index[step_id] = max(last_index.get(step_id, 0), index)
+    for (step_id, index) in order:
+        _finalize_occurrence(groups[(step_id, index)], steps.get(step_id), is_last=(last_index[step_id] == index))
     return [groups[key] for key in order]
 
 

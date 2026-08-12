@@ -321,6 +321,8 @@ export interface WorkspaceOccurrence {
   position: number;
   robot: { name: string; role: string } | null;
   attempt: number;
+  run: number;
+  is_rerun: boolean;
   status: string;
   goal: string | null;
   started_at: string | null;
@@ -328,7 +330,7 @@ export interface WorkspaceOccurrence {
   last_activity: string | null;
   delivered_text: string | null;
   delivered: StepSummary | null;
-  stop: { kind: string; reason: string } | null;
+  stop: { kind: string; reason: string; detail?: string } | null;
   proposals: TaskProposal[];
   files: string[];
   file_count: number;

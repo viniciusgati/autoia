@@ -15,12 +15,14 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 
 from .. import guardrails
 from .exec_common import (
     ExecOutcome,
     drain_stderr,
     kill_group,
+    make_no_progress_watchdog,
     make_watchdog,
     register_proc,
     unregister_proc,
@@ -75,6 +77,7 @@ def run_opencode(
     checkout_path: str,
     whitelisted_hosts: list[str] = (),
     model: str | None = None,
+    no_progress_timeout: int = 0,
     on_event,
 ) -> ExecOutcome:
     """Roda o opencode e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
@@ -106,6 +109,13 @@ def run_opencode(
         stderr_thread.start()
 
         watchdog, timed_out = make_watchdog(timeout, proc)
+        stalled = threading.Event()
+        last_activity = [time.monotonic()]
+        stall_stop = (
+            make_no_progress_watchdog(no_progress_timeout, proc, last_activity, stalled)
+            if no_progress_timeout > 0
+            else None
+        )
 
         seq = 0
         interactions = 0
@@ -132,6 +142,7 @@ def run_opencode(
 
         try:
             for line in proc.stdout:
+                last_activity[0] = time.monotonic()
                 line = line.strip()
                 if not line:
                     continue
@@ -241,12 +252,18 @@ def run_opencode(
                             logf.write(line + "\n")
         finally:
             watchdog.cancel()
+            if stall_stop is not None:
+                stall_stop.set()
 
         proc.wait()
         stderr_thread.join(timeout=10)
         unregister_proc(proc)
 
-    if timed_out.is_set() and not outcome.aborted:
+    if stalled.is_set() and not outcome.aborted:
+        outcome.aborted = True
+        outcome.timed_out = True
+        outcome.abort_reason = f"timeout sem progresso ({no_progress_timeout}s sem saída)"
+    elif timed_out.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True
         outcome.abort_reason = f"timeout após {timeout}s"

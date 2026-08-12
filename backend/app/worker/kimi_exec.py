@@ -15,12 +15,14 @@ from __future__ import annotations
 import json
 import subprocess
 import threading
+import time
 
 from .. import guardrails
 from .exec_common import (
     ExecOutcome,
     drain_stderr,
     kill_group,
+    make_no_progress_watchdog,
     make_watchdog,
     register_proc,
     unregister_proc,
@@ -48,6 +50,8 @@ def run_kimi(
     checkout_path: str,
     whitelisted_hosts: list[str] = (),
     cost_per_interaction: float,
+    no_progress_timeout: int = 0,
+    resume_session_id: str | None = None,
     on_event,
 ) -> KimiOutcome:
     """Roda o kimi e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
@@ -56,6 +60,9 @@ def run_kimi(
     Síncrono: chamar de um thread/processo dedicado.
     """
     cmd = [kimi_bin, "-p", prompt, "--output-format", "stream-json"]
+    if resume_session_id:
+        # Retoma a MESMA conversa da execução anterior (contexto preservado).
+        cmd = [kimi_bin, "-S", resume_session_id, "-p", prompt, "--output-format", "stream-json"]
     outcome = KimiOutcome()
     log_lock = threading.Lock()
 
@@ -77,6 +84,13 @@ def run_kimi(
         stderr_thread.start()
 
         watchdog, timed_out = make_watchdog(timeout, proc)
+        stalled = threading.Event()
+        last_activity = [time.monotonic()]
+        stall_stop = (
+            make_no_progress_watchdog(no_progress_timeout, proc, last_activity, stalled)
+            if no_progress_timeout > 0
+            else None
+        )
 
         seq = 0
         interactions = 0
@@ -103,6 +117,7 @@ def run_kimi(
 
         try:
             for line in proc.stdout:
+                last_activity[0] = time.monotonic()
                 line = line.strip()
                 if not line:
                     continue
@@ -174,18 +189,33 @@ def run_kimi(
                     if abort_reason:
                         return _abort(abort_reason)
 
+                elif role == "meta":
+                    # Captura o id da sessão (para retomar a MESMA conversa numa
+                    # re-execução da fase após timeout/stall).
+                    if obj.get("type") == "session.resume_hint" and obj.get("session_id"):
+                        outcome.session_id = str(obj["session_id"])
+                    else:
+                        with log_lock:
+                            logf.write(line + "\n")
+
                 else:
                     with log_lock:
                         logf.write(line + "\n")
 
         finally:
             watchdog.cancel()
+            if stall_stop is not None:
+                stall_stop.set()
 
         proc.wait()
         stderr_thread.join(timeout=10)
         unregister_proc(proc)
 
-    if timed_out.is_set() and not outcome.aborted:
+    if stalled.is_set() and not outcome.aborted:
+        outcome.aborted = True
+        outcome.timed_out = True
+        outcome.abort_reason = f"timeout sem progresso ({no_progress_timeout}s sem saída)"
+    elif timed_out.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True
         outcome.abort_reason = f"timeout após {timeout}s"

@@ -446,6 +446,8 @@ class WorkspaceOccurrenceOut(BaseModel):
     position: int
     robot: dict | None = None
     attempt: int
+    run: int = 1
+    is_rerun: bool = False
     status: str
     goal: str | None = None
     started_at: datetime | None = None

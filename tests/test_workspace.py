@@ -132,6 +132,26 @@ def test_workspace_ghost_events_before_attempt_dont_shift_position(flow, fake_ki
     assert not any(o["position"] == 5 for o in occ)
 
 
+def test_workspace_stop_shows_verdict_rejection_detail(flow, fake_kimi):
+    """Ocorrência reprovada por veredicto (NEEDS_WORK) expõe no `stop` o motivo
+    COMPLETO da reprovação (conteúdo do autoia_verdict.txt)."""
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    _execute(flow, _run_claim(flow))  # fase 0 (po) ok
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="needs_work")
+    _execute(flow, _run_claim(flow))  # fase 1 (qa) reprova
+
+    data = flow["client"].get(f"/api/tasks/{task_id}/workspace").json()
+    qa = next(o for o in data["occurrences"] if o["position"] == 1 and o["status"] == "failed")
+    assert qa["stop"]["kind"] == "verdict"
+    assert "NEEDS_WORK" in (qa["stop"]["detail"] or "")
+    assert "ambigua" in (qa["stop"]["detail"] or "")
+
+
 def test_workspace_reexecution_preserves_history(flow, fake_kimi):
     """Re-executar uma fase cria uma NOVA ocorrência no fim — histórico imutável."""
     settings = flow["settings"]

@@ -52,9 +52,38 @@ function occStatusMeta(status: string): { label: string; cls: string } {
   }
 }
 
-const fmtCost = (v: number) => `R$ ${(v ?? 0).toFixed(2).replace(".", ",")}`;
+/** Metadados da parada de uma ocorrência (motivo da falha/bloqueio). */
+function stopMeta(kind: string): { label: string; cls: string } {
+  switch (kind) {
+    case "verdict":
+      return { label: "❌ REPROVAÇÃO — a revisão não aprovou esta etapa", cls: "ws-stop-verdict" };
+    case "guardrail_blocked":
+      return { label: "⛔ GUARDRAIL BLOQUEOU A EXECUÇÃO", cls: "ws-stop-guardrail" };
+    case "timeout":
+      return { label: "⏱ TIMEOUT — o robô não respondeu", cls: "ws-stop-timeout" };
+    case "exec_exit":
+      return { label: "❌ ERRO DO EXECUTOR", cls: "" };
+    case "git_error":
+      return { label: "❌ ERRO DE GIT", cls: "" };
+    case "merge_error":
+    case "merge_failed":
+      return { label: "❌ MERGE FALHOU", cls: "" };
+    case "budget_hit":
+      return { label: "💰 ORÇAMENTO ESTOURADO", cls: "" };
+    case "post_merge_failed":
+      return { label: "❌ FALHA PÓS-MERGE (código já integrado)", cls: "" };
+    case "task_blocked":
+      return { label: "🟠 ETAPA PARADA — AGUARDANDO DECISÃO/INSTRUÇÃO", cls: "" };
+    case "subtask_bounce_back":
+      return { label: "↩️ TAREFAS REPROVADAS NA VERIFICAÇÃO — voltam para o developer", cls: "ws-stop-timeout" };
+    case "subtask_failed":
+      return { label: "❌ SUBTAREFA FALHOU", cls: "" };
+    default:
+      return { label: "❌ ETAPA PARADA", cls: "" };
+  }
+}
 
-function fmtTime(iso: string | null): string {
+const fmtCost = (v: number) => `R$ ${(v ?? 0).toFixed(2).replace(".", ",")}`;function fmtTime(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
@@ -176,7 +205,7 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
       <header className="ws-occ-head">
         <span className="ws-occ-pos">FASE {occ.position + 1}</span>
         <span className="ws-occ-robot">{occ.robot?.name ?? "?"}</span>
-        {occ.attempt > 1 && (
+        {occ.is_rerun && (
           <span className="badge badge-warn" title="Nova execução da mesma fase — o histórico anterior foi preservado">
             ↻ Nova execução · tentativa {occ.attempt}
           </span>
@@ -191,6 +220,22 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
         <section className="ws-occ-section">
           <h4 className="ws-section-title">O que será feito</h4>
           <p className="ws-goal">{occ.goal}</p>
+        </section>
+      )}
+
+      {occ.stop && (
+        <section className={`ws-occ-section ws-stop${occ.stop.detail ? " ws-stop-with-detail" : ""}`}>
+          <h4 className="ws-section-title">
+            <span className={stopMeta(occ.stop.kind).cls}>
+              {stopMeta(occ.stop.kind).label}
+            </span>
+          </h4>
+          <p className="ws-stop-reason">{occ.stop.reason || "execução interrompida"}</p>
+          {occ.stop.detail && (
+            <div className="ws-stop-detail">
+              <Markdown text={occ.stop.detail} />
+            </div>
+          )}
         </section>
       )}
 
@@ -216,15 +261,6 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
           <div className="ws-delivered">
             <Markdown text={deliveredText} />
           </div>
-        </section>
-      )}
-
-      {occ.stop && (
-        <section className="ws-occ-section ws-stop">
-          <h4 className="ws-section-title">
-            {occ.status === "blocked" ? "🟠 ETAPA PARADA — DECISÃO NECESSÁRIA" : "❌ ETAPA PARADA"}
-          </h4>
-          <p className="ws-stop-reason">{occ.stop.reason || "execução interrompida"}</p>
         </section>
       )}
 

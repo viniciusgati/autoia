@@ -176,6 +176,17 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `data/workspaces/worker.lock`) — um segundo `autoia-worker` se recusa a iniciar
   (dois workers disputando tasks causam fases rodando em paralelo). Além disso, o
   `claim_next` nunca reclama outra fase de uma task que já tem step `running`.
+- **Robustez contra hang do executor**: além do timeout total (`run_timeout`), há o
+  watchdog de **sem progresso** (`AUTOIA_NO_PROGRESS_TIMEOUT`, default 300 s; 0 =
+  desligado): se o kimi/opencode ficar N s sem emitir NENHUMA saída no stdout
+  (`make_no_progress_watchdog` em `exec_common.py`), o processo é morto e tratado
+  como timeout → bounce-back/retry. **Retomada de sessão**: o `kimi` emite
+  `meta session.resume_hint` com `session_id` no stream-json; o worker guarda em
+  `TaskStep.session_id` e, numa re-execução da MESMA fase que foi interrompida sem
+  concluir (`_should_resume`), chama `kimi -S <id>` para **continuar a mesma conversa**
+  (contexto do LLM preservado) em vez de começar do zero. A fase concluída (phase_done)
+  não retoma. Como fallback, o handoff/prompt da retomada inclui a **atividade da
+  execução anterior** da fase (`_step_prior_activity`, determinístico).
 - **Nunca trunque payloads** de `RunEvent` nem do log — "textos completos" é requisito.
 - **Migração de schema é aditiva**: colunas novas entram em `models.py` **e** em
   `ADDITIVE_COLUMNS` (`db.py`). Nunca drop/rename coluna sem plano de migração.

@@ -1035,6 +1035,8 @@ def task_workspace(
             position=occ["position"],
             robot=occ["robot"],
             attempt=occ["attempt"],
+            run=occ["run"],
+            is_rerun=occ["is_rerun"],
             status=occ["status"],
             goal=occ["goal"],
             started_at=occ["started_at"],
