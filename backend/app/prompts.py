@@ -424,9 +424,10 @@ Regras:
 
 # Resumo de UMA fase concluída ("O que foi entregue") — LLM dedicada a resumo.
 CONTRACT_STEP_SUMMARY = """## Sua função: RESUMIR uma fase, não desenvolver
-Você é uma LLM dedicada a resumir a execução de UMA fase do pipeline autoia. NÃO altere
-código nem corrija nada: apenas INTERPRETE o contexto desta fase e produza um resumo
-curto e objetivo, que permita a uma pessoa entender o que foi entregue sem abrir logs.
+Você é uma LLM dedicada a resumir a execução de UMA fase do pipeline autoia para o
+usuário final. NÃO altere código nem corrija nada: apenas INTERPRETE o contexto desta
+fase e produza um resumo curto, concreto e **humano** — como um desenvolvedor
+explicando o próprio trabalho para outra pessoa, com o PORQUÊ de cada mudança.
 
 ## Formato de saída OBRIGATÓRIO (arquivo)
 Escreva o arquivo `autoia_step_summary.json` na raiz do repositório com EXATAMENTE esta
@@ -434,19 +435,37 @@ estrutura JSON:
 
 ```json
 {
-  "summary": "O que foi feito nesta fase, qual o resultado e as mudanças importantes (2-4 frases, sem frases genéricas).",
-  "changes": ["Alteração importante 1"],
+  "summary": "2-4 frases humanas explicando o que foi feito e por quê",
+  "changes": ["ajuste + motivo"],
   "files": ["arquivo relevante"],
-  "issues": ["Limitação ou pendência relevante"],
+  "issues": ["pendência ou limitação concreta"],
   "result": "completed"
 }
 ```
 
+## Tom do resumo (IMPORTANTE)
+- Escreva como uma PESSOA, não como relatório de sistema. Frases naturais, específicas,
+  com o MOTIVO de cada mudança ("por isso...", "porque...").
+- EXEMPLO BOM: "Tela de gravação (XYZ): ajustei a validação para adequá-la ao backend —
+  antes o front aceitava qualquer formato de data e a API recusava; agora o campo é
+  validado no mesmo formato que o serviço espera, e adicionei o teste desse cenário."
+- EXEMPLO RUIM: "Desenvolvimento realizado com sucesso." / "Implementado conforme o
+  plano." (genérico, sem motivo).
+- `changes`: para cada mudança importante diga o que era, o que ficou e POR QUE.
+- `files`: apenas os arquivos realmente tocados/relevantes.
+
+## Caso de FALHA (result: "failed" ou "partial")
+- `summary` deve explicar a falha de forma clara e humana: o que era esperado, o que
+  falhou e ONDE (arquivo/tela/subtarefa).
+- EXEMPLO BOM: "Falhou a subtarefa 'feedback visual': faltou o feedback visual no
+  arquivo login.tsx (a tela de login) — o usuário não vê erro/carregando/sucesso, e a
+  revisão reprovou por isso. O restante do fluxo de auth já estava pronto."
+- Liste em `issues` as pendências concretas (arquivo + o que falta). Em `changes`, o que
+  já havia sido feito antes da falha (se houver).
+
 Regras:
-- `summary`: responda o que foi feito, o resultado, mudanças importantes, limitações,
-  arquivos relevantes e se houve testes. Evite "Desenvolvimento realizado com sucesso".
 - `result` é um de: `completed`, `partial`, `failed`, `pending`.
-- `changes`, `issues` e `files` são arrays (podem ser vazios).
+- Seja fiel ao contexto: NUNCA diga que funcionou se falhou (e vice-versa).
 - NÃO faça commit deste arquivo."""
 
 # Relatório obrigatório do merger: a fase mais crítica da integração. Toda decisão

@@ -154,8 +154,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   interação inferior fixo. `TaskDetail` atual fica para auditoria técnica.
 - **"O que foi entregue" por fase** (`worker/step_summarizer.py` + tabela `StepSummary`):
   LLM dedicada (via executor da task, zero custo contábil) gera `autoia_step_summary.json`
-  por `(step, attempt)` quando a fase termina `done` (gate `AUTOIA_STEP_SUMMARY`,
-  default ligado). A UI mostra o `delivered` (LLM) ou o texto final do robô como fallback.
+  por `(step, attempt)` quando a fase termina `done` **ou falha** (gate
+  `AUTOIA_STEP_SUMMARY`, default ligado), com **tom humano** (porquê de cada mudança;
+  na falha, explicação clara do que falhou e onde). A UI mostra o `delivered` (LLM) ou o
+  texto final do robô como fallback.
   `TaskStep.goal` ("O que será feito") é derivado deterministicamente da mission + título.
 
 ## Padrões de desenvolvimento (backend)

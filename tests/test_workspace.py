@@ -152,6 +152,42 @@ def test_workspace_stop_shows_verdict_rejection_detail(flow, fake_kimi):
     assert "ambigua" in (qa["stop"]["detail"] or "")
 
 
+def test_step_summary_for_failed_phase(flow, fake_kimi):
+    """Fase que falha também gera "O que foi entregue" (result=failed) com a
+    explicação humana da falha, usando o motivo da reprovação no prompt."""
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    _execute(flow, _run_claim(flow))  # fase 0 (po)
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="needs_work")
+    step_id = _run_claim(flow)
+    _execute(flow, step_id)  # fase 1 (qa) reprova → failed
+
+    settings.kimi_bin = fake_kimi([], write_file="autoia_step_summary.json", write_content=json.dumps({
+        "summary": "Falhou a subtarefa 'feedback visual': faltou o feedback visual no "
+                   "arquivo login.tsx (a tela de login) — a revisão reprovou por isso.",
+        "changes": [],
+        "files": ["src/pages/Login.tsx"],
+        "issues": ["feedback visual ausente em Login.tsx"],
+        "result": "failed",
+    }))
+    assert summarize_step(settings, flow["session_factory"], step_id)
+
+    with flow["session_factory"]() as s:
+        ss = s.query(StepSummary).filter_by(step_id=step_id).first()
+        assert ss is not None
+        assert ss.result == "failed"
+        assert "feedback visual" in ss.summary
+
+    data = flow["client"].get(f"/api/tasks/{task_id}/workspace").json()
+    qa = next(o for o in data["occurrences"] if o["position"] == 1 and o["status"] == "failed")
+    assert qa["delivered"] is not None
+    assert qa["delivered"]["result"] == "failed"
+
+
 def test_workspace_reexecution_preserves_history(flow, fake_kimi):
     """Re-executar uma fase cria uma NOVA ocorrência no fim — histórico imutável."""
     settings = flow["settings"]

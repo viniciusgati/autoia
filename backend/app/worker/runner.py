@@ -1662,18 +1662,21 @@ _STEP_SUMMARY_IN_FLIGHT: set[tuple[int, int]] = set()
 
 
 def _maybe_step_summary(settings: Settings, session_factory, step_id: int) -> None:
-    """Gera o resumo da fase concluída ("O que foi entregue") via LLM de resumo.
+    """Gera o resumo da fase ("O que foi entregue") via LLM de resumo.
 
     Roda em thread daemon com heartbeat próprio e NUNCA falha o pipeline. A geração
     é por (step, attempt): re-execuções têm resumos independentes, preservando o
-    histórico imutável da timeline do workspace.
+    histórico imutável da timeline do workspace. Fases concluídas geram o resumo do
+    que foi feito; fases com falha geram a explicação humana da falha.
     """
     if not settings.step_summary:
         return
     try:
         with session_factory() as s:
             step = s.get(TaskStep, step_id)
-            if step is None or step.status != STEP_DONE:
+            if step is None or step.status not in (
+                STEP_DONE, STEP_FAILED, STEP_GUARDRAIL_BLOCKED,
+            ):
                 return
             key = (step.id, step.attempt)
             existing = (
