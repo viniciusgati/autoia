@@ -528,6 +528,7 @@ def build_prompt(
     step_context: str,
     default_branch: str,
     project_info: str = "",
+    skills_info: str = "",
 ) -> str:
     mission = (robot.mission or "").strip()
     mission = (
@@ -540,6 +541,10 @@ def build_prompt(
     parts = [mission, GIT_WORKFLOW]
     if project_info:
         parts.append(project_info)
+    if skills_info:
+        # Skills do projeto (conhecimento de domínio do usuário) materializadas no
+        # checkout; fallback determinístico ao `--skills-dir` passado ao kimi.
+        parts.append(skills_info)
     if task.acceptance_criteria:
         parts.append(f"### Critérios de aceite da história\n{task.acceptance_criteria}")
     if step_context:

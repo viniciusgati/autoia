@@ -55,6 +55,7 @@ def run_kimi(
     resume_session_id: str | None = None,
     repo_id: int | None = None,
     stop_file: str | None = None,
+    skills_dir: str | None = None,
     on_event,
 ) -> KimiOutcome:
     """Roda o kimi e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
@@ -64,11 +65,17 @@ def run_kimi(
     fornecido, dispara a parada cooperativa: se o arquivo `.stop-<repo_id>` aparecer,
     o processo é morto e o run retorna abortado.
     Síncrono: chamar de um thread/processo dedicado.
+
+    `skills_dir` (opcional): diretório no checkout com as skills do projeto
+    (`.autoia/skills/`), anunciado ao kimi via `--skills-dir <path>`.
     """
     cmd = [kimi_bin, "-p", prompt, "--output-format", "stream-json"]
     if resume_session_id:
         # Retoma a MESMA conversa da execução anterior (contexto preservado).
         cmd = [kimi_bin, "-S", resume_session_id, "-p", prompt, "--output-format", "stream-json"]
+    if skills_dir:
+        # Skills do projeto materializadas no checkout (`.autoia/skills/`).
+        cmd += ["--skills-dir", skills_dir]
     outcome = KimiOutcome()
     log_lock = threading.Lock()
 

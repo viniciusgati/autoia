@@ -242,3 +242,41 @@ def test_kimi_captures_session_id_and_resumes(tmp_path):
     assert "-S" in argv
     assert "session_abc" in argv
     assert argv[argv.index("-S") + 1] == "session_abc"
+
+
+def test_kimi_with_skills_dir_passes_flag(tmp_path):
+    """Com `skills_dir`, o comando inclui `--skills-dir <dir>`; sem ele, não muda."""
+    fake = tmp_path / "fake_kimi_argv"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "with open('argv.txt', 'w') as f:\n"
+        "    f.write(json.dumps(sys.argv[1:]))\n"
+        "print(json.dumps({'role':'assistant','content':'ok'}))\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    checkout = tmp_path / "checkout"
+    checkout.mkdir(exist_ok=True)
+    events, on_event = _collector()
+    skills_dir = str(tmp_path / "checkout" / ".autoia" / "skills")
+
+    kimi_exec.run_kimi(
+        "prompt", cwd=str(checkout), kimi_bin=str(fake),
+        log_path=str(tmp_path / "a.log"), timeout=30, max_identical_calls=3,
+        risky_patterns=[], checkout_path=str(checkout),
+        cost_per_interaction=0.01, on_event=on_event, skills_dir=skills_dir,
+    )
+    argv = json.loads((checkout / "argv.txt").read_text())
+    assert "--skills-dir" in argv
+    assert argv[argv.index("--skills-dir") + 1] == skills_dir
+
+    # sem skills_dir, o comando não muda (flag ausente)
+    (checkout / "argv.txt").unlink()
+    kimi_exec.run_kimi(
+        "prompt", cwd=str(checkout), kimi_bin=str(fake),
+        log_path=str(tmp_path / "b.log"), timeout=30, max_identical_calls=3,
+        risky_patterns=[], checkout_path=str(checkout),
+        cost_per_interaction=0.01, on_event=on_event,
+    )
+    argv = json.loads((checkout / "argv.txt").read_text())
+    assert "--skills-dir" not in argv

@@ -47,6 +47,7 @@ def settings(tmp_path) -> Settings:
         database_url=f"sqlite:///{tmp_path}/autoia.db",
         workspace_dir=str(tmp_path / "workspaces"),
         log_dir=str(tmp_path / "logs"),
+        skills_dir=str(tmp_path / "skills"),
         kimi_bin="kimi",  # não roda de verdade nos testes de API
         run_timeout=30,
         max_identical_calls=3,

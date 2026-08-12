@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import types
@@ -46,6 +47,7 @@ from ..models import (
     Pipeline,
     PipelineStep,
     Repository,
+    RepositorySkill,
     Robot,
     RunEvent,
     StepArtifact,
@@ -616,6 +618,67 @@ def _build_handoff(
     )
 
 
+def _materialize_skills(
+    s: Session, repo: Repository, checkout: str, skills_base: str
+) -> tuple[str | None, str]:
+    """Materializa as skills do projeto no checkout dos robôs.
+
+    Copia `data/skills/<repo_id>/<skill_id>/` (upload do usuário) para
+    `.autoia/skills/<nome>/` e `.opencode/skills/<nome>/` no checkout — sempre
+    que houver skills, independente do executor (custo zero e determinístico).
+    `.autoia/` e `.opencode/` entram no `.git/info/exclude` via
+    `project.exclude_local` para nunca serem versionados pelos robôs.
+
+    Retorna `(skills_dir, skills_info)`:
+    - `skills_dir`: `<checkout>/.autoia/skills` (o `--skills-dir` do kimi) ou
+      None quando o repo não tem skills;
+    - `skills_info`: seção `## Skills do projeto disponíveis` (`nome — descrição`)
+      injetada no prompt (fallback determinístico da UI/auditoria).
+
+    Best-effort: falha de cópia não derruba a fase (a execução segue sem skills).
+    """
+    rows = (
+        s.query(RepositorySkill)
+        .filter(RepositorySkill.repository_id == repo.id)
+        .order_by(RepositorySkill.id)
+        .all()
+    )
+    if not rows:
+        return None, ""
+    for skill in rows:
+        source = os.path.join(skills_base, str(repo.id), str(skill.id))
+        if not os.path.isdir(source):
+            log.warning(
+                "skills: diretório %s não existe no disco; ignorando skill %s",
+                source, skill.name,
+            )
+            continue
+        for prefix in (".autoia", ".opencode"):
+            dest = os.path.join(checkout, prefix, "skills", skill.name)
+            try:
+                shutil.copytree(source, dest, dirs_exist_ok=True)
+            except OSError:
+                log.warning(
+                    "skills: falha ao copiar %s para %s", source, dest, exc_info=True
+                )
+    try:
+        project.exclude_local(checkout, ".autoia/")
+        project.exclude_local(checkout, ".opencode/")
+    except OSError:
+        pass
+    info_lines = ["## Skills do projeto disponíveis"]
+    for skill in rows:
+        info_lines.append(
+            f"- {skill.name} — {skill.description}"
+            if skill.description
+            else f"- {skill.name}"
+        )
+    # `--skills-dir` só é anunciado ao kimi quando a pasta existe de fato
+    # (falha de cópia → None; a seção do prompt segue como fallback).
+    skills_dir = os.path.join(checkout, ".autoia", "skills")
+    return (skills_dir if os.path.isdir(skills_dir) else None), "\n".join(info_lines)
+
+
 def _run_executor(
     eff: EffectiveSettings,
     executor: str,
@@ -628,6 +691,7 @@ def _run_executor(
     kimi_cost_per_interaction: float | None = None,
     resume_session_id: str | None = None,
     repo_id: int | None = None,
+    skills_dir: str | None = None,
 ):
     """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`.
 
@@ -676,6 +740,7 @@ def _run_executor(
         resume_session_id=resume_session_id,
         repo_id=repo_id,
         stop_file=stop_file,
+        skills_dir=skills_dir,
         on_event=on_event,
     )
 
@@ -743,6 +808,11 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             log.warning(
                 "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
             )
+        # Skills do projeto materializadas no checkout (`.autoia/skills/` +
+        # `.opencode/skills/`) e seção do prompt; sem skills → nada muda.
+        skills_dir, skills_info = _materialize_skills(
+            s, repo, checkout, settings.skills_dir
+        )
         try:
             handoff.write_handoff(
                 checkout, _build_handoff(s, task, step, checkout, base, branch)
@@ -762,7 +832,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             prompt = _resume_prompt(step, task)
         else:
             prompt = prompts.build_prompt(
-                step.robot, task, step_context, base, project_info=project_info
+                step.robot, task, step_context, base,
+                project_info=project_info, skills_info=skills_info,
             )
         log_path = os.path.join(eff.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
@@ -831,6 +902,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         on_event=on_event,
         resume_session_id=resume_session_id,
         repo_id=repo.id,
+        skills_dir=skills_dir,
     )
 
     with session_factory() as s:
@@ -1544,9 +1616,16 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                     log.warning("PM: clone falhou para %s", checkout, exc_info=True)
 
         project_info = project.detect_project(checkout) if os.path.isdir(checkout) else ""
+        skills_dir = None
+        skills_info = ""
         if os.path.isdir(checkout):
             try:
                 project.ensure_agents_md(checkout, project_info, eff.db_rule)
+                # Skills do projeto materializadas no checkout do PM também: a
+                # decisão recebe a seção `## Skills do projeto disponíveis`.
+                skills_dir, skills_info = _materialize_skills(
+                    s, task.repository, checkout, settings.skills_dir
+                )
                 last_pos = max((st.position for st in task.steps), default=-1)
                 # `post_merge` é lido por _build_handoff (progresso das subtarefas)
                 # mesmo para o "step fantasma" do PM.
@@ -1564,7 +1643,8 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                     exc_info=True,
                 )
         prompt = prompts.build_prompt(
-            pm_robot, task, context, task.repository.default_branch, project_info=project_info
+            pm_robot, task, context, task.repository.default_branch,
+            project_info=project_info, skills_info=skills_info,
         )
         log_path = os.path.join(eff.log_dir, f"pm_task_{task_id}.log")
         task.pm_decisions += 1
@@ -1596,6 +1676,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             on_event=None,
             kimi_cost_per_interaction=0.0,
             repo_id=task.repository_id,
+            skills_dir=skills_dir,
         )
     finally:
         stop.set()

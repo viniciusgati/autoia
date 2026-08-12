@@ -150,6 +150,27 @@ class RepositoryMemberCreate(BaseModel):
     role: Literal["member", "admin"] = "member"
 
 
+# ---------- Skills de projeto ----------
+
+class RepositorySkillOut(BaseModel):
+    """Skill de projeto: metadados do upload de `.zip` com `SKILL.md` na raiz.
+
+    Os arquivos ficam em `data/skills/<repository_id>/<skill_id>/` no disco; o
+    payload alimenta a lista/feedback da UI (nome, descrição do frontmatter,
+    nº de arquivos e tamanho total).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    repository_id: int
+    name: str
+    description: str
+    file_count: int
+    size_bytes: int
+    created_at: datetime
+
+
 # ---------- Robot ----------
 
 class RobotCreate(BaseModel):

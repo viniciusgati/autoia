@@ -57,6 +57,20 @@ export interface RepositoryMember {
   user: User | null;
 }
 
+/** Skill de projeto: metadados do upload de `.zip` com `SKILL.md` na raiz.
+ *  Os arquivos ficam em `data/skills/<repository_id>/<skill_id>/`; este payload
+ *  alimenta a lista/feedback da UI (nome, descrição do frontmatter, nº de
+ *  arquivos e tamanho total). */
+export interface RepositorySkill {
+  id: number;
+  repository_id: number;
+  name: string;
+  description: string;
+  file_count: number;
+  size_bytes: number;
+  created_at: string;
+}
+
 /** Tarefa do usuário no dashboard pessoal (GET /api/me/tasks). */
 export interface MyTask {
   id: number;
