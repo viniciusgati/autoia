@@ -178,6 +178,9 @@ export default function App() {
 
         <div className="sidebar-section">
           <div className="sidebar-label">Configuração</div>
+          <NavLink to="/repositories" className={({ isActive }) => (isActive ? "active" : "")}>
+            <ProjectsIcon size={16} /> Repositórios
+          </NavLink>
           <NavLink to="/robots" className={({ isActive }) => (isActive ? "active" : "")}>
             <RobotsIcon size={16} /> Robôs
           </NavLink>
