@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import PhaseStepper from "./PhaseStepper";
 import StatusBadge from "./StatusBadge";
-import { faseAtual } from "../lib/tasks";
+import { faseAtual, formatDuration } from "../lib/tasks";
 import type { TaskListItem } from "../types";
 
 /** Tarefa que precisa de ação humana (revisão/aprovação/bloqueio). */
@@ -50,6 +50,14 @@ export default function TaskCard({
       : "—";
   const costPct = task.budget_limit > 0 ? task.cost_spent / task.budget_limit : 0;
   const costHigh = costPct >= 0.8 && task.status !== "done";
+  // Tempo total de execução: soma das durações das fases com timestamps completos.
+  const totalMs = task.steps.reduce((acc, s) => {
+    if (s.started_at && s.finished_at) {
+      acc += Math.max(0, new Date(s.finished_at).getTime() - new Date(s.started_at).getTime());
+    }
+    return acc;
+  }, 0);
+  const hasTimestamps = task.steps.some((s) => s.started_at && s.finished_at);
   // Minha tarefa (auth ON): destaque visual + selo "sua tarefa".
   const isMine = user != null && task.responsible_id === user.id;
 
@@ -74,7 +82,7 @@ export default function TaskCard({
   return (
     <div className={`task-card${alert ? (isErr ? " task-card-err" : " task-card-warn") : ""}${isMine ? " task-card-mine" : ""}`}>
       <div className="task-card-head">
-        <Link to={`${detailPath}/${task.id}`} className="task-card-title">
+        <Link to={`${detailPath}/${task.id}`} className="task-card-title" title={`#${task.id} ${task.title}`}>
           #{task.id} {task.title}
         </Link>
         <div className="task-card-head-right">
@@ -87,10 +95,10 @@ export default function TaskCard({
         </div>
       </div>
 
-      {alert && (
-        <div className={`task-card-alert${isErr ? " task-card-alert-err" : ""}`}>
-          ⚠ {alert}
-        </div>
+      {alert ? (
+        <div className={`task-card-alert${isErr ? " task-card-alert-err" : ""}`}>⚠ {alert}</div>
+      ) : (
+        <div className="task-card-alert task-card-alert-empty" aria-hidden="true" />
       )}
 
       <div className="task-card-stage">
@@ -98,7 +106,7 @@ export default function TaskCard({
         <span className="task-card-stage-name">{etapa}</span>
       </div>
 
-      <PhaseStepper task={task} muted />
+      <PhaseStepper task={task} muted showLabels />
 
       <div className="task-card-meta">
         {repoName && <span className="muted">{repoName}</span>}
@@ -108,9 +116,20 @@ export default function TaskCard({
         <span className="task-card-executor" title={`executor: ${task.executor}`}>
           {task.executor === "opencode" ? "opencode" : "kimi"}
         </span>
-        <span className={`mono small${costHigh ? " task-card-cost-warn" : " muted"}`}>
-          {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
-        </span>
+        {hasTimestamps && (
+          <span className="task-card-duration" title="tempo total de execução">
+            {formatDuration(totalMs)}
+          </span>
+        )}
+        {task.status === "done" ? (
+          <span className="task-card-cost-final" title="custo final">
+            {task.cost_spent.toFixed(2)} US$
+          </span>
+        ) : (
+          <span className={`mono small${costHigh ? " task-card-cost-warn" : " muted"}`}>
+            {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
+          </span>
+        )}
       </div>
 
       <div className="task-card-actions">
