@@ -126,6 +126,8 @@ class Settings:
     database_url: str = field(default_factory=lambda: _env("AUTOIA_DATABASE_URL", "sqlite:///data/autoia.db"))
     workspace_dir: str = field(default_factory=lambda: _env("AUTOIA_WORKSPACE_DIR", "data/workspaces"))
     log_dir: str = field(default_factory=lambda: _env("AUTOIA_LOG_DIR", "data/logs"))
+    # Diretório com as skills dos projetos (`data/skills/<repo_id>/<skill_id>/`).
+    skills_dir: str = field(default_factory=lambda: _env("AUTOIA_SKILLS_DIR", "data/skills"))
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
     run_timeout: int = field(default_factory=lambda: _int("AUTOIA_RUN_TIMEOUT", 1800))
@@ -167,7 +169,12 @@ class Settings:
     )
 
     def ensure_dirs(self) -> None:
-        for d in (self.workspace_dir, self.log_dir, _sqlite_parent(self.database_url)):
+        for d in (
+            self.workspace_dir,
+            self.log_dir,
+            self.skills_dir,
+            _sqlite_parent(self.database_url),
+        ):
             os.makedirs(d, exist_ok=True)
 
 

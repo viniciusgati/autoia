@@ -19,6 +19,13 @@ export interface Repository {
   auto_summary: boolean;
 }
 
+/** Informações para o diálogo de confirmação de exclusão do projeto
+ *  (GET /api/repositories/{id}/delete-info). */
+export interface RepositoryDeleteInfo {
+  active_tasks: number;
+  checkout_path: string | null;
+}
+
 export interface Robot {
   id: number;
   repository_id: number | null;
@@ -48,6 +55,20 @@ export interface RepositoryMember {
   role: string;
   created_at: string;
   user: User | null;
+}
+
+/** Skill de projeto: metadados do upload de `.zip` com `SKILL.md` na raiz.
+ *  Os arquivos ficam em `data/skills/<repository_id>/<skill_id>/`; este payload
+ *  alimenta a lista/feedback da UI (nome, descrição do frontmatter, nº de
+ *  arquivos e tamanho total). */
+export interface RepositorySkill {
+  id: number;
+  repository_id: number;
+  name: string;
+  description: string;
+  file_count: number;
+  size_bytes: number;
+  created_at: string;
 }
 
 /** Tarefa do usuário no dashboard pessoal (GET /api/me/tasks). */

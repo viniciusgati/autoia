@@ -37,7 +37,7 @@ from ..models import (
     Task,
     TaskStep,
 )
-from . import gitops, kimi_exec
+from . import exec_common, gitops, kimi_exec
 
 log = logging.getLogger("autoia.worker.subtask")
 
@@ -378,6 +378,14 @@ def _run_one_implement(
         st = s.get(SubTask, subtask.id)
         if st is None:
             return "subtarefa não encontrada"
+        # Parada cooperativa: se o projeto for excluído durante a execução da
+        # subtarefa, o watchdog do executor mata o processo.
+        repo_id = task.repository_id
+        stop_file = (
+            exec_common.repo_stop_path(settings.workspace_dir, repo_id)
+            if repo_id is not None
+            else None
+        )
         try:
             head_before = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
         except gitops.GitError:
@@ -406,6 +414,8 @@ def _run_one_implement(
         risky_patterns=settings.risky_patterns,
         checkout_path=checkout,
         cost_per_interaction=settings.cost_per_interaction,
+        repo_id=repo_id,
+        stop_file=stop_file,
         on_event=on_event,
     )
 
@@ -595,6 +605,14 @@ def _run_one_verify(
         st = s.get(SubTask, subtask.id)
         if st is None:
             return "subtarefa não encontrada"
+        # Parada cooperativa: se o projeto for excluído durante a execução da
+        # subtarefa, o watchdog do executor mata o processo.
+        repo_id = task.repository_id
+        stop_file = (
+            exec_common.repo_stop_path(settings.workspace_dir, repo_id)
+            if repo_id is not None
+            else None
+        )
         st.status = SUB_VERIFYING
         st.started_at = func.now()
         _system_event(
@@ -618,6 +636,8 @@ def _run_one_verify(
         risky_patterns=settings.risky_patterns,
         checkout_path=checkout,
         cost_per_interaction=settings.cost_per_interaction,
+        repo_id=repo_id,
+        stop_file=stop_file,
         on_event=on_event,
     )
 

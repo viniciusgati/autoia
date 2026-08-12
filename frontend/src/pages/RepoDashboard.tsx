@@ -1,15 +1,42 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
+import { useAuth } from "../auth";
 import HelpTip from "../components/HelpTip";
 import PhaseStepper from "../components/PhaseStepper";
+import ProjectSkills from "../components/ProjectSkills";
 import StatusBadge from "../components/StatusBadge";
 import { fmtBudget, fmtCost } from "../lib/money";
 import { diffSummary } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
-import type { Pipeline, Repository, TaskListItem, TaskStepListItem } from "../types";
+import type { Pipeline, Repository, RepositoryMember, TaskListItem, TaskStepListItem } from "../types";
 
 const ATIVOS = ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"];
+
+/** Campos editáveis nas Configurações (usados para o badge "alterações não salvas"). */
+const SETTINGS_FIELDS = [
+  "name",
+  "max_attempts",
+  "max_pm_decisions",
+  "run_timeout",
+  "task_budget",
+  "cost_per_interaction",
+  "risky_patterns_extra",
+  "db_rule",
+  "allow_external_tasks",
+  "auto_summary",
+  "default_pipeline_id",
+] as const;
+
+/** Mensagem de erro da API sem o prefixo de status ("400: detalhe" → "detalhe"). */
+function apiErrorMsg(e: unknown): string {
+  return String(e).replace(/^\d+: /, "");
+}
+
+/** O form diverge do último valor salvo? */
+function repoDirty(repo: Repository, base: Repository): boolean {
+  return SETTINGS_FIELDS.some((f) => repo[f] !== base[f]);
+}
 
 export default function RepoDashboard() {
   const { repoId: repoIdStr } = useParams<{ repoId: string }>();
@@ -17,12 +44,17 @@ export default function RepoDashboard() {
 
   const [tasks, setTasks] = useState<TaskListItem[]>([]);
   const [repo, setRepo] = useState<Repository | null>(null);
+  const [baseRepo, setBaseRepo] = useState<Repository | null>(null);
+  const [members, setMembers] = useState<RepositoryMember[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [busy, setBusy] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const savedTimer = useRef<number | null>(null);
+  const { user, authEnabled } = useAuth();
 
   const load = async (signal?: AbortSignal) => {
     try {
@@ -41,9 +73,18 @@ export default function RepoDashboard() {
     api.listRepositories().then((repos) => {
       const r = repos.find((r) => r.id === repoId) ?? null;
       setRepo(r);
+      setBaseRepo(r);
     }).catch(() => {});
     api.listPipelines(repoId).then(setPipelines).catch(() => {});
+    // Membros do projeto: define quem é admin do projeto (permissão de skills).
+    api.listMembers(repoId).then(setMembers).catch(() => {});
   }, [repoId]);
+
+  /** Atualiza um campo do form e limpa o erro de salvamento anterior. */
+  const updateRepo = (next: Repository) => {
+    setRepo(next);
+    if (saveError) setSaveError("");
+  };
 
   const review = async (task: TaskListItem, action: "approve" | "cancel") => {
     setBusy(task.id);
@@ -80,12 +121,13 @@ export default function RepoDashboard() {
   };
 
   const saveSettings = async () => {
-    if (!repo) return;
+    if (!repo || !formValid) return;
     setSaving(true);
     setSaved(false);
-    setError("");
+    setSaveError("");
     try {
       const updated = await api.updateRepository(repoId, {
+        name: repo.name,
         max_attempts: repo.max_attempts,
         max_pm_decisions: repo.max_pm_decisions,
         run_timeout: repo.run_timeout,
@@ -98,16 +140,32 @@ export default function RepoDashboard() {
         default_pipeline_id: repo.default_pipeline_id,
       });
       setRepo(updated);
+      setBaseRepo(updated);
       setSaved(true);
-      setTimeout(() => setSaved(false), 2500);
+      if (savedTimer.current != null) window.clearTimeout(savedTimer.current);
+      savedTimer.current = window.setTimeout(() => setSaved(false), 2000);
     } catch (e) {
-      setError(String(e));
+      setSaveError(apiErrorMsg(e));
     } finally {
       setSaving(false);
     }
   };
 
   if (error) return <p className="error">{error}</p>;
+
+  // Validação inline: nome obrigatório; timeout > 0; budget >= 0; tentativas >= 1
+  // (valores vazios = "global" → válidos).
+  const nameValid = (repo?.name ?? "").trim().length > 0;
+  const attemptsValid = repo == null || repo.max_attempts == null || repo.max_attempts >= 1;
+  const timeoutValid = repo == null || repo.run_timeout == null || repo.run_timeout > 0;
+  const budgetValid = repo == null || repo.task_budget == null || repo.task_budget >= 0;
+  const formValid = nameValid && attemptsValid && timeoutValid && budgetValid;
+  const dirty = repo != null && baseRepo != null && repoDirty(repo, baseRepo);
+
+  // Permissão de skills: admin global ou admin do projeto (auth OFF → libera).
+  const isRepoAdmin =
+    user != null && members.some((m) => m.role === "admin" && m.user_id === user.id);
+  const canManageSkills = !authEnabled || user == null || user.role === "admin" || isRepoAdmin;
 
   const ativas = tasks.filter((t) => ATIVOS.includes(t.status));
   const finalizadas = tasks.filter((t) => !ativas.includes(t));
@@ -143,127 +201,181 @@ export default function RepoDashboard() {
         />
       ))}
 
-      {/* Configurações do projeto */}
+      {/* Configurações do projeto (5 seções accordion) */}
       {repo && (
-        <details style={{ marginTop: 28 }}>
+        <details className="config-root" style={{ marginTop: 28 }} open>
           <summary style={{ cursor: "pointer", color: "var(--accent)", fontWeight: 600, fontSize: 15, padding: "8px 0" }}>
             ⚙ Configurações do projeto
+            {dirty && (
+              <span className="badge badge-warn" style={{ marginLeft: 10, textTransform: "lowercase" }}>
+                alterações não salvas
+              </span>
+            )}
           </summary>
           <div className="card" style={{ marginTop: 10 }}>
-            <div className="form-stack">
-              {/* Linha: workers & budget */}
-              <div className="form-inline">
-                <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Max tentativas <HelpTip>Quantas vezes uma fase pode falhar e ser re-executada antes de travar a task. Config global: variável AUTOIA_MAX_ATTEMPTS.</HelpTip></label>
-                  <input type="number" min={1} max={10}
-                    value={repo.max_attempts ?? ""}
-                    placeholder="global"
-                    onChange={(e) => setRepo({ ...repo, max_attempts: e.target.value ? Number(e.target.value) : null })}
-                  />
+            <div className="config-sections">
+              {/* ── Geral ── */}
+              <details className="config-section" open>
+                <summary>Geral</summary>
+                <div className="form-stack">
+                  <div className={`form-field ${nameValid ? "" : "form-field-invalid"}`}>
+                    <label className="form-label">Nome do projeto <HelpTip>Nome exibido nas listas e dashboards. Obrigatório.</HelpTip></label>
+                    <input type="text"
+                      value={repo.name}
+                      onChange={(e) => updateRepo({ ...repo, name: e.target.value })}
+                    />
+                    {!nameValid && <div className="form-error">O nome do projeto é obrigatório</div>}
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label">Pipeline padrão <HelpTip>Pipeline usado quando uma tarefa é criada sem especificar qual pipeline utilizar.</HelpTip></label>
+                    <select
+                      value={repo.default_pipeline_id ?? ""}
+                      onChange={(e) => updateRepo({ ...repo, default_pipeline_id: e.target.value ? Number(e.target.value) : null })}
+                    >
+                      <option value="">— global (escolher na criação) —</option>
+                      {pipelines.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                          {p.repository_id == null ? " (global)" : ""}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="form-inline">
+                    <label className="post-merge-label">
+                      <input type="checkbox"
+                        checked={repo.auto_summary}
+                        onChange={(e) => updateRepo({ ...repo, auto_summary: e.target.checked })}
+                      />
+                      gerar resumo automaticamente
+                      <HelpTip>Gera (e regenera) o resumo do desenvolvimento por LLM a cada avanço de fase e quando a task para (final, revisão, bloqueio). O resumo é opcional — nunca afeta a execução.</HelpTip>
+                    </label>
+                  </div>
                 </div>
-                <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Max decisões PM <HelpTip>Limite de vezes que o robô PM pode decidir (retry/continuar/escalar) antes de travar. Config global: AUTOIA_MAX_PM_DECISIONS.</HelpTip></label>
-                  <input type="number" min={0} max={10}
-                    value={repo.max_pm_decisions ?? ""}
-                    placeholder="global"
-                    onChange={(e) => setRepo({ ...repo, max_pm_decisions: e.target.value ? Number(e.target.value) : null })}
-                  />
+              </details>
+
+              {/* ── Execução ── */}
+              <details className="config-section">
+                <summary>Execução</summary>
+                <div className="form-stack">
+                  <div className="form-inline">
+                    <div className={`form-field ${attemptsValid ? "" : "form-field-invalid"}`} style={{ flex: 1, minWidth: 120 }}>
+                      <label className="form-label">Max tentativas <HelpTip>Quantas vezes uma fase pode falhar e ser re-executada antes de travar a task. Config global: variável AUTOIA_MAX_ATTEMPTS.</HelpTip></label>
+                      <input type="number" min={1} max={10}
+                        value={repo.max_attempts ?? ""}
+                        placeholder="global"
+                        onChange={(e) => updateRepo({ ...repo, max_attempts: e.target.value ? Number(e.target.value) : null })}
+                      />
+                      {!attemptsValid && <div className="form-error">Máx. tentativas deve ser ao menos 1</div>}
+                    </div>
+                    <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
+                      <label className="form-label">Max decisões PM <HelpTip>Limite de vezes que o robô PM pode decidir (retry/continuar/escalar) antes de travar. Config global: AUTOIA_MAX_PM_DECISIONS.</HelpTip></label>
+                      <input type="number" min={0} max={10}
+                        value={repo.max_pm_decisions ?? ""}
+                        placeholder="global"
+                        onChange={(e) => updateRepo({ ...repo, max_pm_decisions: e.target.value ? Number(e.target.value) : null })}
+                      />
+                    </div>
+                    <div className={`form-field ${timeoutValid ? "" : "form-field-invalid"}`} style={{ flex: 1, minWidth: 120 }}>
+                      <label className="form-label">Timeout (seg) <HelpTip>Tempo máximo que o kimi pode rodar por fase. Se estourar, a fase falha. Config global: AUTOIA_RUN_TIMEOUT.</HelpTip></label>
+                      <input type="number" min={60} step={60}
+                        value={repo.run_timeout ?? ""}
+                        placeholder="global"
+                        onChange={(e) => updateRepo({ ...repo, run_timeout: e.target.value ? Number(e.target.value) : null })}
+                      />
+                      {!timeoutValid && <div className="form-error">Timeout deve ser maior que zero</div>}
+                    </div>
+                  </div>
+                  <div className="form-inline">
+                    <label className="post-merge-label">
+                      <input type="checkbox"
+                        checked={repo.allow_external_tasks}
+                        onChange={(e) => updateRepo({ ...repo, allow_external_tasks: e.target.checked })}
+                      />
+                      receber tasks de outros projetos
+                      <HelpTip>Outros repositórios podem criar tarefas neste projeto. Ex: o repo de código cria uma task de documentação no repo de docs.</HelpTip>
+                    </label>
+                  </div>
                 </div>
-                <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Timeout (seg) <HelpTip>Tempo máximo que o kimi pode rodar por fase. Se estourar, a fase falha. Config global: AUTOIA_RUN_TIMEOUT.</HelpTip></label>
-                  <input type="number" min={60} step={60}
-                    value={repo.run_timeout ?? ""}
-                    placeholder="global"
-                    onChange={(e) => setRepo({ ...repo, run_timeout: e.target.value ? Number(e.target.value) : null })}
-                  />
+              </details>
+
+              {/* ── Orçamento ── */}
+              <details className="config-section">
+                <summary>Orçamento</summary>
+                <div className="form-stack">
+                  <div className="form-inline">
+                    <div className={`form-field ${budgetValid ? "" : "form-field-invalid"}`} style={{ flex: 1, minWidth: 120 }}>
+                      <label className="form-label">Orçamento (R$) <HelpTip>Limite de gasto por tarefa. Se estourar, a task vai para needs_review. Config global: AUTOIA_TASK_BUDGET.</HelpTip></label>
+                      <input type="number" min={0} step={0.5}
+                        value={repo.task_budget ?? ""}
+                        placeholder="global"
+                        onChange={(e) => updateRepo({ ...repo, task_budget: e.target.value ? Number(e.target.value) : null })}
+                      />
+                      {!budgetValid && <div className="form-error">Orçamento não pode ser negativo</div>}
+                    </div>
+                    <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
+                      <label className="form-label">Custo/interação (R$) <HelpTip>Custo estimado por chamada ao kimi (tool_call + resposta). Usado para calcular gasto acumulado. Config global: AUTOIA_COST_PER_INTERACTION.</HelpTip></label>
+                      <input type="number" min={0} step={0.001}
+                        value={repo.cost_per_interaction ?? ""}
+                        placeholder="global"
+                        onChange={(e) => updateRepo({ ...repo, cost_per_interaction: e.target.value ? Number(e.target.value) : null })}
+                      />
+                    </div>
+                  </div>
                 </div>
-              </div>
+              </details>
 
-              {/* Linha: budget & cost */}
-              <div className="form-inline">
-                <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Orçamento (R$) <HelpTip>Limite de gasto por tarefa. Se estourar, a task vai para needs_review. Config global: AUTOIA_TASK_BUDGET.</HelpTip></label>
-                  <input type="number" min={0} step={0.5}
-                    value={repo.task_budget ?? ""}
-                    placeholder="global"
-                    onChange={(e) => setRepo({ ...repo, task_budget: e.target.value ? Number(e.target.value) : null })}
-                  />
+              {/* ── Regras e ambiente ── */}
+              <details className="config-section">
+                <summary>Regras e ambiente</summary>
+                <div className="form-stack">
+                  <div className="form-field">
+                    <label className="form-label">Regra de banco de dados <HelpTip>Instrução sobre qual banco usar nos testes. Ex: "PostgreSQL 15 local (host: localhost, porta: 5432, banco: test, user: test, senha: test)". Config global: AUTOIA_DB_RULE.</HelpTip></label>
+                    <textarea rows={2}
+                      value={repo.db_rule ?? ""}
+                      placeholder="global (PostgreSQL padrão)"
+                      onChange={(e) => updateRepo({ ...repo, db_rule: e.target.value || null })}
+                    />
+                  </div>
+                  <div className="form-field">
+                    <label className="form-label">Padrões de risco extras (JSON array) <HelpTip>Comandos adicionais bloqueados pelo guardrail. Ex: ["rm -rf /var", "DROP DATABASE"]. São somados aos padrões globais (AUTOIA_RISKY_PATTERNS).</HelpTip></label>
+                    <textarea rows={2}
+                      value={repo.risky_patterns_extra ?? ""}
+                      placeholder='ex: ["rm -rf /var", "DROP DATABASE"]'
+                      onChange={(e) => updateRepo({ ...repo, risky_patterns_extra: e.target.value || null })}
+                    />
+                  </div>
                 </div>
-                <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Custo/interação (R$) <HelpTip>Custo estimado por chamada ao kimi (tool_call + resposta). Usado para calcular gasto acumulado. Config global: AUTOIA_COST_PER_INTERACTION.</HelpTip></label>
-                  <input type="number" min={0} step={0.001}
-                    value={repo.cost_per_interaction ?? ""}
-                    placeholder="global"
-                    onChange={(e) => setRepo({ ...repo, cost_per_interaction: e.target.value ? Number(e.target.value) : null })}
-                  />
+              </details>
+
+              {/* ── Skills ── */}
+              <details className="config-section">
+                <summary>Skills</summary>
+                <div className="form-stack">
+                  <ProjectSkills repoId={repoId} isAdmin={canManageSkills} />
                 </div>
-              </div>
+              </details>
+            </div>
 
-              {/* db_rule */}
-              <div className="form-field">
-                <label className="form-label">Regra de banco de dados <HelpTip>Instrução sobre qual banco usar nos testes. Ex: "PostgreSQL 15 local (host: localhost, porta: 5432, banco: test, user: test, senha: test)". Config global: AUTOIA_DB_RULE.</HelpTip></label>
-                <textarea rows={2}
-                  value={repo.db_rule ?? ""}
-                  placeholder="global (PostgreSQL padrão)"
-                  onChange={(e) => setRepo({ ...repo, db_rule: e.target.value || null })}
-                />
-              </div>
-
-              {/* risky_patterns_extra */}
-              <div className="form-field">
-                <label className="form-label">Padrões de risco extras (JSON array) <HelpTip>Comandos adicionais bloqueados pelo guardrail. Ex: ["rm -rf /var", "DROP DATABASE"]. São somados aos padrões globais (AUTOIA_RISKY_PATTERNS).</HelpTip></label>
-                <textarea rows={2}
-                  value={repo.risky_patterns_extra ?? ""}
-                  placeholder='ex: ["rm -rf /var", "DROP DATABASE"]'
-                  onChange={(e) => setRepo({ ...repo, risky_patterns_extra: e.target.value || null })}
-                />
-              </div>
-
-              {/* Toggles */}
-              <div className="form-inline">
-                <label className="post-merge-label">
-                  <input type="checkbox"
-                    checked={repo.allow_external_tasks}
-                    onChange={(e) => setRepo({ ...repo, allow_external_tasks: e.target.checked })}
-                  />
-                  receber tasks de outros projetos
-                  <HelpTip>Outros repositórios podem criar tarefas neste projeto. Ex: o repo de código cria uma task de documentação no repo de docs.</HelpTip>
-                </label>
-                <label className="post-merge-label">
-                  <input type="checkbox"
-                    checked={repo.auto_summary}
-                    onChange={(e) => setRepo({ ...repo, auto_summary: e.target.checked })}
-                  />
-                  gerar resumo automaticamente
-                  <HelpTip>Gera (e regenera) o resumo do desenvolvimento por LLM a cada avanço de fase e quando a task para (final, revisão, bloqueio). O resumo é opcional — nunca afeta a execução.</HelpTip>
-                </label>
-              </div>
-
-              {/* Pipeline default */}
-              <div className="form-field">
-                <label className="form-label">Pipeline padrão <HelpTip>Pipeline usado quando uma tarefa é criada sem especificar qual pipeline utilizar.</HelpTip></label>
-                <select
-                  value={repo.default_pipeline_id ?? ""}
-                  onChange={(e) => setRepo({ ...repo, default_pipeline_id: e.target.value ? Number(e.target.value) : null })}
-                >
-                  <option value="">— global (escolher na criação) —</option>
-                  {pipelines.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                      {p.repository_id == null ? " (global)" : ""}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="form-actions" style={{ alignItems: "center" }}>
-                <button onClick={saveSettings} disabled={saving}
-                  style={saved ? { background: "var(--ok)", color: "#111" } : undefined}
-                >
-                  {saving ? "salvando…" : saved ? "✓ salvo!" : "salvar configurações"}
-                </button>
-                {error && <span className="muted small" style={{ color: "var(--err)" }}>{error}</span>}
-              </div>
+            <div className="form-actions" style={{ alignItems: "center", marginTop: 12 }}>
+              <button
+                onClick={saveSettings}
+                disabled={!dirty || saving || !formValid}
+                className={saved ? "btn-save-ok" : saveError ? "btn-save-err" : undefined}
+              >
+                {saving ? (
+                  <><span className="spinner" /> Salvando…</>
+                ) : saved ? (
+                  "✓ Salvo"
+                ) : saveError ? (
+                  "✕ Falha ao salvar"
+                ) : (
+                  "Salvar"
+                )}
+              </button>
+              {saveError && (
+                <span className="muted small" style={{ color: "var(--err)" }}>{saveError}</span>
+              )}
             </div>
           </div>
         </details>

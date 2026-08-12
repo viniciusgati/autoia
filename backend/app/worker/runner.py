@@ -17,6 +17,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import threading
 import time
 import types
@@ -46,6 +47,7 @@ from ..models import (
     Pipeline,
     PipelineStep,
     Repository,
+    RepositorySkill,
     Robot,
     RunEvent,
     StepArtifact,
@@ -56,9 +58,13 @@ from ..models import (
     TaskProposal,
     TaskStep,
 )
-from . import arch_metric, gitops, handoff, kimi_exec, opencode_exec, project, subtask
+from . import arch_metric, exec_common, gitops, handoff, kimi_exec, opencode_exec, project, subtask
 
 log = logging.getLogger("autoia.worker")
+
+# Prefixo dos arquivos de sinalização de parada de projeto (API → worker):
+# `workspace_dir/.stop-<repo_id>` — ver `process_stop_files`.
+STOP_FILE_PREFIX = ".stop-"
 
 # Papéis que exigem veredicto e o veredicto esperado para avançar.
 VERDICT_EXPECTED = {
@@ -184,6 +190,35 @@ def _touch_heartbeat(path: str) -> None:
         pass  # silencioso — heartbeat é best-effort
 
 
+def process_stop_files(workspace_dir: str) -> int:
+    """Processa os arquivos `.stop-<repo_id>` gravados pela API ao excluir um
+    projeto: mata os subprocessos ativos daquele projeto e remove o arquivo.
+
+    Canal de parada cooperativa entre API e worker (processos separados). O kill
+    seletivo por projeto não afeta execuções de outros projetos. Retorna quantos
+    arquivos foram processados.
+    """
+    try:
+        names = os.listdir(workspace_dir)
+    except OSError:
+        return 0
+    count = 0
+    for name in names:
+        if not name.startswith(STOP_FILE_PREFIX):
+            continue
+        try:
+            repo_id = int(name[len(STOP_FILE_PREFIX) :])
+        except ValueError:
+            continue
+        exec_common.kill_repo_procs(repo_id)
+        try:
+            os.remove(os.path.join(workspace_dir, name))
+        except OSError:
+            pass
+        count += 1
+    return count
+
+
 def _task_workspace(settings, repo_id: int, task_id: int) -> str:
     """Diretório de trabalho isolado por tarefa (clone dedicado)."""
     return os.path.join(settings.workspace_dir, str(repo_id), f"task_{task_id}")
@@ -214,16 +249,22 @@ def acquire_worker_lock(lock_path: str) -> object | None:
     return handle
 
 
-def _heartbeat_loop(path: str, stop, interval: float = 5.0) -> None:
+def _heartbeat_loop(path: str, stop, interval: float = 5.0, workspace_dir: str | None = None) -> None:
     """Toca o heartbeat periodicamente enquanto o worker executa uma fase.
 
     O worker é síncrono: durante a execução do kimi/opencode (que pode levar
     dezenas de minutos) o loop principal fica bloqueado no subprocess e o
     heartbeat estaria parado — a UI reportaria "worker offline" (alive = age < 15).
     Uma thread daemon mantém o arquivo fresco até a fase terminar.
+
+    Com `workspace_dir`, a thread também processa os sinais de parada de projetos
+    excluídos (`.stop-<repo_id>`) a cada ciclo — o loop principal está bloqueado
+    no subprocess durante a fase, e é esta thread que faz o kill cooperativo.
     """
     while not stop.wait(interval):
         _touch_heartbeat(path)
+        if workspace_dir:
+            process_stop_files(workspace_dir)
 
 
 def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None:
@@ -231,6 +272,10 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
     hb_path = os.path.join(workspace_dir, "worker.heartbeat")
     while True:
         _touch_heartbeat(hb_path)
+        try:
+            process_stop_files(workspace_dir)
+        except Exception:
+            log.exception("erro ao processar sinais de parada de projetos")
         try:
             step_id = claim_next(session_factory)
         except Exception:
@@ -246,7 +291,11 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
 
         stop = threading.Event()
         hb_thread = threading.Thread(
-            target=_heartbeat_loop, args=(hb_path, stop), daemon=True, name="heartbeat"
+            target=_heartbeat_loop,
+            args=(hb_path, stop),
+            kwargs={"workspace_dir": workspace_dir},
+            daemon=True,
+            name="heartbeat",
         )
         hb_thread.start()
         try:
@@ -570,6 +619,67 @@ def _build_handoff(
     )
 
 
+def _materialize_skills(
+    s: Session, repo: Repository, checkout: str, skills_base: str
+) -> tuple[str | None, str]:
+    """Materializa as skills do projeto no checkout dos robôs.
+
+    Copia `data/skills/<repo_id>/<skill_id>/` (upload do usuário) para
+    `.autoia/skills/<nome>/` e `.opencode/skills/<nome>/` no checkout — sempre
+    que houver skills, independente do executor (custo zero e determinístico).
+    `.autoia/` e `.opencode/` entram no `.git/info/exclude` via
+    `project.exclude_local` para nunca serem versionados pelos robôs.
+
+    Retorna `(skills_dir, skills_info)`:
+    - `skills_dir`: `<checkout>/.autoia/skills` (o `--skills-dir` do kimi) ou
+      None quando o repo não tem skills;
+    - `skills_info`: seção `## Skills do projeto disponíveis` (`nome — descrição`)
+      injetada no prompt (fallback determinístico da UI/auditoria).
+
+    Best-effort: falha de cópia não derruba a fase (a execução segue sem skills).
+    """
+    rows = (
+        s.query(RepositorySkill)
+        .filter(RepositorySkill.repository_id == repo.id)
+        .order_by(RepositorySkill.id)
+        .all()
+    )
+    if not rows:
+        return None, ""
+    for skill in rows:
+        source = os.path.join(skills_base, str(repo.id), str(skill.id))
+        if not os.path.isdir(source):
+            log.warning(
+                "skills: diretório %s não existe no disco; ignorando skill %s",
+                source, skill.name,
+            )
+            continue
+        for prefix in (".autoia", ".opencode"):
+            dest = os.path.join(checkout, prefix, "skills", skill.name)
+            try:
+                shutil.copytree(source, dest, dirs_exist_ok=True)
+            except OSError:
+                log.warning(
+                    "skills: falha ao copiar %s para %s", source, dest, exc_info=True
+                )
+    try:
+        project.exclude_local(checkout, ".autoia/")
+        project.exclude_local(checkout, ".opencode/")
+    except OSError:
+        pass
+    info_lines = ["## Skills do projeto disponíveis"]
+    for skill in rows:
+        info_lines.append(
+            f"- {skill.name} — {skill.description}"
+            if skill.description
+            else f"- {skill.name}"
+        )
+    # `--skills-dir` só é anunciado ao kimi quando a pasta existe de fato
+    # (falha de cópia → None; a seção do prompt segue como fallback).
+    skills_dir = os.path.join(checkout, ".autoia", "skills")
+    return (skills_dir if os.path.isdir(skills_dir) else None), "\n".join(info_lines)
+
+
 def _run_executor(
     eff: EffectiveSettings,
     executor: str,
@@ -581,8 +691,20 @@ def _run_executor(
     on_event=None,
     kimi_cost_per_interaction: float | None = None,
     resume_session_id: str | None = None,
+    repo_id: int | None = None,
+    skills_dir: str | None = None,
 ):
-    """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`."""
+    """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`.
+
+    `repo_id` identifica o projeto no registro de subprocessos ativos e alimenta o
+    watchdog de parada cooperativa (`stop_file`): se a API excluir o projeto
+    enquanto o robô roda, o processo é morto.
+    """
+    stop_file = (
+        exec_common.repo_stop_path(eff.workspace_dir, repo_id)
+        if repo_id is not None
+        else None
+    )
     if executor == "opencode":
         return opencode_exec.run_opencode(
             prompt,
@@ -596,6 +718,8 @@ def _run_executor(
             whitelisted_hosts=eff.whitelisted_hosts,
             model=model,
         no_progress_timeout=eff.no_progress_timeout,
+        repo_id=repo_id,
+        stop_file=stop_file,
         on_event=on_event,
     )
     return kimi_exec.run_kimi(
@@ -615,6 +739,9 @@ def _run_executor(
         ),
         no_progress_timeout=eff.no_progress_timeout,
         resume_session_id=resume_session_id,
+        repo_id=repo_id,
+        stop_file=stop_file,
+        skills_dir=skills_dir,
         on_event=on_event,
     )
 
@@ -682,6 +809,11 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             log.warning(
                 "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
             )
+        # Skills do projeto materializadas no checkout (`.autoia/skills/` +
+        # `.opencode/skills/`) e seção do prompt; sem skills → nada muda.
+        skills_dir, skills_info = _materialize_skills(
+            s, repo, checkout, settings.skills_dir
+        )
         try:
             handoff.write_handoff(
                 checkout, _build_handoff(s, task, step, checkout, base, branch)
@@ -702,7 +834,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             prompt = _resume_prompt(step, task)
         else:
             prompt = prompts.build_prompt(
-                step.robot, task, step_context, base, project_info=project_info
+                step.robot, task, step_context, base,
+                project_info=project_info, skills_info=skills_info,
             )
         log_path = os.path.join(eff.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
@@ -783,6 +916,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         model=step.robot.model if step.robot else None,
         on_event=on_event,
         resume_session_id=resume_session_id,
+        repo_id=repo.id,
+        skills_dir=skills_dir,
     )
 
     with session_factory() as s:
@@ -1496,9 +1631,16 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                     log.warning("PM: clone falhou para %s", checkout, exc_info=True)
 
         project_info = project.detect_project(checkout) if os.path.isdir(checkout) else ""
+        skills_dir = None
+        skills_info = ""
         if os.path.isdir(checkout):
             try:
                 project.ensure_agents_md(checkout, project_info, eff.db_rule)
+                # Skills do projeto materializadas no checkout do PM também: a
+                # decisão recebe a seção `## Skills do projeto disponíveis`.
+                skills_dir, skills_info = _materialize_skills(
+                    s, task.repository, checkout, settings.skills_dir
+                )
                 last_pos = max((st.position for st in task.steps), default=-1)
                 # `post_merge` é lido por _build_handoff (progresso das subtarefas)
                 # mesmo para o "step fantasma" do PM.
@@ -1516,7 +1658,8 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                     exc_info=True,
                 )
         prompt = prompts.build_prompt(
-            pm_robot, task, context, task.repository.default_branch, project_info=project_info
+            pm_robot, task, context, task.repository.default_branch,
+            project_info=project_info, skills_info=skills_info,
         )
         log_path = os.path.join(eff.log_dir, f"pm_task_{task_id}.log")
         task.pm_decisions += 1
@@ -1530,7 +1673,11 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
     _touch_heartbeat(hb_path)
     stop = threading.Event()
     hb_thread = threading.Thread(
-        target=_heartbeat_loop, args=(hb_path, stop), daemon=True, name="pm-heartbeat"
+        target=_heartbeat_loop,
+        args=(hb_path, stop),
+        kwargs={"workspace_dir": eff.workspace_dir},
+        daemon=True,
+        name="pm-heartbeat",
     )
     hb_thread.start()
     try:
@@ -1543,6 +1690,8 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             model=pm_robot.model if pm_robot else None,
             on_event=None,
             kimi_cost_per_interaction=0.0,
+            repo_id=task.repository_id,
+            skills_dir=skills_dir,
         )
     finally:
         stop.set()

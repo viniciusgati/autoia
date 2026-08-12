@@ -7,9 +7,11 @@ permanece global (comportamento atual).
 
 from __future__ import annotations
 
+from typing import Callable
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Query, Session
 
 from ..models import (
     STEP_GUARDRAIL_BLOCKED,
@@ -144,21 +146,24 @@ def my_projects(
     return _my_projects(session, user.id)
 
 
-def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[NoticeOut]:
+def _build_notices(
+    session: Session,
+    scoped: Callable[[Query], Query] | None = None,
+) -> list[NoticeOut]:
     """Avisos de tarefas que precisam de atenção, mais críticos primeiro.
 
-    `repo_ids=None` (auth OFF): global; senão filtra aos projetos do usuário.
+    `scoped` aplica o escopo de visibilidade a uma query de Task (ex.: projetos do
+    usuário no dashboard, ou o escopo unificado do /api/execution); `None` = global
+    (auth OFF).
     """
     notices: list[NoticeOut] = []
 
-    def _scoped(q):
-        if repo_ids is not None:
-            q = q.filter(Task.repository_id.in_(repo_ids))
-        return q
+    def _apply(q):
+        return scoped(q) if scoped is not None else q
 
     # steps bloqueados por guardrail (a task segue, mas merece olhar)
     blocked_steps = (
-        _scoped(
+        _apply(
             session.query(TaskStep)
             .join(Task)
             .filter(
@@ -186,7 +191,7 @@ def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[
 
     # tasks aguardando revisão humana/PM
     review_tasks = (
-        _scoped(session.query(Task).filter(Task.status == TASK_NEEDS_REVIEW))
+        _apply(session.query(Task).filter(Task.status == TASK_NEEDS_REVIEW))
         .order_by(Task.updated_at.desc())
         .limit(10)
         .all()
@@ -207,7 +212,7 @@ def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[
 
     # tasks paradas em gate de aprovação humana (pause_before no pipeline)
     gate_tasks = (
-        _scoped(session.query(Task).filter(Task.status == TASK_WAITING_APPROVAL))
+        _apply(session.query(Task).filter(Task.status == TASK_WAITING_APPROVAL))
         .order_by(Task.updated_at.desc())
         .limit(10)
         .all()
@@ -235,7 +240,7 @@ def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[
 
     # tasks bloqueadas (ex.: conflito de merge)
     blocked_tasks = (
-        _scoped(session.query(Task).filter(Task.status == TASK_BLOCKED))
+        _apply(session.query(Task).filter(Task.status == TASK_BLOCKED))
         .order_by(Task.updated_at.desc())
         .limit(10)
         .all()
@@ -256,7 +261,7 @@ def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[
 
     # tasks ativas com custo perto do limite (>= 80% do orçamento)
     costly_tasks = (
-        _scoped(
+        _apply(
             session.query(Task).filter(
                 Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
                 Task.cost_spent >= 0.8 * Task.budget_limit,
@@ -283,7 +288,7 @@ def _build_notices(session: Session, repo_ids: list[int] | None = None) -> list[
 
     # métrica de arquitetura: mudança drástica de deploy/arquitetura
     arch_events = (
-        _scoped(
+        _apply(
             session.query(RunEvent, TaskStep, Task)
             .join(TaskStep, RunEvent.step_id == TaskStep.id)
             .join(Task, TaskStep.task_id == Task.id)
@@ -339,6 +344,13 @@ def dashboard(
         if repository_id is not None:
             q = q.filter(Task.repository_id == repository_id)
         elif repo_ids is not None:
+            q = q.filter(Task.repository_id.in_(repo_ids))
+        return q
+
+    # Avisos preservam o escopo atual do dashboard: só projetos do usuário
+    # (o filtro explícito por projeto não restringe os avisos neste endpoint).
+    def _scoped_notices(q):
+        if repo_ids is not None:
             q = q.filter(Task.repository_id.in_(repo_ids))
         return q
 
@@ -421,7 +433,7 @@ def dashboard(
         total_tasks=total_tasks,
         guardrail_events=guardrail_events,
         recent_guardrails=[RunEventOut.model_validate(e) for e in recent_guardrails],
-        notices=_build_notices(session, repo_ids),
+        notices=_build_notices(session, _scoped_notices),
         user=user,
         my_tasks=_my_tasks(session, user.id) if user is not None else [],
         projects=_my_projects(session, user.id) if user is not None else [],
