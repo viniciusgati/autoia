@@ -27,8 +27,10 @@ export default function Login() {
       await login(email.trim(), password);
       navigate("/");
     } catch (err) {
-      const msg = String(err);
-      // 401 do login = credencial inválida (não dispara o callback de sessão).
+      // `err` é um `Error("401: ...")` — usa `.message` (sem o prefixo "Error: ")
+      // para o teste de prefixo funcionar; 401 do login = credencial inválida
+      // (não dispara o callback global de sessão).
+      const msg = err instanceof Error ? err.message : String(err);
       setError(msg.startsWith("401") ? "E-mail ou senha inválidos" : msg);
       emailRef.current?.focus();
     } finally {

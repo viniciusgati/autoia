@@ -45,22 +45,27 @@ export default function App() {
 
   // App renderizado (não é splash nem Login): auth OFF (legado) ou usuário logado.
   const showApp = !authEnabled || user != null;
+  // Só chama a API (rotas protegidas) com o app de fato visível: durante o boot
+  // da auth (`loading`) a flag `authEnabled` ainda é false e chamadas protegidas
+  // responderiam 401 — o que acionaria o callback global de sessão expirada e
+  // mostraria "Sessão expirada" na PRIMEIRA visita, sem nunca ter logado.
+  const appReady = !loading && showApp;
 
   useEffect(() => {
-    if (!showApp) return;
+    if (!appReady) return;
     api.listRepositories().then(setRepos).catch(() => {});
-  }, [location.pathname, showApp]);
+  }, [location.pathname, appReady]);
 
   usePolling(
     (signal) => {
-      if (!showApp) return;
+      if (!appReady) return;
       api
         .getWorkerStatus(signal)
         .then((s) => setWorkerAlive(s.alive))
         .catch(() => setWorkerAlive(false));
     },
     5000,
-    [showApp],
+    [appReady],
   );
 
   const currentRepo = repoId != null ? repos.find((r) => r.id === repoId) : null;
