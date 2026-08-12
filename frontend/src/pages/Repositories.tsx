@@ -2,11 +2,16 @@ import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
 import type { Repository, RepositoryDeleteInfo } from "../types";
 
-/** Converte o erro do backend em uma mensagem legível para o diálogo de exclusão. */
+/** Converte o erro do backend em uma mensagem legível para o diálogo de exclusão.
+ *  `api.ts` lança `new Error("403: <detalhe>")` — `String(e)` vira
+ *  `"Error: 403: <detalhe>"`, então o status é casado ignorando o prefixo. */
 function deleteErrorMessage(e: unknown): string {
   const msg = String(e);
-  if (msg.startsWith("403")) return "Você não tem permissão para excluir este projeto.";
-  if (msg.startsWith("404")) return "O projeto já foi removido.";
+  const status = msg.match(/^(?:Error:\s*)?(40[34]):/);
+  if (status) {
+    if (status[1] === "403") return "Você não tem permissão para excluir este projeto.";
+    return "O projeto já foi removido.";
+  }
   if (msg.includes("Failed to fetch") || msg.includes("NetworkError"))
     return "Falha de rede ao excluir o projeto. Verifique sua conexão e tente novamente.";
   return msg;
