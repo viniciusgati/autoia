@@ -7,6 +7,8 @@ function deleteErrorMessage(e: unknown): string {
   const msg = String(e);
   if (msg.startsWith("403")) return "Você não tem permissão para excluir este projeto.";
   if (msg.startsWith("404")) return "O projeto já foi removido.";
+  if (msg.includes("Failed to fetch") || msg.includes("NetworkError"))
+    return "Falha de rede ao excluir o projeto. Verifique sua conexão e tente novamente.";
   return msg;
 }
 
