@@ -65,6 +65,37 @@ class Repository(Base):
     auto_summary: Mapped[bool] = mapped_column(Boolean, default=False)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="repository")
+    skills: Mapped[list["RepositorySkill"]] = relationship(
+        back_populates="repository",
+        order_by="RepositorySkill.id",
+        cascade="all, delete-orphan",
+    )
+
+
+class RepositorySkill(Base):
+    """Skill de projeto: conhecimento de domínio enviado pelo usuário (upload de
+    `.zip` com `SKILL.md` na raiz), materializado no checkout dos robôs nas fases
+    (`.autoia/skills/`/`.opencode/skills/`) sem poluir o git do repositório.
+
+    Os arquivos ficam em `data/skills/<repository_id>/<skill_id>/`; o banco guarda
+    apenas os metadados. Excluir a skill remove o diretório do disco + a linha.
+    """
+
+    __tablename__ = "repository_skills"
+    __table_args__ = (
+        # Nome único por projeto — mantém a materialização no checkout determinística.
+        UniqueConstraint("repository_id", "name", name="uq_repository_skill_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repository_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"))
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(Text, default="")
+    file_count: Mapped[int] = mapped_column(Integer, default=1)
+    size_bytes: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    repository: Mapped[Repository] = relationship(back_populates="skills")
 
 
 class User(Base):
