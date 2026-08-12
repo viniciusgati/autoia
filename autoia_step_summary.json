@@ -1,0 +1,14 @@
+{
+  "summary": "Fase po (refine) reexecutada (tentativa 2) após o QA da tentativa 1 apontar NEEDS_WORK com 5 ajustes — todos incorporados na história refinada da task #29 (configuração do projeto em 5 seções com feedback visual e skills por projeto via upload de .zip com SKILL.md). A história detalha descrição, 11 suposições explícitas (tabela repository_skills, materialização em .autoia/skills e .opencode/skills, seção no prompt via build_prompt, endpoints protegidos por admin), critérios de aceite e fora de escopo. Nenhum arquivo é escrito nesta fase: o entregável do PO é o texto final da história.",
+  "changes": [
+    "História refinada incorporando os 5 ajustes apontados pelo QA na tentativa 1 (NEEDS_WORK)",
+    "Suposições explícitas: validação do .zip (5 MB / 50 arquivos / exigência de SKILL.md na raiz / rejeição de path traversal), parse simples de frontmatter sem PyYAML, nome duplicado de skill → 409, permissão de admin do projeto nos 4 endpoints, materialização das skills no checkout antes de cada fase e seção '## Skills do projeto disponíveis' no prompt como fallback",
+    "Critérios de aceite cobrindo UI (5 seções em accordion, 3 estados do botão Salvar, badge de alterações não salvas, validação inline, modal de preview, exclusão com confirmação) e worker (--skills-dir no kimi apenas quando a pasta existe, comportamento atual preservado em repo sem skills)"
+  ],
+  "files": [],
+  "issues": [
+    "Fase de planejamento sem código escrito (entregável é o texto final); a implementação dependerá de nova tabela repository_skills, endpoints de skill e alterações no worker/prompts",
+    "Fora de escopo: edição de arquivos de skill existentes, versionamento das skills no git do projeto e validação de scripts maliciosos nos arquivos de apoio"
+  ],
+  "result": "completed"
+}

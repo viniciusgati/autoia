@@ -1,0 +1,30 @@
+{
+  "summary": "A task #29 ('Configuração do projeto com seções e skills por projeto (upload .zip)') foi pausada logo após a fase de refine (po). A fase 0 (po) leu o blueprint 'Blueprint — Configuração do Projeto e Skills.md' e o handoff, verificou a branch autoia/task-29 (árvore limpa) e produziu a história refinada com descrição, 11 suposições explícitas, critérios de aceite, escopo e plano de implementação em 5 subtarefas, incorporando os 5 ajustes apontados pelo QA (NEEDS_WORK). A fase 1 (qa) chegou a iniciar a revisão da história (leitura de handoff, repositories.py, deps.py, kimi_exec.py, prompts.py, RepoDashboard.tsx, api.ts e do blueprint), mas a task foi pausada antes de qualquer código ser escrito. Nenhum arquivo do repositório foi alterado (o entregável do PO é apenas o texto final da história) e nenhuma das 5 subtarefas de implementação foi iniciada. Custo acumulado: 0,28 US$ (executor kimi).",
+  "request": "Configurar o projeto em seções organizadas com feedback visual em toda ação (accordion Geral / Execução / Orçamento / Regras e ambiente / Skills, botão Salvar com 3 estados, badge de alterações não salvas, validação inline e HelpTip) e gerenciar skills por projeto via upload de .zip com SKILL.md na raiz (limites 5 MB / 50 arquivos / sem path traversal), com tabela repository_skills, arquivos em data/skills/<repo_id>/<skill_id>/, 4 endpoints protegidos por admin do projeto e materialização das skills no checkout do robô (--skills-dir no kimi, .opencode/skills/ no opencode e seção '## Skills do projeto disponíveis' no prompt como fallback).",
+  "implementation": "Apenas a fase 0 (po/refine) foi concluída: história refinada (retomada após NEEDS_WORK do QA) detalhando o modelo RepositorySkill em models.py, o novo módulo backend/app/skills.py (validação/extração segura de zip e parse simples de frontmatter sem PyYAML), Settings.skills_dir (AUTOIA_SKILLS_DIR, default data/skills), endpoints GET/POST/DELETE .../skills + GET .../skills/{id}/file em repositories.py com reuso de is_repo_admin/_ensure_repo_admin, integração no worker (kimi_exec.run_kimi com param skills_dir, materialização em .autoia/skills/ e .opencode/skills/, injeção de skills_info em prompts.build_prompt também no PM) e frontend (RepoDashboard em 5 seções accordion, componente ProjectSkills.tsx, api.ts com uploadProjectSkill via fetch próprio com FormData). Nenhum código foi efetivamente implementado: a task foi pausada durante a revisão da fase 1 (qa), antes das subtarefas de implementação.",
+  "changes": [],
+  "result": "partial",
+  "issues": [
+    "Task pausada durante a fase 1 (qa), antes do início da implementação — não há código da feature no repositório.",
+    "Todas as 5 subtarefas de implementação (modelo/storage, endpoints, worker, frontend e regressão) permanecem pendentes.",
+    "O QA (fase 1) sinalizou NEEDS_WORK na tentativa anterior com 5 ajustes; eles foram incorporados na história, mas a revisão da versão corrigida não foi concluída."
+  ],
+  "files": [
+    "Blueprint — Configuração do Projeto e Skills.md",
+    "backend/app/models.py",
+    "backend/app/skills.py",
+    "backend/app/schemas.py",
+    "backend/app/config.py",
+    "backend/app/api/repositories.py",
+    "backend/app/worker/runner.py",
+    "backend/app/worker/kimi_exec.py",
+    "backend/app/worker/opencode_exec.py",
+    "backend/app/prompts.py",
+    "frontend/src/pages/RepoDashboard.tsx",
+    "frontend/src/components/ProjectSkills.tsx",
+    "frontend/src/api.ts",
+    "frontend/src/types.ts",
+    "frontend/src/styles.css"
+  ],
+  "tasks_summary": "Fase 0 (po/refine) concluída: história refinada em 5 subtarefas (1. Modelo RepositorySkill + módulo de storage/validação de zip; 2. Endpoints REST + permissão admin; 3. Integração com o executor no worker; 4. Frontend com seções, feedback visual e ProjectSkills; 5. Regressão e fechamento), incorporando os 5 ajustes do QA. Fase 1 (qa) iniciada mas não concluída — task pausada (custo 0,28 US$). Tarefas 1 a 5 pendentes, nenhum código implementado."
+}
