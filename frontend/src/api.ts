@@ -7,6 +7,7 @@ import type {
   Pipeline,
   Repository,
   RepositoryMember,
+  RepositorySkill,
   Robot,
   RunEvent,
   StepDiff,
@@ -112,6 +113,52 @@ export const api = {
       method: "PUT",
       body: JSON.stringify({ user_id: userId }),
     }),
+
+  // skills do projeto (admin do projeto; upload .zip com SKILL.md na raiz)
+  listProjectSkills: (repoId: number, signal?: AbortSignal) =>
+    request<RepositorySkill[]>(`/api/repositories/${repoId}/skills`, { signal }),
+  uploadProjectSkill: async (repoId: number, file: File): Promise<RepositorySkill> => {
+    // fetch próprio sem Content-Type manual: o browser define o boundary do multipart
+    // (o helper `request` força `Content-Type: application/json`).
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(`/api/repositories/${repoId}/skills`, {
+      method: "POST",
+      body: formData,
+      credentials: "same-origin",
+    });
+    if (response.status === 401) onUnauthorized?.();
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = await response.json();
+        detail = body.detail ?? JSON.stringify(body);
+      } catch {
+        /* resposta não-JSON */
+      }
+      throw new Error(`${response.status}: ${detail}`);
+    }
+    return (await response.json()) as RepositorySkill;
+  },
+  deleteProjectSkill: (repoId: number, skillId: number) =>
+    request<void>(`/api/repositories/${repoId}/skills/${skillId}`, { method: "DELETE" }),
+  getProjectSkillFile: async (repoId: number, skillId: number): Promise<string> => {
+    const response = await fetch(`/api/repositories/${repoId}/skills/${skillId}/file`, {
+      credentials: "same-origin",
+    });
+    if (response.status === 401) onUnauthorized?.();
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = await response.json();
+        detail = body.detail ?? JSON.stringify(body);
+      } catch {
+        /* resposta não-JSON */
+      }
+      throw new Error(`${response.status}: ${detail}`);
+    }
+    return response.text();
+  },
 
   // repositories
   listRepositories: (signal?: AbortSignal) => request<Repository[]>("/api/repositories", { signal }),

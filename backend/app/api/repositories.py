@@ -1,19 +1,25 @@
-"""Endpoints de repositórios (registro + clone + config + membros)."""
+"""Endpoints de repositórios (registro + clone + config + membros + skills)."""
 
 from __future__ import annotations
 
 import logging
 import os
 import shutil
+import uuid
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi.responses import Response
 from sqlalchemy.orm import Session
 
-from ..models import Repository, RepositoryUser, User
+from .. import skills as skills_mod
+from ..config import Settings
+from ..models import Repository, RepositorySkill, RepositoryUser, User
 from ..schemas import (
     RepositoryCreate,
     RepositoryMemberCreate,
     RepositoryOut,
+    RepositorySkillOut,
     RepositoryUpdate,
     RepositoryUserOut,
     RepositoryUserUpdate,
@@ -32,13 +38,21 @@ log = logging.getLogger("autoia.api")
 router = APIRouter(prefix="/api/repositories", tags=["repositories"])
 
 
-def _ensure_repo_admin(session: Session, user: User | None, repo: Repository) -> None:
-    """POST/PATCH/DELETE de membros exige admin global ou admin do projeto."""
+def _ensure_repo_admin(
+    session: Session,
+    user: User | None,
+    repo: Repository,
+    message: str = "apenas admin global ou admin do projeto gerencia membros",
+) -> None:
+    """Ação restrita exige admin global ou admin do projeto.
+
+    Com auth OFF (`user is None`) preserva o comportamento legado (permitido).
+    """
     if user is None:
         return
     if user.is_admin or is_repo_admin(session, user, repo.id):
         return
-    raise HTTPException(403, "apenas admin global ou admin do projeto gerencia membros")
+    raise HTTPException(403, message)
 
 
 @router.post("", response_model=RepositoryOut, status_code=201)
@@ -228,3 +242,132 @@ def remove_member(
         raise HTTPException(404, "usuário não é membro do projeto")
     session.delete(member)
     session.commit()
+
+
+# ---------- Skills do projeto ----------
+
+_SKILL_ADMIN_MESSAGE = "apenas admin global ou admin do projeto gerencia skills"
+
+
+def _get_repo_skill_or_404(
+    session: Session, repo_id: int, skill_id: int
+) -> RepositorySkill:
+    """Skill do repositório, 404 se não existir ou pertencer a outro projeto."""
+    skill = session.get(RepositorySkill, skill_id)
+    if skill is None or skill.repository_id != repo_id:
+        raise HTTPException(404, "skill não encontrada")
+    return skill
+
+
+@router.get("/{repo_id}/skills", response_model=list[RepositorySkillOut])
+def list_skills(
+    repo_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Lista as skills do projeto (admin global ou admin do projeto; auth OFF → None)."""
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo, _SKILL_ADMIN_MESSAGE)
+    return (
+        session.query(RepositorySkill)
+        .filter(RepositorySkill.repository_id == repo_id)
+        .order_by(RepositorySkill.id)
+        .all()
+    )
+
+
+@router.post("/{repo_id}/skills", response_model=RepositorySkillOut, status_code=201)
+def upload_skill(
+    repo_id: int,
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    user: User | None = Depends(require_auth),
+):
+    """Envia uma skill de projeto: `.zip` com `SKILL.md` na raiz.
+
+    Validação (via `app.skills.validate_and_extract`): ≤ 5 MB, ≤ 50 entradas, sem
+    path traversal/absoluto; qualquer violação → 400 com a mensagem específica e
+    nada é extraído. Arquivos gravados em `data/skills/<repo_id>/<skill_id>/`;
+    nome duplicado no mesmo projeto → 409.
+    """
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo, _SKILL_ADMIN_MESSAGE)
+
+    raw = file.file.read(skills_mod.MAX_SKILL_ZIP_BYTES + 1)
+    if len(raw) > skills_mod.MAX_SKILL_ZIP_BYTES:
+        raise HTTPException(400, "arquivo muito grande (máx. 5 MB)")
+    zip_filename = file.filename or "skill.zip"
+
+    # Extrai num diretório temporário (o id da skill ainda não existe) e só move
+    # para o destino final após o registro no banco; validação falhou → nada sobra.
+    tmp_dir = os.path.join(
+        settings.skills_dir, str(repo_id), f".upload-{uuid.uuid4().hex}"
+    )
+    try:
+        meta = skills_mod.validate_and_extract(raw, tmp_dir, zip_filename=zip_filename)
+    except skills_mod.SkillZipError as exc:
+        skills_mod.remove_skill_dir(tmp_dir)
+        raise HTTPException(400, str(exc)) from exc
+
+    existing = (
+        session.query(RepositorySkill)
+        .filter(
+            RepositorySkill.repository_id == repo_id,
+            RepositorySkill.name == meta["name"],
+        )
+        .first()
+    )
+    if existing is not None:
+        skills_mod.remove_skill_dir(tmp_dir)
+        raise HTTPException(409, f"skill '{meta['name']}' já existe neste projeto")
+
+    skill = RepositorySkill(repository_id=repo_id, **meta)
+    session.add(skill)
+    session.commit()
+    session.refresh(skill)
+    final_dir = os.path.join(settings.skills_dir, str(repo_id), str(skill.id))
+    os.makedirs(os.path.dirname(final_dir), exist_ok=True)
+    os.replace(tmp_dir, final_dir)  # mesmo filesystem → rename atômico
+    return skill
+
+
+@router.get("/{repo_id}/skills/{skill_id}/file")
+def get_skill_file(
+    repo_id: int,
+    skill_id: int,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    user: User | None = Depends(require_auth),
+):
+    """Conteúdo do `SKILL.md` da skill (texto UTF-8) para o preview na UI."""
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo, _SKILL_ADMIN_MESSAGE)
+    _get_repo_skill_or_404(session, repo_id, skill_id)
+    skill_md = os.path.join(
+        settings.skills_dir, str(repo_id), str(skill_id), skills_mod.SKILL_MD
+    )
+    if not os.path.isfile(skill_md):
+        raise HTTPException(404, "SKILL.md não encontrado no disco")
+    return Response(
+        content=Path(skill_md).read_text(encoding="utf-8", errors="replace"),
+        media_type="text/plain; charset=utf-8",
+    )
+
+
+@router.delete("/{repo_id}/skills/{skill_id}", status_code=204)
+def delete_skill(
+    repo_id: int,
+    skill_id: int,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    user: User | None = Depends(require_auth),
+):
+    """Exclui uma skill: remove o registro do banco e o diretório do disco."""
+    repo = get_repository_or_404(session, repo_id)
+    _ensure_repo_admin(session, user, repo, _SKILL_ADMIN_MESSAGE)
+    skill = _get_repo_skill_or_404(session, repo_id, skill_id)
+    skill_dir = os.path.join(settings.skills_dir, str(repo_id), str(skill_id))
+    session.delete(skill)
+    session.commit()
+    skills_mod.remove_skill_dir(skill_dir)

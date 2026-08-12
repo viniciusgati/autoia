@@ -4654,3 +4654,279 @@ strong {
   background: var(--err);
   color: #fff;
 }
+
+/* ═══════════════════════════════════════════
+   Configurações do projeto (RepoDashboard)
+   ═══════════════════════════════════════════ */
+
+/* 5 seções accordion aninhadas (Geral/Execução/Orçamento/Regras/Skills) */
+.config-sections {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.config-section {
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.015);
+  overflow: hidden;
+}
+
+.config-section > summary {
+  cursor: pointer;
+  padding: 10px 12px;
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--accent);
+  letter-spacing: -0.01em;
+  user-select: none;
+  list-style-position: inside;
+}
+
+.config-section > summary:hover {
+  background: var(--accent-subtle);
+}
+
+.config-section > .form-stack,
+.config-section > div {
+  padding: 12px;
+  border-top: 1px solid var(--surface-border);
+}
+
+/* Validação inline: campo inválido (borda vermelha + mensagem abaixo) */
+.form-field.form-field-invalid {
+  border-color: var(--err);
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.14);
+}
+
+.form-field.form-field-invalid:focus-within {
+  border-color: var(--err);
+  box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.18), var(--shadow-md);
+}
+
+.form-error {
+  color: var(--err);
+  font-size: 12px;
+  margin-top: 7px;
+  line-height: 1.35;
+}
+
+/* Botão Salvar: 3 estados (Salvar → Salvando… → ✓ Salvo | ✕ Falha) */
+button.btn-save-ok {
+  background: var(--ok);
+  color: #111;
+}
+
+button.btn-save-ok:hover {
+  background: var(--ok);
+  box-shadow: 0 0 20px rgba(52, 211, 153, 0.3);
+}
+
+button.btn-save-err {
+  background: var(--err-subtle);
+  color: var(--err);
+  border: 1px solid rgba(248, 113, 113, 0.35);
+}
+
+button.btn-save-err:hover {
+  background: rgba(248, 113, 113, 0.2);
+  box-shadow: 0 0 16px rgba(248, 113, 113, 0.15);
+}
+
+/* Spinner (Salvando… / carregando preview / Enviando…) */
+.spinner {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  border: 2px solid rgba(255, 255, 255, 0.25);
+  border-top-color: currentColor;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+  vertical-align: -2px;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ═══════════════════════════════════════════
+   Skills do projeto (ProjectSkills)
+   ═══════════════════════════════════════════ */
+
+.skill-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Drop zone (arrastar .zip ou escolher arquivo) */
+.skill-dropzone {
+  border: 1.5px dashed var(--surface-border-hover);
+  border-radius: var(--radius-md);
+  padding: 20px 14px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.skill-dropzone:hover,
+.skill-dropzone.dragging {
+  border-color: var(--accent);
+  background: var(--accent-subtle);
+  color: var(--text);
+}
+
+.skill-dropzone.disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.skill-dropzone input[type="file"] {
+  display: none;
+}
+
+.skill-dropzone code {
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  font-size: 12px;
+  background: rgba(255, 255, 255, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+
+.skill-uploading {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Feedback do upload (✓ enviada / erro específico) */
+.skill-upload-msg {
+  font-size: 13px;
+  margin-top: 10px;
+  line-height: 1.4;
+}
+
+.skill-upload-msg.ok {
+  color: var(--ok);
+}
+
+.skill-upload-msg.err {
+  color: var(--err);
+}
+
+/* Lista de skills */
+.skill-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.skill-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: var(--surface);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  transition: all var(--transition);
+}
+
+.skill-card:hover {
+  border-color: var(--surface-border-hover);
+}
+
+.skill-card-main {
+  min-width: 0;
+  flex: 1;
+}
+
+.skill-card-name {
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.skill-card-desc {
+  color: var(--text-secondary);
+  font-size: 12px;
+  margin-top: 2px;
+  word-break: break-word;
+}
+
+.skill-card-meta {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.skill-card-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+button.danger-link {
+  color: var(--err) !important;
+}
+
+button.danger-link:hover {
+  background: var(--err-subtle) !important;
+}
+
+/* Estado vazio com CTA */
+.skill-empty {
+  border: 1px dashed var(--surface-border-hover);
+  border-radius: var(--radius-md);
+  padding: 26px 16px;
+  margin-top: 12px;
+  text-align: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.skill-empty strong {
+  color: var(--text);
+}
+
+/* Não-admin: apenas o aviso, sem formulário/ações */
+.skill-noadmin {
+  color: var(--text-secondary);
+  font-size: 13px;
+  padding: 6px 2px;
+  line-height: 1.5;
+}
+
+/* Preview do SKILL.md no modal */
+.skill-preview {
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  padding: 14px;
+  max-height: 52vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+}
+
+.skill-preview-modal {
+  max-width: 620px;
+}
+
+.skill-confirm-modal {
+  max-width: 420px;
+}
