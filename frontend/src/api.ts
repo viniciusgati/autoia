@@ -6,6 +6,7 @@ import type {
   MyTask,
   Pipeline,
   Repository,
+  RepositoryDeleteInfo,
   RepositoryMember,
   Robot,
   RunEvent,
@@ -122,6 +123,8 @@ export const api = {
     }),
   deleteRepository: (id: number) =>
     request<void>(`/api/repositories/${id}`, { method: "DELETE" }),
+  getRepositoryDeleteInfo: (id: number) =>
+    request<RepositoryDeleteInfo>(`/api/repositories/${id}/delete-info`),
   updateRepository: (id: number, data: Partial<Repository>) =>
     request<Repository>(`/api/repositories/${id}`, {
       method: "PUT",

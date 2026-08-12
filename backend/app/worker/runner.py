@@ -55,9 +55,13 @@ from ..models import (
     TaskProposal,
     TaskStep,
 )
-from . import arch_metric, gitops, handoff, kimi_exec, opencode_exec, project, subtask
+from . import arch_metric, exec_common, gitops, handoff, kimi_exec, opencode_exec, project, subtask
 
 log = logging.getLogger("autoia.worker")
+
+# Prefixo dos arquivos de sinalização de parada de projeto (API → worker):
+# `workspace_dir/.stop-<repo_id>` — ver `process_stop_files`.
+STOP_FILE_PREFIX = ".stop-"
 
 # Papéis que exigem veredicto e o veredicto esperado para avançar.
 VERDICT_EXPECTED = {
@@ -183,6 +187,35 @@ def _touch_heartbeat(path: str) -> None:
         pass  # silencioso — heartbeat é best-effort
 
 
+def process_stop_files(workspace_dir: str) -> int:
+    """Processa os arquivos `.stop-<repo_id>` gravados pela API ao excluir um
+    projeto: mata os subprocessos ativos daquele projeto e remove o arquivo.
+
+    Canal de parada cooperativa entre API e worker (processos separados). O kill
+    seletivo por projeto não afeta execuções de outros projetos. Retorna quantos
+    arquivos foram processados.
+    """
+    try:
+        names = os.listdir(workspace_dir)
+    except OSError:
+        return 0
+    count = 0
+    for name in names:
+        if not name.startswith(STOP_FILE_PREFIX):
+            continue
+        try:
+            repo_id = int(name[len(STOP_FILE_PREFIX) :])
+        except ValueError:
+            continue
+        exec_common.kill_repo_procs(repo_id)
+        try:
+            os.remove(os.path.join(workspace_dir, name))
+        except OSError:
+            pass
+        count += 1
+    return count
+
+
 def _task_workspace(settings, repo_id: int, task_id: int) -> str:
     """Diretório de trabalho isolado por tarefa (clone dedicado)."""
     return os.path.join(settings.workspace_dir, str(repo_id), f"task_{task_id}")
@@ -213,16 +246,22 @@ def acquire_worker_lock(lock_path: str) -> object | None:
     return handle
 
 
-def _heartbeat_loop(path: str, stop, interval: float = 5.0) -> None:
+def _heartbeat_loop(path: str, stop, interval: float = 5.0, workspace_dir: str | None = None) -> None:
     """Toca o heartbeat periodicamente enquanto o worker executa uma fase.
 
     O worker é síncrono: durante a execução do kimi/opencode (que pode levar
     dezenas de minutos) o loop principal fica bloqueado no subprocess e o
     heartbeat estaria parado — a UI reportaria "worker offline" (alive = age < 15).
     Uma thread daemon mantém o arquivo fresco até a fase terminar.
+
+    Com `workspace_dir`, a thread também processa os sinais de parada de projetos
+    excluídos (`.stop-<repo_id>`) a cada ciclo — o loop principal está bloqueado
+    no subprocess durante a fase, e é esta thread que faz o kill cooperativo.
     """
     while not stop.wait(interval):
         _touch_heartbeat(path)
+        if workspace_dir:
+            process_stop_files(workspace_dir)
 
 
 def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None:
@@ -230,6 +269,10 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
     hb_path = os.path.join(workspace_dir, "worker.heartbeat")
     while True:
         _touch_heartbeat(hb_path)
+        try:
+            process_stop_files(workspace_dir)
+        except Exception:
+            log.exception("erro ao processar sinais de parada de projetos")
         try:
             step_id = claim_next(session_factory)
         except Exception:
@@ -245,7 +288,11 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
 
         stop = threading.Event()
         hb_thread = threading.Thread(
-            target=_heartbeat_loop, args=(hb_path, stop), daemon=True, name="heartbeat"
+            target=_heartbeat_loop,
+            args=(hb_path, stop),
+            kwargs={"workspace_dir": workspace_dir},
+            daemon=True,
+            name="heartbeat",
         )
         hb_thread.start()
         try:
@@ -580,8 +627,19 @@ def _run_executor(
     on_event=None,
     kimi_cost_per_interaction: float | None = None,
     resume_session_id: str | None = None,
+    repo_id: int | None = None,
 ):
-    """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`."""
+    """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`.
+
+    `repo_id` identifica o projeto no registro de subprocessos ativos e alimenta o
+    watchdog de parada cooperativa (`stop_file`): se a API excluir o projeto
+    enquanto o robô roda, o processo é morto.
+    """
+    stop_file = (
+        exec_common.repo_stop_path(eff.workspace_dir, repo_id)
+        if repo_id is not None
+        else None
+    )
     if executor == "opencode":
         return opencode_exec.run_opencode(
             prompt,
@@ -595,6 +653,8 @@ def _run_executor(
             whitelisted_hosts=eff.whitelisted_hosts,
             model=model,
         no_progress_timeout=eff.no_progress_timeout,
+        repo_id=repo_id,
+        stop_file=stop_file,
         on_event=on_event,
     )
     return kimi_exec.run_kimi(
@@ -614,6 +674,8 @@ def _run_executor(
         ),
         no_progress_timeout=eff.no_progress_timeout,
         resume_session_id=resume_session_id,
+        repo_id=repo_id,
+        stop_file=stop_file,
         on_event=on_event,
     )
 
@@ -768,6 +830,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         model=step.robot.model if step.robot else None,
         on_event=on_event,
         resume_session_id=resume_session_id,
+        repo_id=repo.id,
     )
 
     with session_factory() as s:
@@ -1515,7 +1578,11 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
     _touch_heartbeat(hb_path)
     stop = threading.Event()
     hb_thread = threading.Thread(
-        target=_heartbeat_loop, args=(hb_path, stop), daemon=True, name="pm-heartbeat"
+        target=_heartbeat_loop,
+        args=(hb_path, stop),
+        kwargs={"workspace_dir": eff.workspace_dir},
+        daemon=True,
+        name="pm-heartbeat",
     )
     hb_thread.start()
     try:
@@ -1528,6 +1595,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             model=pm_robot.model if pm_robot else None,
             on_event=None,
             kimi_cost_per_interaction=0.0,
+            repo_id=task.repository_id,
         )
     finally:
         stop.set()

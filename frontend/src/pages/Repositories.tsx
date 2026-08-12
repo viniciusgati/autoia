@@ -1,6 +1,14 @@
 import { FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
-import type { Repository } from "../types";
+import type { Repository, RepositoryDeleteInfo } from "../types";
+
+/** Converte o erro do backend em uma mensagem legível para o diálogo de exclusão. */
+function deleteErrorMessage(e: unknown): string {
+  const msg = String(e);
+  if (msg.startsWith("403")) return "Você não tem permissão para excluir este projeto.";
+  if (msg.startsWith("404")) return "O projeto já foi removido.";
+  return msg;
+}
 
 export default function Repositories() {
   const [repos, setRepos] = useState<Repository[]>([]);
@@ -9,11 +17,25 @@ export default function Repositories() {
   const [branch, setBranch] = useState("main");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+
+  // Diálogo de confirmação de exclusão
+  const [confirmRepo, setConfirmRepo] = useState<Repository | null>(null);
+  const [deleteInfo, setDeleteInfo] = useState<RepositoryDeleteInfo | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
 
   const load = () => api.listRepositories().then(setRepos).catch((e) => setError(String(e)));
   useEffect(() => {
     load();
   }, []);
+
+  // "Projeto removido." some após alguns segundos
+  useEffect(() => {
+    if (!notice) return;
+    const t = setTimeout(() => setNotice(""), 4000);
+    return () => clearTimeout(t);
+  }, [notice]);
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -28,6 +50,46 @@ export default function Repositories() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const openDeleteDialog = async (repo: Repository) => {
+    setConfirmRepo(repo);
+    setDeleteInfo(null);
+    setDeleteError("");
+    try {
+      setDeleteInfo(await api.getRepositoryDeleteInfo(repo.id));
+    } catch (e) {
+      setDeleteError(deleteErrorMessage(e));
+    }
+  };
+
+  const closeDeleteDialog = () => {
+    if (deleting) return; // não fecha nem reconfirma durante a operação
+    setConfirmRepo(null);
+    setDeleteInfo(null);
+    setDeleteError("");
+  };
+
+  const confirmDelete = async () => {
+    if (!confirmRepo || deleting) return;
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await api.deleteRepository(confirmRepo.id);
+      // Sucesso: fecha o diálogo, recarrega a lista sem o projeto e mostra a
+      // confirmação na tela.
+      setConfirmRepo(null);
+      setDeleteInfo(null);
+      setDeleteError("");
+      await load();
+      setNotice("Projeto removido.");
+    } catch (e) {
+      // Erro: o diálogo permanece aberto com a mensagem dentro dele; a lista
+      // NÃO é recarregada e o projeto continua listado.
+      setDeleteError(deleteErrorMessage(e));
+    } finally {
+      setDeleting(false);
     }
   };
 
@@ -64,6 +126,7 @@ export default function Repositories() {
         </div>
       </form>
       {error && <p className="error">{error}</p>}
+      {notice && <p className="success-notice">{notice}</p>}
 
       {repos.length === 0 ? (
         <p className="muted">Nenhum repositório registrado.</p>
@@ -90,9 +153,7 @@ export default function Repositories() {
                 <td>
                   <button
                     className="danger"
-                    onClick={() =>
-                      api.deleteRepository(repo.id).then(load).catch((e) => setError(String(e)))
-                    }
+                    onClick={() => openDeleteDialog(repo)}
                   >
                     remover
                   </button>
@@ -101,6 +162,47 @@ export default function Repositories() {
             ))}
           </tbody>
         </table>
+      )}
+
+      {confirmRepo && (
+        <div className="modal-overlay" onClick={closeDeleteDialog}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <strong>Excluir projeto</strong>
+            </div>
+            <div className="modal-body">
+              <p>
+                Excluir o projeto irá interromper{" "}
+                <strong>{deleteInfo?.active_tasks ?? "…"}</strong> task(s) em
+                execução e apagar todos os dados. Esta ação é irreversível.
+              </p>
+              {deleteError && <p className="error">{deleteError}</p>}
+            </div>
+            <div className="modal-foot">
+              <button
+                className="link-btn"
+                onClick={closeDeleteDialog}
+                disabled={deleting}
+              >
+                Cancelar
+              </button>
+              <button
+                className="danger"
+                onClick={confirmDelete}
+                disabled={deleting || deleteInfo === null}
+              >
+                {deleting ? (
+                  <>
+                    <span className="btn-spinner" aria-hidden="true" />
+                    excluindo…
+                  </>
+                ) : (
+                  "Excluir"
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

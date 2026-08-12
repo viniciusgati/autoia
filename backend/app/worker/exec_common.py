@@ -9,23 +9,24 @@ import threading
 import time
 from dataclasses import dataclass
 
-# Registro global de subprocessos ativos (kimi/opencode). Permite matar todos
-# no shutdown do worker — os robôs rodam em sessão própria (start_new_session=True)
-# e NÃO morrem quando o worker morre, virando processos órfãos que continuam
-# trabalhando na mesma branch (corrompendo estado). Sem isso, restart do worker
-# deixava robôs antigos executando em paralelo.
-_ACTIVE_PROCS: set[subprocess.Popen] = set()
+# Registro global de subprocessos ativos (kimi/opencode), mapeando cada processo
+# ao `repository_id` do projeto que ele executa (None quando não se aplica).
+# Permite matar TODOS no shutdown do worker — os robôs rodam em sessão própria
+# (start_new_session=True) e NÃO morrem quando o worker morre, virando processos
+# órfãos que continuam trabalhando na mesma branch (corrompendo estado) — OU apenas
+# os de UM projeto excluído (parada cooperativa via `repo_stop_path`/`kill_repo_procs`).
+_ACTIVE_PROCS: dict[subprocess.Popen, int | None] = {}
 _ACTIVE_LOCK = threading.Lock()
 
 
-def register_proc(proc: subprocess.Popen) -> None:
+def register_proc(proc: subprocess.Popen, repo_id: int | None = None) -> None:
     with _ACTIVE_LOCK:
-        _ACTIVE_PROCS.add(proc)
+        _ACTIVE_PROCS[proc] = repo_id
 
 
 def unregister_proc(proc: subprocess.Popen) -> None:
     with _ACTIVE_LOCK:
-        _ACTIVE_PROCS.discard(proc)
+        _ACTIVE_PROCS.pop(proc, None)
 
 
 def kill_all_procs() -> None:
@@ -37,6 +38,31 @@ def kill_all_procs() -> None:
             os.killpg(proc.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
+
+
+def kill_repo_procs(repo_id: int) -> None:
+    """SIGTERM no grupo dos subprocessos ativos de UM projeto (exclusão).
+
+    A API e o worker são processos separados; o kill seletivo por `repository_id`
+    garante que parar um projeto não afeta execuções de outros projetos.
+    """
+    with _ACTIVE_LOCK:
+        procs = [p for p, rid in _ACTIVE_PROCS.items() if rid == repo_id]
+    for proc in procs:
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+
+
+def repo_stop_path(workspace_dir: str, repo_id: int) -> str:
+    """Caminho do arquivo de sinalização de parada de um projeto (API → worker).
+
+    A API grava `workspace_dir/.stop-<repo_id>` ao excluir o projeto; o worker
+    (watchdog do executor e/ou ciclo do heartbeat) mata os subprocessos daquele
+    projeto e remove o arquivo.
+    """
+    return os.path.join(workspace_dir, f".stop-{repo_id}")
 
 
 @dataclass
@@ -115,5 +141,30 @@ def make_no_progress_watchdog(
             stop.wait(timeout=5)
 
     t = threading.Thread(target=_watch, daemon=True, name="no-progress-watchdog")
+    t.start()
+    return stop
+
+
+def make_stop_watchdog(
+    stop_file: str, proc: subprocess.Popen, stopped: threading.Event
+) -> threading.Event:
+    """Watchdog de parada cooperativa: se o arquivo `.stop-<repo_id>` aparecer no
+    workspace (projeto excluído pela API enquanto o robô roda), mata o processo.
+
+    A API e o worker são processos separados — o arquivo é o canal compartilhado;
+    o kill seletivo evita afetar execuções de outros projetos. Retorna um `Event`
+    de parada para o chamador cancelar o watcher.
+    """
+    stop = threading.Event()
+
+    def _watch() -> None:
+        while not stop.is_set():
+            if os.path.isfile(stop_file):
+                stopped.set()
+                kill_group(proc)
+                return
+            stop.wait(timeout=0.5)
+
+    t = threading.Thread(target=_watch, daemon=True, name="stop-watchdog")
     t.start()
     return stop

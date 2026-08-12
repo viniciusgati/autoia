@@ -69,6 +69,14 @@ class RepositoryOut(BaseModel):
     auto_summary: bool = False
 
 
+class RepositoryDeleteInfo(BaseModel):
+    """Informações exibidas no diálogo de confirmação de exclusão do projeto
+    (`GET /api/repositories/{id}/delete-info`)."""
+
+    active_tasks: int
+    checkout_path: str | None
+
+
 # ---------- Usuários / Auth ----------
 
 class UserOut(BaseModel):
