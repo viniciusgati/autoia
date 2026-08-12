@@ -14,6 +14,9 @@ function deleteErrorMessage(e: unknown): string {
   }
   if (msg.includes("Failed to fetch") || msg.includes("NetworkError"))
     return "Falha de rede ao excluir o projeto. Verifique sua conexão e tente novamente.";
+  // Qualquer outro erro HTTP (ex.: 500) chega como "Error: <status>: <detalhe>"
+  // e não é legível — cai num fallback que explica o motivo e a ação.
+  if (msg.includes("Error:")) return "Não foi possível excluir o projeto. Tente novamente.";
   return msg;
 }
 
