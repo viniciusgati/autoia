@@ -30,6 +30,7 @@ from ..models import (
     Repository,
     RepositoryUser,
     RunEvent,
+    StepMission,
     StepSummary,
     SubTask,
     Task,
@@ -58,7 +59,7 @@ from ..schemas import (
     WorkspaceOccurrenceOut,
     WorkspaceOut,
 )
-from ..timeline import derive_task_occurrences, derive_task_timeline
+from ..timeline import derive_task_occurrences, derive_task_timeline, fallback_mission
 from ..worker import gitops
 from ..worker.runner import _effective, _pm_decide, _system_event, _task_workspace, create_child_task
 from ..worker.summarizer import summarize_task
@@ -598,6 +599,15 @@ def retry_step(
         raise HTTPException(404, "fase não encontrada")
     if step.status in (STEP_PENDING, "running"):
         raise HTTPException(400, f"fase em andamento (status: {step.status})")
+    # Mesmo caso do rewind: resetar uma fase enquanto OUTRA está executando faz o
+    # worker rodar duas fases da MESMA task em paralelo (estado corrompido).
+    running_step = next((st for st in task.steps if st.status == STEP_RUNNING), None)
+    if running_step is not None:
+        raise HTTPException(
+            409,
+            f"fase {running_step.position} ({running_step.robot.name if running_step.robot else '?'}) "
+            "ainda está em execução — aguarde concluir ou cancele a tarefa antes de reexecutar.",
+        )
 
     if data and data.note:
         task.feedback = data.note
@@ -1003,6 +1013,12 @@ def task_workspace(
         .filter(StepSummary.task_id == task_id)
         .all()
     }
+    missions = {
+        (m.step_id, m.run): m
+        for m in session.query(StepMission)
+        .filter(StepMission.task_id == task_id)
+        .all()
+    }
     proposals_by_step: dict[int | None, list[TaskProposal]] = {}
     for p in task.proposals:
         proposals_by_step.setdefault(p.step_id, []).append(p)
@@ -1026,10 +1042,13 @@ def task_workspace(
                 files_by_position[st.position] = info.get("files") or []
 
     out_occurrences: list[WorkspaceOccurrenceOut] = []
+    last_by_step: dict[int, dict] = {}
     for occ in occurrences:
         sid = occ["step_id"]
         step = steps_by_id.get(sid)
         delivered = step_summaries.get((sid, occ["attempt"]))
+        mission = missions.get((sid, occ["run"]))
+        prev_occ = last_by_step.get(sid)
         out_occurrences.append(WorkspaceOccurrenceOut(
             step_id=sid,
             position=occ["position"],
@@ -1039,6 +1058,8 @@ def task_workspace(
             is_rerun=occ["is_rerun"],
             status=occ["status"],
             goal=occ["goal"],
+            mission=mission.mission if mission is not None else fallback_mission(step, task, occ, prev_occ),
+            mission_source=mission.source if mission is not None else "fallback",
             started_at=occ["started_at"],
             finished_at=occ["finished_at"],
             last_activity=occ["last_activity"],
@@ -1052,6 +1073,7 @@ def task_workspace(
             system_activity=occ["system_activity"],
             events=occ["events"],
         ))
+        last_by_step[sid] = occ
 
     decisions: list[dict] = []
     if task.status == TASK_BLOCKED and task.block_reason_type == "decision_request":
@@ -1139,6 +1161,22 @@ def send_instruction(
     task.block_reason = None
     task.block_question = None
     task.block_options = []
+
+    # Nunca rewind/reopen enquanto uma fase da task está em execução: resetar o
+    # status para `pending` com o subprocesso ainda vivo faz o worker reclamar a
+    # MESMA task em duas fases paralelas (corrompe o estado — ver `--workers N`).
+    running_step = next((st for st in task.steps if st.status == STEP_RUNNING), None)
+    if running_step is not None and (
+        data.position is not None
+        or task.status in (TASK_BLOCKED, TASK_NEEDS_REVIEW, TASK_FAILED, TASK_DONE)
+    ):
+        raise HTTPException(
+            409,
+            f"fase {running_step.position} ({running_step.robot.name if running_step.robot else '?'}) "
+            "ainda está em execução — aguarde concluir ou cancele a tarefa antes de "
+            "reenviar esta instrução.",
+        )
+
     anchor: TaskStep | None = None
     blocked_step: int | None = None
 

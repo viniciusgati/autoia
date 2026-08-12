@@ -346,6 +346,50 @@ def test_instruction_rewind_forbidden_future(flow, fake_kimi):
     assert resp.status_code == 400
 
 
+def test_instruction_rewind_forbidden_while_running(flow, fake_kimi):
+    """Rewind (instruction com position) é recusado enquanto uma fase está rodando —
+    resetar step running faria o worker rodar duas fases da MESMA task em paralelo."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))  # fase 0 ok
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.status = "running"
+        s.commit()
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/instruction",
+        json={"instruction": "volte para o PO", "position": 0},
+    )
+    assert resp.status_code == 409
+    assert "em execução" in resp.json()["detail"]
+
+
+def test_retry_forbidden_while_another_step_running(flow, fake_kimi):
+    """retry_step é recusado enquanto OUTRA fase da task está em execução."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))  # fase 0 ok
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.status = "running"
+        s.commit()
+
+    resp = flow["client"].post(f"/api/tasks/{task_id}/steps/0/retry", json={})
+    assert resp.status_code == 409
+    assert "em execução" in resp.json()["detail"]
+
+
 def test_decision_request_blocks_and_answers(flow, fake_kimi):
     """Agente pede decisão (autoia_decision.json) → task bloqueada com pergunta +
     opções; resposta via /instruction retoma."""

@@ -4,23 +4,25 @@ from __future__ import annotations
 
 from .models import Robot, Task
 
-# Regras reforçadas no prompt, alinhadas com guardrails.py.
-GUARDRAIL_INSTRUCTIONS = """## Regras obrigatórias
-- Trabalhe SOMENTE dentro do repositório atual (o diretório de trabalho). NÃO leia nem
-  escreva arquivos fora dele: as ferramentas de arquivo (Read/Write/Edit/Glob/Grep) só
-  funcionam DENTRO do checkout — qualquer caminho fora (ex.: ~/.kimi-code, /tmp, logs do
-  pipeline) é BLOQUEADO e encerra a sua execução na hora.
+# Regras de trabalho reforçadas no prompt (orientação — o controle de execução
+# virá com o sandbox; o guardrail de comandos foi removido).
+GUARDRAIL_INSTRUCTIONS = """## Regras de trabalho (orientação)
+- Trabalhe SOMENTE dentro do repositório atual (o diretório de trabalho). Prefira usar
+  as ferramentas de arquivo (Read/Write/Edit/Glob/Grep) DENTRO do checkout; não deixe
+  arquivos temporários ou lixo fora dele.
 - NÃO rode comandos destrutivos ou de sistema: rm -rf, mkfs, dd, sudo, chown, chmod 777,
   ssh, scp, pip install, npm install -g, make install, shutdown/reboot/halt,
   systemctl, service, killall/pkill, pkexec, su. A infraestrutura (banco, serviços,
   deploy) já está provisionada pelo ambiente — NÃO tente instalar, iniciar ou verificar
   serviços do sistema operacional; use as variáveis de ambiente fornecidas (ex.:
-  DATABASE_URL) ou mocks nos testes. `curl`/`wget` SÓ para loopback (127.0.0.1/localhost)
-  ou hosts de registro de pacotes (ex.: dl.google.com, registry.npmjs.org) — nunca para
-  rede externa.
-- NÃO rode `git push`. NÃO troque para as branches main/master (`git checkout main`). Trabalhe apenas na branch atual.
+  DATABASE_URL) ou mocks nos testes. `curl`/`wget` apenas para loopback
+  (127.0.0.1/localhost) ou hosts de registro de pacotes (ex.: dl.google.com,
+  registry.npmjs.org).
+- NÃO rode `git push`. NÃO troque para as branches main/master (`git checkout main`).
+  Trabalhe apenas na branch atual — o merge/push da integração é feito pelo sistema.
 - Faça commits locais com `git add -A && git commit -m "mensagem"` quando concluir.
-- Se algo estiver quebrado, corrija o que estiver ao seu alcance e relate o resto. Não invente resultados."""
+- Se algo estiver quebrado, corrija o que estiver ao seu alcance e relate o resto.
+  Não invente resultados."""
 
 GIT_WORKFLOW = """### Fluxo de trabalho git
 - Confirme a branch atual com `git status` ou `git branch --show-current` antes de começar.
@@ -466,6 +468,40 @@ estrutura JSON:
 Regras:
 - `result` é um de: `completed`, `partial`, `failed`, `pending`.
 - Seja fiel ao contexto: NUNCA diga que funcionou se falhou (e vice-versa).
+- NÃO faça commit deste arquivo."""
+
+# Missão de UMA execução de fase — LLM dedicada a escrever "por que esta execução".
+CONTRACT_STEP_MISSION = """## Sua função: definir a MISSÃO desta execução
+Você é uma LLM dedicada a redigir a "missão" de UMA execução de uma fase do pipeline
+autoia para o usuário final acompanhar. NÃO altere código nem corrija nada: apenas
+INTERPRETE o contexto e escreva a missão em português.
+
+A missão responde a duas perguntas:
+1. POR QUE esta execução está acontecendo agora?
+2. O que ela precisa RESOLVER nesta execução?
+
+Ela deve ser específica DESTA execução — não o objetivo genérico da fase. Especialmente
+em re-execuções, incorpore o motivo que a originou (devolutiva do avaliador, reprovação
+de uma fase posterior, instrução do usuário, correção de um problema concreto etc.) e o
+que precisa ser corrigido/entregue desta vez.
+
+## Formato de saída OBRIGATÓRIO (arquivo)
+Escreva o arquivo `autoia_step_mission.json` na raiz do repositório com EXATAMENTE esta
+estrutura JSON:
+
+```json
+{
+  "mission": "1-2 frases em PT-BR: o que esta execução precisa resolver e por quê"
+}
+```
+
+## Regras (IMPORTANTE)
+- Escreva como uma PESSOA explicando o objetivo do trabalho para outra pessoa.
+- NUNCA inclua: "você é um robô", instruções de sistema, nomes de ferramentas, comandos,
+  paths, comandos bash, detalhes de implementação, nomes de arquivos nem infraestrutura.
+- Seja específico: cite o problema concreto a resolver quando houver contexto (ex.: "o
+  feedback visual ausente"), sem frases genéricas como "implementar conforme os requisitos".
+- Uma ou duas frases, no máximo.
 - NÃO faça commit deste arquivo."""
 
 # Relatório obrigatório do merger: a fase mais crítica da integração. Toda decisão

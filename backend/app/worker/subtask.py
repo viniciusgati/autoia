@@ -50,6 +50,7 @@ _AUTOIA_CONTROL_FILES = (
     "autoia_handoff.md",
     "autoia_blocked.json",
     "autoia_summary.json",
+    "autoia_step_mission.json",
     "autoia_screenshots/",
     "AGENTS.md",
 )
@@ -242,6 +243,21 @@ def run_implement_subtasks(
     on_event = _make_on_event(session_factory, step.id, log_path)
 
     with session_factory() as s:
+        # Re-execução da fase implement (retry manual, instrução do usuário ou
+        # decisão do PM): subtarefas com tentativas esgotadas (`failed`) voltam a
+        # `pending` para serem REALMENTE re-trabalhadas pelo developer. Sem isso,
+        # reabrir o developer com só subtarefas `failed`/`done` terminava a fase
+        # imediatamente (`phase_done` sem executar nada) — a instrução do usuário
+        # era ignorada em silêncio.
+        for st in (
+            s.query(SubTask)
+            .filter(SubTask.task_id == task_id, SubTask.status == SUB_FAILED)
+            .all()
+        ):
+            st.status = SUB_PENDING
+            st.error = None
+        if s.dirty:
+            s.commit()
         pending = (
             s.query(SubTask)
             .filter(SubTask.task_id == task_id, SubTask.status.in_([SUB_PENDING]))

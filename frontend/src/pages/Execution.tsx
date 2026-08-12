@@ -5,6 +5,7 @@ import ProposalCard from "../components/ProposalCard";
 import StatusBadge from "../components/StatusBadge";
 import TaskCard from "../components/TaskCard";
 import { formatToolCall } from "../lib/events";
+import { fmtBudget } from "../lib/money";
 import { usePolling } from "../lib/polling";
 import type { Execution, Repository, RunEvent, TaskListItem } from "../types";
 
@@ -236,7 +237,7 @@ function RunningSession({
       )}
 
       <div className="session-foot">
-        <span className="muted small">gasto {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$</span>
+        <span className="muted small">gasto {fmtBudget(task.cost_spent, task.budget_limit)}</span>
         <Link to={`/${task.repository_id}/tasks/${task.id}`} className="link-btn">
           ver detalhes →
         </Link>

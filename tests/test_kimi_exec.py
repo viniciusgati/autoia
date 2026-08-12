@@ -85,7 +85,9 @@ def test_normal_run_streams_events(tmp_path):
     assert events[1][2] == 0.0
 
 
-def test_risky_command_kills_process(tmp_path):
+def test_risky_command_not_blocked_after_guardrail_removal(tmp_path):
+    """Guardrail de comandos removido: comando 'arriscado' NÃO aborta mais (a
+    detecção pós-emissão não impedia o comando e gerava falsos positivos)."""
     lines = [
         {"role": "assistant", "tool_calls": [{"type": "function", "id": "c1", "function": {"name": "Bash", "arguments": '{"command":"rm -rf /"}'}}]},
         {"role": "tool", "tool_call_id": "c1", "content": "ok"},
@@ -94,24 +96,25 @@ def test_risky_command_kills_process(tmp_path):
     events, on_event = _collector()
     outcome = _run(tmp_path, lines, on_event=on_event)
 
-    assert outcome.aborted
-    assert "guardrail" in outcome.abort_reason
-    assert "rm -rf" in outcome.abort_reason
-    # o run parou antes do tool_result e da resposta final
+    assert not outcome.aborted
+    assert outcome.exit_code == 0
+    assert "feito" in outcome.final_text
     kinds = [e[0] for e in events]
-    assert "tool_result" not in kinds
-    assert "guardrail_blocked" in kinds
+    assert "tool_result" in kinds
+    assert "guardrail_blocked" not in kinds
 
 
-def test_write_outside_workspace_blocked(tmp_path):
+def test_write_outside_workspace_not_blocked(tmp_path):
+    """Path containment do guardrail removido: escrita fora do checkout NÃO aborta
+    (a proteção real virá do sandbox de execução)."""
     lines = [
         {"role": "assistant", "tool_calls": [{"type": "function", "id": "c1", "function": {"name": "Write", "arguments": '{"path":"/etc/passwd","content":"x"}'}}]},
     ]
     events, on_event = _collector()
     outcome = _run(tmp_path, lines, on_event=on_event)
 
-    assert outcome.aborted
-    assert "path-outside-workspace" in outcome.abort_reason
+    assert not outcome.aborted
+    assert outcome.exit_code == 0
 
 
 def test_identical_calls_detected(tmp_path):

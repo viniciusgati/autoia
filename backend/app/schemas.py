@@ -450,6 +450,11 @@ class WorkspaceOccurrenceOut(BaseModel):
     is_rerun: bool = False
     status: str
     goal: str | None = None
+    # Missão desta execução ("por que esta execução existe"): texto humano. Vem da
+    # LLM dedicada (StepMission) ou, enquanto não está pronta, de um fallback
+    # determinístico derivado dos eventos. `mission_source`: "llm" | "fallback".
+    mission: str | None = None
+    mission_source: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     last_activity: str | None = None

@@ -4,6 +4,7 @@ import { api } from "../api";
 import HelpTip from "../components/HelpTip";
 import PhaseStepper from "../components/PhaseStepper";
 import StatusBadge from "../components/StatusBadge";
+import { fmtBudget, fmtCost } from "../lib/money";
 import { diffSummary } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
 import type { Pipeline, Repository, TaskListItem, TaskStepListItem } from "../types";
@@ -181,7 +182,7 @@ export default function RepoDashboard() {
               {/* Linha: budget & cost */}
               <div className="form-inline">
                 <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Orçamento (US$) <HelpTip>Limite de gasto por tarefa. Se estourar, a task vai para needs_review. Config global: AUTOIA_TASK_BUDGET.</HelpTip></label>
+                  <label className="form-label">Orçamento (R$) <HelpTip>Limite de gasto por tarefa. Se estourar, a task vai para needs_review. Config global: AUTOIA_TASK_BUDGET.</HelpTip></label>
                   <input type="number" min={0} step={0.5}
                     value={repo.task_budget ?? ""}
                     placeholder="global"
@@ -189,7 +190,7 @@ export default function RepoDashboard() {
                   />
                 </div>
                 <div className="form-field" style={{ flex: 1, minWidth: 120 }}>
-                  <label className="form-label">Custo/interação (US$) <HelpTip>Custo estimado por chamada ao kimi (tool_call + resposta). Usado para calcular gasto acumulado. Config global: AUTOIA_COST_PER_INTERACTION.</HelpTip></label>
+                  <label className="form-label">Custo/interação (R$) <HelpTip>Custo estimado por chamada ao kimi (tool_call + resposta). Usado para calcular gasto acumulado. Config global: AUTOIA_COST_PER_INTERACTION.</HelpTip></label>
                   <input type="number" min={0} step={0.001}
                     value={repo.cost_per_interaction ?? ""}
                     placeholder="global"
@@ -287,7 +288,7 @@ export default function RepoDashboard() {
               <PhaseStepper task={task} showLabels />
               <div className="resumo-line small">
                 {task.status === "done" ? (
-                  `concluída · ${task.cost_spent.toFixed(2)} US$`
+                  `concluída · ${fmtCost(task.cost_spent)}`
                 ) : (
                   <span className="resumo-error" title={task.error ?? undefined}>
                     {task.error || "sem detalhes"}
@@ -360,7 +361,7 @@ function TaskCard({
       {/* Rodapé: custo + diff */}
       <div className="task-card-foot">
         <span className="muted small">
-          {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
+          {fmtBudget(task.cost_spent, task.budget_limit)}
         </span>
         {steps.find((s) => s.diff_stat)?.diff_stat && (
           <span className="diff-summary">

@@ -325,6 +325,10 @@ export interface WorkspaceOccurrence {
   is_rerun: boolean;
   status: string;
   goal: string | null;
+  /** Missão desta execução ("por que esta execução existe") — humano, não é prompt. */
+  mission: string | null;
+  /** "llm" (LLM dedicada) ou "fallback" (derivado deterministicamente dos eventos). */
+  mission_source: string | null;
   started_at: string | null;
   finished_at: string | null;
   last_activity: string | null;

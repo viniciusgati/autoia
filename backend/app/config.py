@@ -149,6 +149,9 @@ class Settings:
     # Gera o resumo de cada fase concluída ("O que foi entregue") via LLM de resumo
     # (zero custo contábil; usa tokens do executor da task). Desligar evita chamadas.
     step_summary: bool = field(default_factory=lambda: _env("AUTOIA_STEP_SUMMARY", "1") == "1")
+    # Gera a missão humana de cada execução de fase ("por que esta execução existe")
+    # via LLM dedicada (zero custo contábil). Desligar usa só o fallback determinístico.
+    step_mission: bool = field(default_factory=lambda: _env("AUTOIA_STEP_MISSION", "1") == "1")
     # Autenticação por sessão: ON exige sessão válida em TODOS os routers /api/*
     # (401 sem cookie); OFF preserva o comportamento atual (require_auth -> None).
     auth_enabled: bool = field(default_factory=lambda: _env("AUTOIA_AUTH_ENABLED", "1") == "1")

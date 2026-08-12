@@ -4,6 +4,7 @@ import ProposalCard from "./ProposalCard";
 import DiffView from "./DiffView";
 import { formatToolCall, sessionEventLine } from "../lib/events";
 import Markdown from "../lib/markdown";
+import { fmtCost } from "../lib/money";
 import type { ChatTurn, PhaseTurn, TaskTurn } from "../lib/chat";
 import type { RunEvent, Task, TaskStep } from "../types";
 
@@ -176,7 +177,7 @@ function PhaseBubble({
           {turn.postMerge && <span className="badge badge-ok">pós-merge</span>}
           <span className="muted small">F{turn.position}</span>
           {turn.verdict && <span className="badge">{turn.verdict}</span>}
-          {turn.cost > 0 && <span className="muted small">+{turn.cost.toFixed(2)} US$</span>}
+          {turn.cost > 0 && <span className="muted small">+{fmtCost(turn.cost)}</span>}
         </div>
 
         {live ? (

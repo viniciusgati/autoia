@@ -247,6 +247,12 @@ class Task(Base):
         order_by="StepSummary.id.desc()",
         cascade="all, delete-orphan",
     )
+    # Missão por execução de fase (StepMission) — texto humano "por que esta execução".
+    step_missions: Mapped[list["StepMission"]] = relationship(
+        back_populates="task",
+        order_by="StepMission.run",
+        cascade="all, delete-orphan",
+    )
 
     @property
     def summary(self) -> "TaskSummary | None":
@@ -305,6 +311,32 @@ class StepSummary(Base):
 
     task: Mapped[Task] = relationship(back_populates="step_summaries")
     step: Mapped["TaskStep"] = relationship(back_populates="step_summaries")
+
+
+class StepMission(Base):
+    """Missão humana de UMA execução de fase ("por que esta execução existe").
+
+    Chaveada por (step_id, run) — cada execução real da fase tem a sua (a `run` é a
+    numeração de `attempt_started`, única mesmo quando `attempt` se repete após
+    bounce-back). Gerada por LLM dedicada (via executor da task, custo contábil zero)
+    a partir do contexto que originou a execução; a UI usa a missão LLM e, enquanto
+    não está pronta (ou se falhou), um fallback determinístico derivado dos eventos.
+    A LLM NUNCA é fonte de verdade — eventos/timeline são.
+    """
+
+    __tablename__ = "step_missions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    step_id: Mapped[int] = mapped_column(ForeignKey("task_steps.id"))
+    run: Mapped[int] = mapped_column(Integer, default=1)
+    mission: Mapped[str] = mapped_column(Text, default="")
+    # "llm" | "fallback" — quem originou o texto persistido.
+    source: Mapped[str] = mapped_column(String(20), default="llm")
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    task: Mapped[Task] = relationship(back_populates="step_missions")
+    step: Mapped["TaskStep"] = relationship(back_populates="step_missions")
 
 
 class TaskProposal(Base):
@@ -377,6 +409,11 @@ class TaskStep(Base):
     step_summaries: Mapped[list["StepSummary"]] = relationship(
         back_populates="step",
         order_by="StepSummary.id.desc()",
+        cascade="all, delete-orphan",
+    )
+    step_missions: Mapped[list["StepMission"]] = relationship(
+        back_populates="step",
+        order_by="StepMission.run",
         cascade="all, delete-orphan",
     )
     events: Mapped[list["RunEvent"]] = relationship(

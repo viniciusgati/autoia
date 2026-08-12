@@ -298,6 +298,55 @@ class TestSubtaskAPI:
 # ---------------------------------------------------------------------------
 
 class TestSubtaskWorker:
+    def test_reexecute_implement_reworks_failed_subtasks(self, flow, fake_kimi, settings, monkeypatch):
+        """Re-execução da fase implement com subtarefa `failed` (tentativas esgotadas):
+        ela volta a `pending` e o developer REALMENTE trabalha nela — não termina a
+        fase em `phase_done` sem fazer nada (instrução do usuário era ignorada)."""
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            from app.models import STEP_DONE, SUB_DONE, SUB_FAILED, SubTask, TaskStep
+            s.add(SubTask(
+                task_id=task_id, position=0, title="Sub A",
+                description="fazer A", status=SUB_FAILED, attempt=3,
+                error="tentativas excedidas (3)",
+            ))
+            s.add(SubTask(
+                task_id=task_id, position=1, title="Sub B",
+                description="fazer B", status=SUB_DONE, attempt=1,
+            ))
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            steps[0].status = STEP_DONE
+            steps[0].summary = "história"
+            steps[1].status = STEP_DONE
+            steps[1].summary = "revisão ok"
+            steps[2].status = "pending"  # developer
+            s.commit()
+
+        step_id = claim_next(session_factory)
+        assert step_id is not None
+        monkeypatch.setattr(settings, "kimi_bin", fake_kimi(
+            [{"role": "assistant", "content": "corrigindo a subtarefa A"}],
+            write_file="feature.py",
+            write_content="x = 1\n",
+        ))
+        trigger = execute_step(settings, session_factory, step_id)
+        assert trigger is None
+
+        with session_factory() as s:
+            from app.models import SubTask
+            subs = (
+                s.query(SubTask).filter(SubTask.task_id == task_id)
+                .order_by(SubTask.position).all()
+            )
+            # A subtarefa esgotada foi re-trabalhada (e a done permaneceu intacta).
+            assert subs[0].status == "implemented", f"sub 0 status={subs[0].status}"
+            assert subs[0].attempt == 4  # +1 na re-execução
+            assert subs[1].status == "done"
+
     def test_implement_subtasks_flow(self, flow, fake_kimi, settings, monkeypatch):
         """Worker executa implement para cada subtarefa pendente."""
         from app.worker.runner import claim_next, execute_step

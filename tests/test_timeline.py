@@ -58,20 +58,31 @@ def test_timeline_derives_events(flow, fake_kimi):
 
 def test_timeline_complete_with_guardrail(flow, fake_kimi):
     """Timeline não quebra com eventos de guardrail/erro e os expõe como `blocked`."""
+    from sqlalchemy import func
+
+    from app.models import RunEvent, Task
+
     settings = flow["settings"]
-    lines = [
-        {"role": "assistant", "content": "vou remover tudo"},
-        {
-            "role": "assistant",
-            "tool_calls": [{"function": {"name": "Bash", "arguments": "{\"command\": \"sudo rm -rf /etc\"}"}}],
-        },
-        {"role": "tool", "tool_call_id": "x", "content": ""},
-    ]
-    settings.kimi_bin = fake_kimi(lines)
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
     settings.task_budget = 100.0
     task_id = flow["task"]["id"]
 
-    _execute(flow, _run_claim(flow))
+    _execute(flow, _run_claim(flow))  # fase 0 (po) executa
+
+    # Guardrail removido da execução: o evento é simulado (determinístico) para
+    # validar a derivação da timeline com eventos `blocked`.
+    with flow["session_factory"]() as s:
+        step = sorted(s.get(Task, task_id).steps, key=lambda x: x.position)[0]
+        max_seq = (
+            s.query(func.max(RunEvent.seq)).filter(RunEvent.step_id == step.id).scalar() or 0
+        )
+        s.add(RunEvent(
+            step_id=step.id,
+            seq=max_seq + 1,
+            kind="guardrail_blocked",
+            payload={"pattern": "sudo", "detail": "sudo rm -rf /etc"},
+        ))
+        s.commit()
 
     resp = flow["client"].get(f"/api/tasks/{task_id}/timeline")
     assert resp.status_code == 200

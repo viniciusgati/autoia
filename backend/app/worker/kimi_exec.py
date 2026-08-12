@@ -1,13 +1,15 @@
-"""Execução do kimi-code em modo não-interativo (stream-json) com guardrails em tempo real.
+"""Execução do kimi-code em modo não-interativo (stream-json).
 
 O worker consome o stdout do `kimi -p --output-format stream-json` linha a linha. Cada
 linha é um JSON com `role`: `meta`, `assistant` (texto ou tool_calls) ou `tool`
-(resultado). A cada tool_call, os guardrails são avaliados; se algo violar a política,
-o processo é morto (SIGTERM no grupo) e o run é abortado com o motivo.
+(resultado).
 
-Limitação honesta (v1): não dá para impedir o comando que já foi emitido pelo kimi —
-o guardrail detecta e para a execução. A primeira linha de defesa é o isolamento
-(cwd restrito ao checkout, branch própria, sem push).
+O guardrail de comandos arriscados foi REMOVIDO: como a detecção é pós-emissão (o
+comando já rodou quando a tool_call chega no stream), matar o processo não impedia o
+dano e gerava falsos positivos que interrompiam trabalho legítimo. A proteção real
+virá do sandbox da execução (isolamento do checkout/containers). Permanecem os
+watchdogs de progresso: loop de tool calls idênticas, timeout total e timeout de
+"sem progresso".
 """
 
 from __future__ import annotations
@@ -143,10 +145,8 @@ def run_kimi(
                             last_call_key = key
                             identical_count = 1
 
-                        violation = guardrails.check_tool_call(
-                            tc, risky_patterns, checkout_path, whitelisted_hosts
-                        )
-                        if violation is None and identical_count >= max_identical_calls:
+                        violation = None
+                        if identical_count >= max_identical_calls:
                             violation = guardrails.GuardrailViolation(
                                 pattern="identical-calls",
                                 detail=f"{key[0]} repetido {identical_count}x seguidas",

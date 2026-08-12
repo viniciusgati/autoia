@@ -7,7 +7,7 @@ Guia para agentes (e humanos) trabalharem neste repositório. Leia antes de muda
 **autoia** é uma plataforma web de **pipeline autônomo de desenvolvimento**: o usuário
 registra um repositório git e cria tarefas (ideias cruas); robôs LLM executam o fluxo de
 ponta a ponta — escrever a história, revisar, implementar, testar, integrar e testar o
-merge — com guardrails de segurança, orçamento por tarefa e decisões automáticas (PM).
+merge — com watchdogs de progresso, orçamento por tarefa e decisões automáticas (PM).
 
 Nada é "mock": os robôs executam o **kimi-code CLI** real
 (`kimi -p <prompt> --output-format stream-json`) em um checkout do repo. O sistema não
@@ -28,13 +28,13 @@ chama APIs de LLM diretamente.
 ```
 backend/app/            # pacote `app`
   main.py               # create_app(), seed de robôs/pipelines, run_api/run_worker
-  config.py             # Settings (env AUTOIA_*); padrões de risco dos guardrails
+  config.py             # Settings (env AUTOIA_*); watchdogs e orçamento
   db.py                 # engine/session; migrate_schema() ADITIVO (ADDITIVE_COLUMNS)
   models.py             # Repository, Robot, Pipeline(+Step), Task(+Step), RunEvent
   schemas.py            # Pydantic; espelha os tipos do frontend
   prompts.py            # contratos de saída por role + build_prompt()
   verdicts.py           # contrato autoia_verdict.txt (parse PASS/FAIL/READY/PM) + autoia_blocked.json/autoia_summary.json
-  guardrails.py         # política em tempo real de tool_calls (check_tool_call)
+  guardrails.py         # GuardrailViolation + análise (sem enforcement; ver watchdogs)
   budget.py             # custo por interação + limite
   timeline.py           # derivação DETERMINÍSTICA da timeline de execução (sem LLM)
   api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard)
@@ -48,6 +48,7 @@ backend/app/            # pacote `app`
     arch_metric.py      # métrica de mudança de arquitetura/deploy (evento arch_metric)
     summarizer.py       # resumo estruturado do desenvolvimento via executor (autoia_summary.json)
     step_summarizer.py  # resumo "O que foi entregue" por fase (autoia_step_summary.json)
+    step_mission.py     # missão humana por execução de fase (autoia_step_mission.json)
     handoff.py          # autoia_handoff.md gerado antes de cada execução do robô
 frontend/               # Vite + React (páginas em src/pages/, tipos em src/types.ts)
 tests/                  # pytest; fixtures compartilhadas em conftest.py
@@ -87,9 +88,14 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   formatos próprios). O worker persiste o texto final **INTEGRAL** em `TaskStep.summary`
   (nunca trunca) e regenera o handoff para a próxima fase.
 - **Bounce-back automático**: falha de fase **pré-merge** (veredicto FAIL/NEEDS_WORK,
-  timeout, guardrail, erro) → a **fase anterior** volta a `pending` com o relatório
+  timeout, erro) → a **fase anterior** volta a `pending` com o relatório
   completo no contexto, até `max_attempts`. Falha **pós-merge** → **nunca** bounce
   (código já integrado): task `needs_review` + evento `post_merge_failed` + PM decide.
+- **Subtarefas**: fases `implement`/`verify` iteram sobre subtarefas (cada uma com seu
+  bounce-back). Subtarefa com tentativas esgotadas (`failed`) volta a `pending` **toda
+  vez que a fase implement é re-executada** (retry manual, instrução do usuário, decisão
+  do PM) — reabrir o developer com só subtarefas `failed`/`done` terminaria a fase em
+  `phase_done` sem executar nada (ignorando a instrução em silêncio).
 - **PM** (`pm`): decide `retry <pos>` / `continuar` (top-up de orçamento) / `escalar`
   (default seguro). Limite por task: `AUTOIA_MAX_PM_DECISIONS` (default 2). Decisão
   inválida/ausente → **escalar**.
@@ -97,22 +103,26 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   CLI que roda cada fase e o PM (escolhido na criação da tarefa; tasks filhas herdam).
   `kimi_exec` estima custo por interação; `opencode_exec` usa o **custo real** do
   `step_finish` do `opencode run --format json` (tool_use com nome+input+output).
-  Ambos compartilham `exec_common.ExecOutcome` e os guardrails; `_run_executor` no runner
+  Ambos compartilham `exec_common.ExecOutcome`; `_run_executor` no runner
   faz o dispatch.
 - **Orçamento**: custo por interação (`AUTOIA_COST_PER_INTERACTION`, kimi) ou custo real
   (opencode); estourou → `needs_review`. `RunEvent.cost` acumula em `Task.cost_spent`.
-- **Guardrails** (em `kimi_exec`/`opencode_exec` + `guardrails.py`): cada `tool_call` é
-  inspecionada no stream; comando arriscado (`rm -rf`, `sudo`, `curl`, `git push`,
-  `git checkout main`…) ou caminho fora do checkout → **mata o processo** (SIGTERM no
-  grupo) e grava `guardrail_blocked`. Loop: mesma tool call N vezes
-  (`max_identical_calls`) → kill. Timeout por fase (`AUTOIA_RUN_TIMEOUT`).
+- **Watchdogs de execução** (em `kimi_exec`/`opencode_exec`): o guardrail de comandos
+  arriscados foi **removido** — a detecção era pós-emissão (o comando já rodava quando a
+  `tool_call` chegava no stream), não impedia o dano e gerava falsos positivos que
+  interrompiam trabalho legítimo (curl em loopback, `git push` em repo local de teste).
+  A proteção real virá com o **sandbox de execução** (ainda a fazer). Permanecem: loop de
+  mesma tool call N vezes (`max_identical_calls`) → kill; timeout por fase
+  (`AUTOIA_RUN_TIMEOUT`); watchdog de "sem progresso" (`AUTOIA_NO_PROGRESS_TIMEOUT`).
+  `guardrails.py` mantém `GuardrailViolation` (usado pelo watchdog de loop) e as funções
+  de análise — sem uso de enforcement por enquanto.
 - **Observabilidade**: **toda** interação vira `RunEvent` (assistant_text, tool_call,
-  tool_result, system, guardrail…) com payload **completo, sem truncar**. Log bruto em
+  tool_result, system…) com payload **completo, sem truncar**. Log bruto em
   `data/logs/<step_id>.log`.
 - **Métrica de arquitetura**: na fase de integração (última pré-merge) o worker grava o
   evento `arch_metric` (`score` 0-100, `level` alto/médio/baixo, `reasons`) a partir do
   diff da branch — sinaliza mudança drástica de deploy/arquitetura. O Dashboard expõe
-  `notices`: tarefas que requerem atenção (guardrail, `needs_review`, bloqueadas, custo
+  `notices`: tarefas que requerem atenção (`needs_review`, bloqueadas, custo
   alto ≥ 80% do orçamento, arquitetura).
 - **Timeline de execução** (`app/timeline.py`): a UI de acompanhamento tem 3 níveis de
   detalhe (Resumo / Acompanhamento / Técnico). A timeline é **derivada de forma
@@ -159,6 +169,16 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   na falha, explicação clara do que falhou e onde). A UI mostra o `delivered` (LLM) ou o
   texto final do robô como fallback.
   `TaskStep.goal` ("O que será feito") é derivado deterministicamente da mission + título.
+- **Missão de cada execução de fase** (`worker/step_mission.py` + tabela `StepMission`):
+  o card de etapa responde "por que esta execução existe e o que ela precisa resolver"
+  (não repete o objetivo original em re-execuções). LLM dedicada (via executor da task,
+  zero custo contábil) gera `autoia_step_mission.json` em **background, no início da
+  fase** — a `run` (contador real de `attempt_started`) chaveia a missão por ocorrência,
+  e o arquivo fica excluído do histórico (`.git/info/exclude`) porque a fase pode
+  commitar com `git add -A` enquanto a missão é gerada. Enquanto a missão LLM não fica
+  pronta (ou se falhar), a UI usa `timeline.fallback_mission` (determinístico): instrução
+  do usuário que motivou a execução > parada/reprovação da tentativa anterior da mesma
+  fase > bounce-back de fase posterior > missão por papel. Gate `AUTOIA_STEP_MISSION`.
 
 ## Padrões de desenvolvimento (backend)
 
@@ -170,8 +190,8 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   s:` por unidade de trabalho e **commite antes** de chamar outra função que abra sessão
   (evita lock no SQLite WAL). Não confie em lazy-load fora do `with`.
 - **Worker é síncrono**: não converta para asyncio. Subprocess com
-  `start_new_session=True` (kill por grupo); guardrails avaliam no loop de leitura do
-  stdout; `_kill_group` = SIGTERM → SIGKILL. No startup, o worker recupera steps
+  `start_new_session=True` (kill por grupo); watchdogs de progresso avaliam no loop de
+  leitura do stdout; `_kill_group` = SIGTERM → SIGKILL. No startup, o worker recupera steps
   `running` órfãos de restart/crash anterior (`recover_stale_steps` → voltam a
   `pending` para re-execução) — sem isso, um worker morto no meio de uma fase travava
   a task para sempre. **Instância única**: `acquire_worker_lock` (flock em

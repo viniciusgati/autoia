@@ -55,6 +55,7 @@ def settings(tmp_path) -> Settings:
         cost_per_interaction=0.01,
         pm_budget_topup=5.0,
         max_pm_decisions=0,  # PM desligado por padrão; testes de PM ativam explicitamente
+        step_mission=False,  # missão LLM desligada por padrão; testes ativam explicitamente
         auth_enabled=False,  # suíte antiga sem sessão; testes de auth ativam explicitamente
     )
 

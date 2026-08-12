@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import PhaseStepper from "./PhaseStepper";
 import StatusBadge from "./StatusBadge";
+import { fmtBudget } from "../lib/money";
 import { faseAtual } from "../lib/tasks";
 import type { TaskListItem } from "../types";
 
@@ -109,7 +110,7 @@ export default function TaskCard({
           {task.executor === "opencode" ? "opencode" : "kimi"}
         </span>
         <span className={`mono small${costHigh ? " task-card-cost-warn" : " muted"}`}>
-          {task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$
+          {fmtBudget(task.cost_spent, task.budget_limit)}
         </span>
       </div>
 

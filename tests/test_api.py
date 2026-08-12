@@ -497,7 +497,9 @@ def test_worker_budget_hits_needs_review(settings, bare_repo, tmp_path, fake_kim
         assert "budget_hit" in kinds
 
 
-def test_worker_guardrail_blocks(settings, bare_repo, tmp_path, fake_kimi):
+def test_risky_command_no_longer_blocks(settings, bare_repo, tmp_path, fake_kimi):
+    """Guardrail removido: comando 'arriscado' (rm -rf /) não bloqueia mais a fase —
+    o pipeline segue normalmente (a proteção real virá com o sandbox de execução)."""
     settings.kimi_bin = fake_kimi(RISKY)
     settings.task_budget = 100.0
     from app.db import make_engine, make_session_factory
@@ -515,12 +517,12 @@ def test_worker_guardrail_blocks(settings, bare_repo, tmp_path, fake_kimi):
 
     with session_factory() as s:
         t = s.get(Task, task["id"])
-        assert t.status == "failed"
+        assert t.status == "in_progress"
         step = t.steps[0]
-        assert step.status == "guardrail_blocked"
-        assert "rm -rf" in (step.error or "")
+        assert step.status == "done"
+        assert "guardrail" not in (step.error or "")
         kinds = [e.kind for e in step.events]
-        assert "guardrail_blocked" in kinds
+        assert "guardrail_blocked" not in kinds
 
 
 def test_worker_arch_metric_event(settings, bare_repo, tmp_path, fake_kimi):

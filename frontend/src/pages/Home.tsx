@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import StatusBadge from "../components/StatusBadge";
+import { fmtCost } from "../lib/money";
 import { usePolling } from "../lib/polling";
 import type { Dashboard as DashboardData, MyProject, MyTask, Repository, TaskListItem, TaskStepListItem } from "../types";
 
@@ -199,7 +200,7 @@ export default function Home() {
                 </div>
                 <div className="my-task-sub">
                   <span>{t.repository_name}</span>
-                  <span className="mono">{t.cost_spent.toFixed(2)} US$</span>
+                  <span className="mono">{fmtCost(t.cost_spent)}</span>
                   <span className="muted">{tempoRelativo(t.updated_at)}</span>
                 </div>
               </Link>
@@ -293,8 +294,8 @@ export default function Home() {
           <div className="card-label">tarefas</div>
         </div>
         <div className="card">
-          <div className="card-value">{dash.total_cost.toFixed(2)}</div>
-          <div className="card-label">custo estimado (US$)</div>
+          <div className="card-value">{fmtCost(dash.total_cost)}</div>
+          <div className="card-label">custo estimado (R$)</div>
         </div>
         <div className="card">
           <div className="card-value">{dash.guardrail_events}</div>
@@ -407,7 +408,7 @@ export default function Home() {
                           </div>
                           <div className="project-task-sub">
                             <span>{etapa}</span>
-                            <span className="mono">{task.cost_spent.toFixed(2)} US$</span>
+                            <span className="mono">{fmtCost(task.cost_spent)}</span>
                             <span className="muted">{tempoRelativo(task.updated_at)}</span>
                           </div>
                         </Link>

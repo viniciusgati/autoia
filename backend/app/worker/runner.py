@@ -49,6 +49,7 @@ from ..models import (
     Robot,
     RunEvent,
     StepArtifact,
+    StepMission,
     StepSummary,
     SubTask,
     Task,
@@ -687,6 +688,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             )
             project.exclude_local(checkout, "autoia_screenshots/")
             project.exclude_local(checkout, "autoia_tasks.json")
+            project.exclude_local(checkout, "autoia_step_mission.json")
         except (OSError, gitops.GitError):
             log.warning(
                 "não foi possível escrever autoia_handoff.md no checkout %s",
@@ -704,12 +706,21 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             )
         log_path = os.path.join(eff.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
+        # Número real da execução desta fase (run): o contador de `attempt_started`
+        # para este step + 1. Único por execução (bounce-back não o repete), é a
+        # chave da missão humana por ocorrência — igual ao `run` da timeline.
+        run = (
+            s.query(func.count(RunEvent.id))
+            .filter(RunEvent.step_id == step.id, RunEvent.kind == "attempt_started")
+            .scalar()
+            or 0
+        ) + 1
         # Marca o início da tentativa nos eventos: uma fase pode ser re-executada
         # (bounce-back) e os eventos se acumulam no mesmo step — sem esse marcador
         # a UI não consegue separar as tentativas no histórico.
         _system_event(
             s, step, "attempt_started",
-            {"attempt": step.attempt, "robot": step.robot.name if step.robot else None},
+            {"attempt": step.attempt, "run": run, "robot": step.robot.name if step.robot else None},
         )
         # Persiste o prompt da fase (o que o robô pediu) para a visão de chat.
         _system_event(
@@ -721,6 +732,10 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         if not step.goal:
             step.goal = _step_goal(step, task)
         s.commit()
+
+    # Missão humana desta execução (LLM dedicada, custo zero) em background — a UI
+    # mostra o fallback determinístico enquanto ela não fica pronta.
+    _maybe_step_mission(settings, session_factory, step_id, run)
 
     # ── Ramo de subtarefas: implement e verify iteram sobre subtarefas ──
     if has_subtasks and role == "implement":
@@ -1600,6 +1615,10 @@ _SUMMARY_LOCK = threading.Lock()
 # Fases cujo resumo ("O que foi entregue") já está sendo gerado.
 _STEP_SUMMARY_LOCK = threading.Lock()
 
+# Execuções de fase cuja missão (LLM) já está sendo gerada.
+_STEP_MISSION_LOCK = threading.Lock()
+_STEP_MISSION_IN_FLIGHT: set[tuple[int, int]] = set()
+
 
 def _maybe_auto_summary(settings: Settings, session_factory, step_id: int) -> None:
     """Gera o resumo automaticamente após a decisão de uma fase, se o repo tiver
@@ -1722,6 +1741,64 @@ def _maybe_step_summary(settings: Settings, session_factory, step_id: int) -> No
                 _STEP_SUMMARY_IN_FLIGHT.discard(key)
 
     threading.Thread(target=_run, daemon=True, name=f"step-summary-{step_id}").start()
+
+
+def _maybe_step_mission(settings: Settings, session_factory, step_id: int, run: int) -> None:
+    """Gera a missão humana desta execução de fase ("por que esta execução existe").
+
+    Roda em thread daemon com heartbeat próprio e NUNCA bloqueia nem falha a fase.
+    Chaveada por (step, run): cada execução real tem a sua missão, mesmo quando o
+    `attempt` se repete. Enquanto a missão LLM não fica pronta (ou se falhar), a UI
+    mostra o fallback determinístico derivado dos eventos.
+    """
+    if not settings.step_mission:
+        return
+    try:
+        with session_factory() as s:
+            step = s.get(TaskStep, step_id)
+            if step is None:
+                return
+            existing = (
+                s.query(StepMission)
+                .filter(StepMission.step_id == step.id, StepMission.run == run)
+                .first()
+            )
+            if existing is not None:
+                return
+            eff = _effective(settings, step.task.repository)
+    except Exception:
+        log.exception("missão: falha ao avaliar o step %s", step_id)
+        return
+
+    key = (step_id, run)
+    with _STEP_MISSION_LOCK:
+        if key in _STEP_MISSION_IN_FLIGHT:
+            return
+        _STEP_MISSION_IN_FLIGHT.add(key)
+
+    def _run() -> None:
+        try:
+            from .step_mission import generate_mission
+
+            hb_path = os.path.join(eff.workspace_dir, "worker.heartbeat")
+            stop = threading.Event()
+            hb = threading.Thread(
+                target=_heartbeat_loop, args=(hb_path, stop),
+                daemon=True, name="step-mission-heartbeat",
+            )
+            hb.start()
+            try:
+                generate_mission(settings, session_factory, step_id, run)
+            finally:
+                stop.set()
+                hb.join(timeout=1)
+        except Exception:
+            log.exception("missão falhou para o step %s run %s", step_id, run)
+        finally:
+            with _STEP_MISSION_LOCK:
+                _STEP_MISSION_IN_FLIGHT.discard(key)
+
+    threading.Thread(target=_run, daemon=True, name=f"step-mission-{step_id}-{run}").start()
 
 
 def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) -> None:

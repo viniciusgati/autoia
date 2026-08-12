@@ -391,11 +391,23 @@ def run_worker() -> None:
     import argparse
     import signal
     import sys
-    import threading
 
     parser = argparse.ArgumentParser(description="autoia worker")
     parser.add_argument("--workers", type=int, default=1, help="número de workers (threads)")
     args = parser.parse_known_args()[0]  # ignora args desconhecidos (uvicorn pode injetar)
+
+    # Instância única: o pipeline executa UMA fase por task por vez. Threads
+    # paralelas (`--workers N`) com o mesmo processo contornam a garantia do
+    # flock e, se um rewind resetar uma fase running, duas threads reclamam fases
+    # da MESMA task em paralelo → estado corrompido (ver `_rewind_pipeline`).
+    if args.workers > 1:
+        print(
+            "worker não suporta --workers > 1: a autoia executa UMA fase por task "
+            "por vez (workers paralelos corrompem o estado). Remova a opção ou use "
+            "--workers 1.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -445,19 +457,7 @@ def run_worker() -> None:
     if recovered:
         logger.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
 
-    if args.workers <= 1:
-        worker_loop(settings, session_factory, settings.workspace_dir)
-    else:
-        threads = []
-        for i in range(args.workers):
-            t = threading.Thread(
-                target=worker_loop, args=(settings, session_factory, settings.workspace_dir),
-                daemon=True, name=f"worker-{i}",
-            )
-            t.start()
-            threads.append(t)
-        for t in threads:
-            t.join()
+    worker_loop(settings, session_factory, settings.workspace_dir)
 
 
 if __name__ == "__main__":

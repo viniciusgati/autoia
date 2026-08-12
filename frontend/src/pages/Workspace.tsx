@@ -7,6 +7,7 @@ import ResponsavelControl from "../components/ResponsavelControl";
 import { usePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
+import { fmtCost } from "../lib/money";
 import type { RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
@@ -108,7 +109,7 @@ const SUB_LABELS: Record<string, { label: string; cls: string }> = {
   failed: { label: "falhou", cls: "badge-err" },
 };
 
-const fmtCost = (v: number) => `R$ ${(v ?? 0).toFixed(2).replace(".", ",")}`;function fmtTime(iso: string | null): string {
+function fmtTime(iso: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
   return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
@@ -220,6 +221,8 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
   const running = occ.status === "running";
   const deliveredText = occ.delivered?.summary || occ.delivered_text;
   const subtasks = occurrenceSubtasks(occ);
+  // Mensagens que o usuário enviou no workspace e motivaram esta execução da fase.
+  const interventions = occ.events.filter((e) => e.raw?.kind === "user_intervention");
 
   return (
     <article className={`ws-occ ws-occ-${occ.status}`}>
@@ -242,14 +245,29 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
         </span>
       </header>
 
-      {occ.goal && (
+      {/* 2. MISSÃO desta execução — o conteúdo principal do card. */}
+      <section className="ws-occ-section ws-mission-box">
+        <h4 className="ws-section-title">
+          Missão desta execução
+          {occ.mission_source === "llm" && (
+            <span className="badge ws-badge-delivered">resumo LLM</span>
+          )}
+        </h4>
+        <p className="ws-mission">{occ.mission || occ.goal || "Execução em preparação…"}</p>
+      </section>
+
+      {/* 4. EM ANDAMENTO — atividade atual da execução. */}
+      {running && occ.last_activity && (
         <section className="ws-occ-section">
-          <h4 className="ws-section-title">O que será feito</h4>
-          <p className="ws-goal">{occ.goal}</p>
+          <h4 className="ws-section-title">Em andamento</h4>
+          <p className="ws-live">
+            <span className="ws-pulse" /> {occ.last_activity}
+          </p>
         </section>
       )}
 
-      {occ.stop && (
+      {/* 4. MOTIVO DA PARADA — imediatamente depois da missão. */}
+      {!running && occ.stop && (
         <section className={`ws-occ-section ws-stop${occ.stop.detail ? " ws-stop-with-detail" : ""}`}>
           <h4 className="ws-section-title">
             <span className={stopMeta(occ.stop.kind).cls}>
@@ -265,19 +283,11 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
         </section>
       )}
 
-      {running && occ.last_activity && (
-        <section className="ws-occ-section">
-          <h4 className="ws-section-title">Em andamento</h4>
-          <p className="ws-live">
-            <span className="ws-pulse" /> {occ.last_activity}
-          </p>
-        </section>
-      )}
-
+      {/* 3. RESULTADO — o que esta execução resolveu/entregou. */}
       {!running && deliveredText && (
-        <section className="ws-occ-section">
+        <section className="ws-occ-section ws-result">
           <h4 className="ws-section-title">
-            O que foi entregue
+            O que foi resolvido
             {occ.delivered ? (
               <span className="badge ws-badge-delivered">resumo LLM</span>
             ) : (
@@ -287,6 +297,20 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
           <div className="ws-delivered">
             <Markdown text={deliveredText} />
           </div>
+        </section>
+      )}
+
+      {interventions.length > 0 && (
+        <section className="ws-occ-section ws-intervention">
+          <h4 className="ws-section-title">👤 Sua mensagem para o robô</h4>
+          {interventions.map((e, i) => (
+            <div key={i} className="ws-intervention-item">
+              <span className="muted small">{fmtTime(e.ts)}</span>
+              <p className="ws-intervention-text">
+                {String(e.raw?.payload?.instruction ?? "") || e.summary}
+              </p>
+            </div>
+          ))}
         </section>
       )}
 

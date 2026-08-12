@@ -6,6 +6,7 @@ import DiffView from "../components/DiffView";
 import StatusBadge from "../components/StatusBadge";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
+import { fmtCost } from "../lib/money";
 import { usePolling } from "../lib/polling";
 import type { RunEvent, Task } from "../types";
 
@@ -133,7 +134,7 @@ function ChatMessage({
         <div className="chat-bubble chat-bubble-kimi">
           <div className="chat-who">
             kimi diz <span className="muted small">· {hora}</span>
-            {event.cost > 0 ? <span className="muted small"> · +{event.cost.toFixed(2)} US$</span> : null}
+            {event.cost > 0 ? <span className="muted small"> · +{fmtCost(event.cost)}</span> : null}
           </div>
           <div className="chat-body">
             {conteudo ? <Markdown text={conteudo} /> : "(sem texto)"}
@@ -154,7 +155,7 @@ function ChatMessage({
         <div className="chat-bubble">
           <div className="chat-who">
             kimi executa <span className="muted small">· {hora}</span>
-            {event.cost > 0 ? <span className="muted small"> · +{event.cost.toFixed(2)} US$</span> : null}
+            {event.cost > 0 ? <span className="muted small"> · +{fmtCost(event.cost)}</span> : null}
           </div>
           <div className="chat-body mono">{formatToolCall(event)}</div>
           <button className="link-btn" onClick={onToggle}>
@@ -444,7 +445,7 @@ export default function PhaseDetail() {
             <div key={event.id} className={`transcript-block transcript-${event.kind}`}>
               <div className="mono time">
                 [{event.seq}] {new Date(event.ts).toLocaleTimeString()} · {event.kind}
-                {event.cost > 0 ? ` · +${event.cost.toFixed(2)} US$` : ""}
+                {event.cost > 0 ? ` · +${fmtCost(event.cost)}` : ""}
               </div>
               <pre className="transcript-body">{eventFull(event)}</pre>
             </div>

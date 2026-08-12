@@ -74,6 +74,81 @@ _STEP_ROLE_LABEL = {
     "pm": "PM",
 }
 
+# Missão humana DETERMINÍSTICA de primeira execução por papel (fallback da UI).
+_ROLE_FIRST_MISSION = {
+    "refine": "Transformar a ideia em uma história clara, completa e pronta para ser desenvolvida.",
+    "review": "Revisar a história e a implementação, apontando problemas e riscos antes de avançar.",
+    "implement": "Implementar o que foi solicitado na tarefa, seguindo os requisitos.",
+    "verify": "Verificar a implementação com testes e garantir que os requisitos da tarefa passam.",
+    "assess": "Avaliar a entrega final, apontando problemas, riscos e o que ainda falta.",
+    "merge": "Integrar as alterações na branch principal e documentar a integração.",
+    "pm": "Avaliar o andamento do trabalho e decidir o próximo passo do pipeline.",
+}
+
+
+def _trim(text: str, limit: int) -> str:
+    text = (text or "").strip()
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit("\n", 1)[0] + "…"
+
+
+def fallback_mission(
+    step: TaskStep,
+    task: Task,
+    occ: dict,
+    prev_occ: dict | None,
+) -> str:
+    """Missão humana DETERMINÍSTICA de uma execução de fase (fallback da UI).
+
+    Usada enquanto a missão LLM (`StepMission`) não está pronta ou quando a geração
+    falhou/foi desligada. Deriva "por que esta execução existe" dos eventos reais:
+    instrução do usuário que motivou a execução > parada/reprovação da tentativa
+    anterior da MESMA fase > bounce-back de uma fase posterior > missão por papel
+    (primeira execução). A missão NUNCA é um prompt técnico.
+    """
+    # 1. Instrução do usuário que motivou esta execução (abre a ocorrência).
+    for ev in reversed(occ["events"]):
+        if ev["raw"]["kind"] == "user_intervention":
+            instruction = str(ev["raw"]["payload"].get("instruction") or "").strip()
+            if instruction:
+                return f"Atender à sua instrução: “{_trim(instruction, 240)}”."
+    # 2. A tentativa anterior da MESMA fase parou (falha/reprovação/bloqueio).
+    if prev_occ is not None:
+        stop = prev_occ.get("stop")
+        if stop:
+            detail = stop.get("detail") or stop.get("reason") or ""
+            if detail:
+                return (
+                    f"Corrigir o problema da tentativa anterior desta fase: "
+                    f"“{_trim(detail, 320)}”."
+                )
+            return "Refazer esta etapa a partir do que aconteceu na tentativa anterior."
+        # 3. A tentativa anterior concluiu, mas uma fase POSTERIOR reprovou e devolveu
+        #    o trabalho (bounce-back) — o evento fica ancorado na execução anterior.
+        for ev in prev_occ["events"]:
+            if ev["raw"]["kind"] == "bounce_back":
+                reason = str(ev["raw"]["payload"].get("reason") or "").strip()
+                from_pos = ev["raw"]["payload"].get("from_position")
+                who = (
+                    f"pela fase {int(from_pos) + 1}"
+                    if isinstance(from_pos, int) or str(from_pos).lstrip("-").isdigit()
+                    else ""
+                )
+                if reason:
+                    return (
+                        f"Corrigir o que foi reprovado{(' ' + who) if who else ''}: "
+                        f"“{_trim(reason, 320)}”."
+                    )
+                return f"Repetir a etapa após reprovação{(' ' + who) if who else ''}."
+    # 4. Primeira execução da fase: missão por papel do robô.
+    role = step.robot.role if step and step.robot else ""
+    mission = _ROLE_FIRST_MISSION.get(role)
+    if mission:
+        return mission
+    name = step.robot.name if step and step.robot else "?"
+    return f"Executar a fase “{name}” da tarefa “{task.title}”."
+
 
 def _parse_args(arguments: str) -> dict | None:
     try:
@@ -584,6 +659,14 @@ def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
     counters: dict[int, int] = {}
     order: list[tuple[int, int]] = []
 
+    # Intervenções do usuário (mensagens enviadas no workspace) são a CAUSA da
+    # re-execução de uma fase — ancorá-las na ocorrência ANTERIOR (a que falhou ou
+    # pausou) esconderia o que o usuário pediu e como isso afetou a etapa. Por isso
+    # são adiadas e anexadas à PRÓXIMA execução da MESMA fase (a que a mensagem
+    # gerou). Sem próxima execução, ficam na última ocorrência da fase.
+    deferred_interventions: dict[int, list[dict]] = {}
+    last_key: dict[int, tuple[int, int]] = {}
+
     for ev in tl:
         raw_kind = ev["raw"]["kind"]
         step_id = ev["step_id"]
@@ -602,8 +685,13 @@ def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
             counters[step_id] = index
             key = (step_id, index)
             groups[key] = _new_occurrence(step, attempt, index)
+            # A mensagem do usuário que motivou esta execução abre a ocorrência.
+            groups[key]["events"].extend(deferred_interventions.pop(step_id, []))
             current_key[step_id] = key
+            last_key[step_id] = key
             order.append(key)
+        elif raw_kind in ("user_intervention", "execution_resumed"):
+            deferred_interventions.setdefault(step_id, []).append(ev)
         else:
             key = current_key.get(step_id)
             if key is None or key not in groups:
@@ -614,6 +702,12 @@ def derive_task_occurrences(session: Session, task: Task) -> list[dict]:
                 # cronológica da fase.
                 continue
             groups[key]["events"].append(ev)
+
+    # Intervenção sem re-execução subsequente da fase: fica na última ocorrência.
+    for step_id, evs in deferred_interventions.items():
+        key = last_key.get(step_id) or current_key.get(step_id)
+        if key is not None and key in groups:
+            groups[key]["events"].extend(evs)
 
     last_index: dict[int, int] = {}
     for (step_id, index) in order:

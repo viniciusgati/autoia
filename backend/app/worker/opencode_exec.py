@@ -1,13 +1,14 @@
-"""Execução do opencode CLI em modo não-interativo (--format json) com guardrails.
+"""Execução do opencode CLI em modo não-interativo (--format json).
 
 O worker consome o stdout do `opencode run <prompt> --format json --dir <cwd>` linha
 a linha. Cada linha é um evento JSON: `step_start`, `tool_use` (tool + state.input /
 state.output), `text`, `step_finish` (com custo REAL do provedor em `cost`) e `error`.
 
-Diferenças vs. kimi:
-- O custo real vem do `step_finish` (a estimativa por interação do kimi não se aplica).
-- A `tool_use` também chega DEPOIS da execução (mesma limitação v1 do kimi): o
-  guardrail detecta e mata o processo; isolamento do checkout é a primeira defesa.
+O guardrail de comandos arriscados foi REMOVIDO: a `tool_use` chega DEPOIS da
+execução (mesma limitação do kimi) — matar o processo não impedia o comando e gerava
+falsos positivos que interrompiam trabalho legítimo. A proteção real virá do sandbox
+da execução. Permanecem os watchdogs de progresso: loop de tool calls idênticas,
+timeout total e timeout de "sem progresso".
 """
 
 from __future__ import annotations
@@ -169,13 +170,8 @@ def run_opencode(
                         last_call_key = key
                         identical_count = 1
 
-                    violation = guardrails.check_tool_call(
-                        {"function": {"name": tc["name"], "arguments": tc["arguments"]}},
-                        risky_patterns,
-                        checkout_path,
-                        whitelisted_hosts,
-                    )
-                    if violation is None and identical_count >= max_identical_calls:
+                    violation = None
+                    if identical_count >= max_identical_calls:
                         violation = guardrails.GuardrailViolation(
                             pattern="identical-calls",
                             detail=f"{tc['tool']} repetido {identical_count}x seguidas",

@@ -17,6 +17,7 @@ import Timeline from "../components/Timeline";
 import { buildTurns } from "../lib/chat";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
+import { fmtBudget, fmtCost } from "../lib/money";
 import { diffSummary, etapaAtualLabel, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
 import type { Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
@@ -465,8 +466,8 @@ export default function TaskDetail() {
             branch: <code>{task.branch ?? "—"}</code>
           </span>
           <span>
-            orçamento: <strong>{task.budget_limit.toFixed(2)}</strong> US$ · gasto:{" "}
-            <strong>{task.cost_spent.toFixed(2)}</strong> US$
+            orçamento: <strong>{fmtCost(task.budget_limit)}</strong> · gasto:{" "}
+            <strong>{fmtCost(task.cost_spent)}</strong>
           </span>
           <span className="muted">decisões PM: {task.pm_decisions}</span>
         </div>
@@ -653,7 +654,7 @@ export default function TaskDetail() {
               )}
               <div>
                 <span className="form-label">Custo</span>
-                <span>{task.cost_spent.toFixed(2)} / {task.budget_limit.toFixed(2)} US$</span>
+                <span>{fmtBudget(task.cost_spent, task.budget_limit)}</span>
               </div>
             </div>
             {changedSteps.length > 0 && (
@@ -1027,7 +1028,7 @@ export default function TaskDetail() {
                   {child.repository_id !== task.repository_id && (
                     <span>repo #{child.repository_id} · </span>
                   )}
-                  {child.kind} · {child.cost_spent.toFixed(2)} US$
+                  {child.kind} · {fmtCost(child.cost_spent)}
                 </div>
                 {child.status === "created" && (
                   <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
@@ -1352,7 +1353,7 @@ function HumanIntervention(props: {
             </div>
             <form className="form-inline" onSubmit={(e) => review(e, "approve")}>
               <div className="form-field">
-                <label className="form-label">Orçamento extra (US$)</label>
+                <label className="form-label">Orçamento extra (R$)</label>
                 <input
                   type="number"
                   min={0}

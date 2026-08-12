@@ -24,6 +24,9 @@ SUMMARY_FILENAME = "autoia_summary.json"
 # Resumo de UMA fase ("O que foi entregue") gerado pela LLM dedicada a resumo.
 STEP_SUMMARY_FILENAME = "autoia_step_summary.json"
 
+# Missão de UMA execução de fase ("por que esta execução existe") — LLM dedicada.
+STEP_MISSION_FILENAME = "autoia_step_mission.json"
+
 # Pedido de decisão do agente ao usuário (pausa a fase até o humano responder).
 DECISION_FILENAME = "autoia_decision.json"
 
@@ -166,6 +169,31 @@ def read_step_summary(checkout: str) -> dict | None:
 def remove_step_summary(checkout: str) -> None:
     try:
         os.remove(os.path.join(checkout, STEP_SUMMARY_FILENAME))
+    except FileNotFoundError:
+        pass
+
+
+def read_step_mission(checkout: str) -> dict | None:
+    """Lê a missão da execução (autoia_step_mission.json), tolerante."""
+    path = os.path.join(checkout, STEP_MISSION_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    mission = str(data.get("mission") or "").strip()
+    if not mission:
+        return None
+    return {"mission": mission}
+
+
+def remove_step_mission(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, STEP_MISSION_FILENAME))
     except FileNotFoundError:
         pass
 

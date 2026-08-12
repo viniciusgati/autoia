@@ -110,26 +110,24 @@ def test_streams_events_and_real_cost(tmp_path):
     assert tr["output"] == "ok"
 
 
-def test_guardrail_kills_on_risky_command(tmp_path):
+def test_risky_command_not_blocked_after_guardrail_removal(tmp_path):
     lines = [_tool("bash", {"command": "rm -rf /"})]
     outcome, events, _ = _run(
         tmp_path, lines, risky_patterns=[r"\brm\s+-rf\b"]
     )
 
-    assert outcome.aborted
-    assert outcome.abort_reason.startswith("guardrail")
+    assert not outcome.aborted
+    assert outcome.exit_code == 0
     kinds = [k for k, _, _ in events]
-    assert kinds[-1] == "guardrail_blocked"
-    payload = events[-1][1]
-    assert payload["pattern"] == r"\brm\s+-rf\b"
+    assert "guardrail_blocked" not in kinds
 
 
-def test_guardrail_path_outside_checkout(tmp_path):
+def test_read_outside_checkout_not_blocked(tmp_path):
     lines = [_tool("read", {"filePath": "/etc/passwd"})]
     outcome, _, _ = _run(tmp_path, lines)
 
-    assert outcome.aborted
-    assert outcome.abort_reason.startswith("guardrail")
+    assert not outcome.aborted
+    assert outcome.exit_code == 0
 
 
 def test_identical_calls_kill(tmp_path):
