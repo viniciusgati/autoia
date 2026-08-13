@@ -25,3 +25,9 @@ frontend/dist/
 # Logs / lixo de runtime
 console_error.log
 *.log
+
+# arquivos de controle do autoia (worker) — nunca versionar
+autoia_*.json
+autoia_*.md
+autoia_verdict.txt
+autoia_handoff.md

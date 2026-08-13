@@ -2683,6 +2683,8 @@ tr:hover td {
   padding: 16px 18px;
   transition: all var(--transition);
   box-shadow: var(--shadow-sm);
+  /* Altura mínima uniforme: cards de status diferentes não ficam "manquinhos" */
+  min-height: 280px;
 }
 
 .task-card:hover {
@@ -2704,6 +2706,9 @@ tr:hover td {
   justify-content: space-between;
   align-items: flex-start;
   gap: 10px;
+  /* Altura mínima consistente (≈ 2 linhas do título com clamp): cabeçalhos
+     de cards com título curto/longo ficam na mesma altura. */
+  min-height: 42px;
 }
 
 .task-card-title {
@@ -2715,6 +2720,12 @@ tr:hover td {
   color: var(--text);
   text-decoration: none;
   letter-spacing: -0.01em;
+  /* Título longo sem quebra de layout: quebra em qualquer ponto e trunca em 2 linhas */
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
 }
 
 .task-card-title:hover {
@@ -2728,6 +2739,15 @@ tr:hover td {
   background: rgba(251, 191, 36, 0.08);
   border-radius: var(--radius-sm);
   padding: 6px 10px;
+  /* Altura fixa do slot: presença/ausência do alerta não desalinha os demais blocos */
+  min-height: 28px;
+}
+
+/* Slot vazio (sem alerta): reserva a altura sem exibir nada. */
+.task-card-alert-empty {
+  background: transparent;
+  padding: 0;
+  color: transparent;
 }
 
 .task-card-alert-err {
@@ -2739,6 +2759,8 @@ tr:hover td {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  /* Altura mínima constante: rótulo + nome da etapa alinhados entre cards */
+  min-height: 38px;
 }
 
 .task-card-stage-name {
@@ -2751,13 +2773,30 @@ tr:hover td {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  gap: 8px;
+  column-gap: 8px;
+  row-gap: 4px;
+  flex-wrap: wrap;
   font-size: 12.5px;
+  min-height: 20px;
+}
+
+.task-card-duration {
+  color: var(--text-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .task-card-cost-warn {
   color: var(--warn);
   font-weight: 600;
+}
+
+/* Custo final (task concluída): destaque verde com o valor total acumulado. */
+.task-card-cost-final {
+  color: var(--ok);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .task-card-executor {
@@ -2778,10 +2817,31 @@ tr:hover td {
   gap: 8px;
   margin-top: auto;
   padding-top: 4px;
+  /* Altura constante em qualquer status: entrada/saída de botões não desloca o card */
+  min-height: 38px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+
+/* Botões de ação com tamanho mínimo uniforme (sem salto de layout entre status). */
+.task-card-actions button,
+.task-card-actions .link-btn {
+  min-height: 32px;
+  min-width: 88px;
+  flex-shrink: 0;
 }
 
 .task-card-actions .link-btn {
   margin-left: auto;
+}
+
+.task-card-actions .link-btn + .link-btn {
+  margin-left: 0;
+}
+
+/* Stepper com labels dentro do card: respiro menor, sem quebrar o layout. */
+.task-card .stepper {
+  margin: 8px 0 2px;
 }
 
 /* ═══════════════════════════════════════════

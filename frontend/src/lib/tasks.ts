@@ -57,6 +57,15 @@ export function tempoDecorrido(step: { started_at: string | null }): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** Formata uma duração em ms como texto curto: "42s" · "3m 12s" · "1h 23m". */
+export function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  if (total < 60) return `${total}s`;
+  const m = Math.floor(total / 60);
+  if (m < 60) return `${m}m ${total % 60}s`;
+  return `${Math.floor(m / 60)}h ${m % 60}m`;
+}
+
 /** Extrai resumo legível de um diff_stat (git --stat): "3 arquivos, +45/-12". */
 export function diffSummary(diffStat: string | null): string | null {
   if (!diffStat) return null;
