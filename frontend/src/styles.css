@@ -2706,6 +2706,9 @@ tr:hover td {
   justify-content: space-between;
   align-items: flex-start;
   gap: 10px;
+  /* Altura mínima consistente (≈ 2 linhas do título com clamp): cabeçalhos
+     de cards com título curto/longo ficam na mesma altura. */
+  min-height: 42px;
 }
 
 .task-card-title {
