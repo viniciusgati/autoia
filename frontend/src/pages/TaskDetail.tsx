@@ -18,7 +18,7 @@ import { buildTurns } from "../lib/chat";
 import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
 import { fmtBudget, fmtCost } from "../lib/money";
-import { diffSummary, etapaAtualLabel, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
+import { diffSummary, etapaAtualLabel, formatDuration, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
 import type { Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
@@ -431,6 +431,14 @@ export default function TaskDetail() {
   const subtasksDone = (task.subtasks || []).filter((s) => s.status === "done").length;
   const verifySteps = steps.filter((s) => s.robot?.role === "verify" && (s.summary || s.error));
   const changedSteps = steps.filter((s) => s.diff_stat);
+  // Tempo total de execução da tarefa (soma das fases com timestamps completos).
+  const totalMs = steps.reduce((acc, s) => {
+    if (s.started_at && s.finished_at) {
+      acc += Math.max(0, new Date(s.finished_at).getTime() - new Date(s.started_at).getTime());
+    }
+    return acc;
+  }, 0);
+  const hasTimestamps = steps.some((s) => s.started_at && s.finished_at);
 
   return (
     <div>
@@ -449,76 +457,80 @@ export default function TaskDetail() {
         <Link to={`/${repoId}/tasks/${task.id}/workspace`}>workspace ↗</Link>
       </p>
 
-      {/* Header fixo */}
-      <div className="task-sticky">
-        <h2>
-          #{task.id} {task.title}
-        </h2>
-        <div className="meta">
+      {/* Cabeçalho da tarefa (não fixo): dados organizados e espaçados, com o
+          conteúdo da solicitação visível no resumo. */}
+      <div className="task-head">
+        <div className="task-head-top">
+          <h2>
+            #{task.id} {task.title}
+          </h2>
           <StatusBadge status={task.status} />
-          <span className="task-detail-executor">
-            executor: {task.executor === "opencode" ? "opencode" : "kimi code"}
-          </span>
-          <span>
-            responsável: <strong>{task.responsible?.name ?? "Não atribuída"}</strong>
-          </span>
-          <span>
-            branch: <code>{task.branch ?? "—"}</code>
-          </span>
-          <span>
-            orçamento: <strong>{fmtCost(task.budget_limit)}</strong> · gasto:{" "}
-            <strong>{fmtCost(task.cost_spent)}</strong>
-          </span>
-          <span className="muted">decisões PM: {task.pm_decisions}</span>
         </div>
-        <ResponsavelControl task={task} repoId={repoIdNum} onAssigned={setTask} />
-        {["created", "queued", "in_progress", "paused", "needs_review", "waiting_approval", "blocked"].includes(
-          task.status,
-        ) && (
-          <div className="meta" style={{ marginTop: 4 }}>
-            {task.status === "paused" ? (
-              <button onClick={() => taskAction("resume")} disabled={actionBusy || !canAct} title={actTitle}>
-                retomar
-              </button>
-            ) : task.status === "queued" || task.status === "in_progress" ? (
-              <button onClick={() => taskAction("pause")} disabled={actionBusy || !canAct} title={actTitle}>
-                pausar
-              </button>
-            ) : null}
-            <button
-              className="danger"
-              onClick={() => taskAction("cancel")}
-              disabled={actionBusy || !canAct}
-              title={actTitle}
-            >
-              cancelar tarefa
-            </button>
+
+        <div className="task-head-grid">
+          <div>
+            <span className="task-head-label">Executor</span>
+            <span>{task.executor === "opencode" ? "opencode" : "kimi code"}</span>
           </div>
-        )}
-        {task.subtasks && task.subtasks.length > 0 && (
-          <div className="meta" style={{ marginTop: 4 }}>
-            <span>
-              Tarefas:{" "}
-              <strong>
-                {subtasksDone}/{task.subtasks.length}
-              </strong>{" "}
-              concluídas
-            </span>
-            {(() => {
-              const counts: Record<string, number> = {};
-              for (const s of task.subtasks) {
-                if (s.status !== "done") {
-                  counts[s.status] = (counts[s.status] || 0) + 1;
-                }
-              }
-              return Object.entries(counts).map(([status, n]) => (
-                <span key={status} className="muted small">
-                  {n} <StatusBadge status={status} />
-                </span>
-              ));
-            })()}
+          <div>
+            <span className="task-head-label">Responsável</span>
+            <span>{task.responsible?.name ?? "Não atribuída"}</span>
           </div>
-        )}
+          <div>
+            <span className="task-head-label">Branch</span>
+            <code>{task.branch ?? "—"}</code>
+          </div>
+          <div>
+            <span className="task-head-label">Orçamento</span>
+            <span>{fmtBudget(task.cost_spent, task.budget_limit)}</span>
+          </div>
+          <div>
+            <span className="task-head-label">Decisões PM</span>
+            <span>{task.pm_decisions}</span>
+          </div>
+          {task.subtasks.length > 0 && (
+            <div>
+              <span className="task-head-label">Subtarefas</span>
+              <span>
+                {subtasksDone}/{task.subtasks.length} concluídas
+              </span>
+            </div>
+          )}
+          {hasTimestamps && (
+            <div>
+              <span className="task-head-label">Tempo total</span>
+              <span>{formatDuration(totalMs)}</span>
+            </div>
+          )}
+        </div>
+
+        <div className="task-head-row">
+          <ResponsavelControl task={task} repoId={repoIdNum} onAssigned={setTask} />
+          {["created", "queued", "in_progress", "paused", "needs_review", "waiting_approval", "blocked"].includes(
+            task.status,
+          ) && (
+            <div className="task-head-actions">
+              {task.status === "paused" ? (
+                <button onClick={() => taskAction("resume")} disabled={actionBusy || !canAct} title={actTitle}>
+                  retomar
+                </button>
+              ) : task.status === "queued" || task.status === "in_progress" ? (
+                <button onClick={() => taskAction("pause")} disabled={actionBusy || !canAct} title={actTitle}>
+                  pausar
+                </button>
+              ) : null}
+              <button
+                className="danger"
+                onClick={() => taskAction("cancel")}
+                disabled={actionBusy || !canAct}
+                title={actTitle}
+              >
+                cancelar tarefa
+              </button>
+            </div>
+          )}
+        </div>
+
         {runningStep && (
           <div className="task-live">
             <div>
@@ -535,12 +547,16 @@ export default function TaskDetail() {
             )}
             <div>
               <span className="session-label">Comando atual</span>
-              <span className="task-live-value mono">
+              <span
+                className="task-live-value mono task-cmd"
+                title={runningToolCall ? formatToolCall(runningToolCall) : "aguardando interação…"}
+              >
                 {runningToolCall ? formatToolCall(runningToolCall) : "aguardando interação…"}
               </span>
             </div>
           </div>
         )}
+
         {task.status === "needs_review" && (
           <div className="sticky-alert">
             <span>
@@ -617,6 +633,25 @@ export default function TaskDetail() {
       {/* ─────────────── Nível 1: Resumo ─────────────── */}
       {view === "resumo" && (
         <div className="resumo-view">
+          {/* Conteúdo da tarefa (solicitação) — o que foi pedido, no topo. */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Solicitação</strong>
+              <span className="muted small">o que foi pedido</span>
+            </div>
+            {task.description ? (
+              <Markdown text={task.description} />
+            ) : (
+              <p className="muted">Sem descrição.</p>
+            )}
+            {task.acceptance_criteria && (
+              <>
+                <div className="form-label" style={{ marginTop: 10 }}>Critérios de aceite</div>
+                <Markdown text={task.acceptance_criteria} />
+              </>
+            )}
+          </div>
+
           <SituacaoCard
             task={task}
             runningStep={runningStep}
@@ -633,43 +668,20 @@ export default function TaskDetail() {
 
           <TaskSummaryCard summary={task.summary} onRegenerate={regenerateSummary} busy={summaryBusy} />
 
-          <div className="card">
-            <div className="card-title">
-              <strong>Estado atual</strong>
+          {changedSteps.length > 0 && (
+            <div className="card">
+              <div className="card-title">
+                <strong>Principais alterações</strong>
+              </div>
+              <ul className="summary-list">
+                {changedSteps.map((s) => (
+                  <li key={s.id}>
+                    Fase {s.position} ({s.robot?.name ?? "?"}) · {diffSummary(s.diff_stat) ?? "arquivos alterados"}
+                  </li>
+                ))}
+              </ul>
             </div>
-            <div className="resumo-kpis">
-              <div>
-                <span className="form-label">Resultado</span>
-                <StatusBadge status={task.status} />
-              </div>
-              <div>
-                <span className="form-label">Etapa atual</span>
-                <span>{etapaAtualLabel(task) || "—"}</span>
-              </div>
-              {task.subtasks.length > 0 && (
-                <div>
-                  <span className="form-label">Tarefas</span>
-                  <span>{subtasksDone} concluídas · {task.subtasks.length - subtasksDone} pendentes</span>
-                </div>
-              )}
-              <div>
-                <span className="form-label">Custo</span>
-                <span>{fmtBudget(task.cost_spent, task.budget_limit)}</span>
-              </div>
-            </div>
-            {changedSteps.length > 0 && (
-              <div style={{ marginTop: 10 }}>
-                <span className="form-label">Principais alterações</span>
-                <ul className="summary-list">
-                  {changedSteps.map((s) => (
-                    <li key={s.id}>
-                      Fase {s.position} ({s.robot?.name ?? "?"}) · {diffSummary(s.diff_stat) ?? "arquivos alterados"}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </div>
+          )}
 
           {/* Etapas com retorno (re-executa a partir da fase escolhida) */}
           <div className="card">
@@ -1138,7 +1150,7 @@ function SituacaoCard({
           </div>
           <div>
             <span className="form-label">Comando atual</span>
-            <span className="mono">
+            <span className="mono task-cmd" title={runningToolCall ? formatToolCall(runningToolCall) : "aguardando interação…"}>
               {runningToolCall ? formatToolCall(runningToolCall) : "aguardando interação…"}
             </span>
           </div>

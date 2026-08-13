@@ -95,7 +95,10 @@ export default function Markdown({ text }: { text: string }) {
             readOnly
           />
         )}
-        {renderInline(item.text, `li${key}-${idx}`)}
+        {/* Texto agrupado num span: em itens flex (checkbox), o code inline fica
+            dentro do fluxo normal do span em vez de virar flex-item (que quebra
+            na vertical). */}
+        <span className="md-li-text">{renderInline(item.text, `li${key}-${idx}`)}</span>
       </li>
     ));
     blocks.push(<ul key={`l${key++}`}>{items}</ul>);

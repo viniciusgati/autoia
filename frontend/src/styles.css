@@ -1899,24 +1899,64 @@ tr:hover td {
    TaskDetail header sticky
    ═══════════════════════════════════════════ */
 
-.task-sticky {
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  background: rgba(14, 15, 20, 0.85);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+.task-head {
   border: 1px solid var(--surface-border);
   border-radius: var(--radius-lg);
-  padding: 16px 18px;
+  background: var(--surface);
+  padding: 20px 22px;
   margin-bottom: 18px;
-  box-shadow: var(--shadow-md);
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
 }
 
-.task-sticky h2 {
-  margin: 0 0 8px;
-  font-size: 20px;
+.task-head-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.task-head-top h2 {
+  margin: 0;
+  font-size: 22px;
   word-break: break-word;
+  line-height: 1.3;
+}
+
+.task-head-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 14px 20px;
+}
+
+.task-head-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.task-head-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.task-head-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding-top: 2px;
+}
+
+.task-head-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .sticky-alert {
@@ -1949,6 +1989,18 @@ tr:hover td {
 .task-live-value {
   font-weight: 600;
   word-break: break-word;
+}
+
+/* Comando atual: largura e altura máximas fixas, com reticências (o comando
+   completo fica no tooltip). Evita que comandos longos quebrem o layout. */
+.task-cmd {
+  max-width: min(100%, 560px);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
 }
 
 .task-section-head {
@@ -2084,17 +2136,10 @@ tr:hover td {
   overflow-wrap: normal; /* blocos de código rolam, não quebram linha */
 }
 
-.markdown code {
-  font-family: "JetBrains Mono", "Fira Code", ui-monospace, monospace;
-  font-size: 12px;
-  background: rgba(139, 147, 163, 0.12);
-  border-radius: 4px;
-  padding: 1.5px 5px;
-}
-
 .markdown pre code {
   background: none;
   padding: 0;
+  font-size: 12px;
 }
 
 .markdown a {
@@ -2115,13 +2160,27 @@ tr:hover td {
 }
 
 .markdown li {
+  padding: 2px 0;
+}
+
+/* Itens flex do markdown (texto/code inline) nunca estouram a largura. */
+.markdown li > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Flex SÓ nos itens com checkbox (alinhamento do marcador); itens comuns ficam
+   em fluxo normal — senão o `code` inline vira flex-item e quebra na vertical. */
+.markdown li:has(.markdown-check) {
   display: flex;
   align-items: flex-start;
   gap: 7px;
+  list-style: none;
 }
 
-.markdown li:has(.markdown-check) {
-  list-style: none;
+.markdown li:has(.markdown-check) .md-li-text {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .markdown li .markdown-check {
@@ -2946,6 +3005,26 @@ code {
   background: rgba(255, 255, 255, 0.05);
   padding: 1.5px 5px;
   border-radius: 4px;
+  /* Segurança de layout: código INLINE quebra em vez de estourar a página
+     (tokens longos — paths/ids/urls — que o resumo LLM usa muito). `pre code`
+     (blocos) é sobrescrito abaixo para manter scroll horizontal, não quebra. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Blocos de código rolam dentro do bloco (nunca quebram a página). */
+pre {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+pre code {
+  white-space: pre;
+  overflow-wrap: normal;
+  word-break: normal;
 }
 
 strong {
@@ -3760,6 +3839,10 @@ strong {
   border-radius: var(--radius-sm);
   padding: 2px 8px;
   font-size: 12px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .summary-actions {
