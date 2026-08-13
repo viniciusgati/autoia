@@ -27,6 +27,12 @@ mkdir -p "$LOGS" "$PIDS"
 
 source "$VENV"
 
+# PATH sane: garante `docker`, `kimi`, `opencode` e toolchains mesmo quando o
+# processo pai subiu numa sessão com PATH corrompido (ex.: display-manager).
+HOME_DIR="${HOME:-$HOME}"
+NVM_BIN="$(compgen -G "$HOME_DIR/.nvm/versions/node/*/bin" 2>/dev/null | sort -V | tail -n 1 || true)"
+export PATH="$HOME_DIR/.kimi-code/bin${NVM_BIN:+:$NVM_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+
 start_api() {
   if [[ -f "$PID_API" ]] && kill -0 "$(cat "$PID_API")" 2>/dev/null; then
     echo "API já está rodando (PID $(cat "$PID_API"))"
@@ -41,7 +47,7 @@ start_worker() {
   if [[ -f "$PID_WORKER" ]] && kill -0 "$(cat "$PID_WORKER")" 2>/dev/null; then
     echo "Worker já está rodando (PID $(cat "$PID_WORKER"))"
   else
-    echo "Iniciando worker ($WORKERS thread(s))..."
+    echo "Iniciando worker ($WORKERS processo(s))..."
     nohup autoia-worker --workers "$WORKERS" > "$LOGS/worker.log" 2>&1 &
     echo $! > "$PID_WORKER"
   fi

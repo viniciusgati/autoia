@@ -55,6 +55,9 @@ class Repository(Base):
     cost_per_interaction: Mapped[float | None] = mapped_column(Float, nullable=True)
     risky_patterns_extra: Mapped[str | None] = mapped_column(Text, nullable=True)
     db_rule: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Modo de sandbox de execução do projeto: None = herda o global (AUTOIA_SANDBOX);
+    # "off" | "fs" | "full" sobrescreve para este repositório.
+    sandbox: Mapped[str | None] = mapped_column(String(10), nullable=True)
 
     # Controle de features
     allow_auto_tasks: Mapped[bool] = mapped_column(default=False)

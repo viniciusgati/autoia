@@ -124,6 +124,7 @@ def create_repository(
         allow_external_tasks=data.allow_external_tasks,
         default_pipeline_id=data.default_pipeline_id,
         auto_summary=data.auto_summary,
+        sandbox=data.sandbox,
     )
     session.add(repo)
     session.commit()

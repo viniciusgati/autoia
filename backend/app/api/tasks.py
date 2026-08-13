@@ -1062,6 +1062,7 @@ def task_workspace(
             mission_source=mission.source if mission is not None else "fallback",
             started_at=occ["started_at"],
             finished_at=occ["finished_at"],
+            duration_ms=occ.get("duration_ms"),
             last_activity=occ["last_activity"],
             delivered_text=occ["delivered_text"],
             delivered=delivered,

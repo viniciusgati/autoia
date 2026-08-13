@@ -56,15 +56,17 @@ def _new_app(settings, bare_repo):
     return app, session_factory, client
 
 
+def _registered_repo_ids() -> list[int]:
+    with exec_common._ACTIVE_LOCK:
+        return [rid for (rid, _cid) in exec_common._ACTIVE_PROCS.values()]
+
+
 def _wait_repo_procs(repo_ids: set[int], count: int, timeout: float = 10.0) -> None:
     """Espera até que `count` subprocessos dos repos informados estejam registrados
     em `_ACTIVE_PROCS` (filtra por repo_id — não depende do estado global)."""
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        with exec_common._ACTIVE_LOCK:
-            registered = [
-                rid for rid in exec_common._ACTIVE_PROCS.values() if rid in repo_ids
-            ]
+        registered = [rid for rid in _registered_repo_ids() if rid in repo_ids]
         if len(registered) >= count:
             return
         time.sleep(0.05)
@@ -275,8 +277,7 @@ def test_delete_stops_running_execution(settings, bare_repo, tmp_path):
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     _wait_repo_procs({1}, 1)
-    with exec_common._ACTIVE_LOCK:
-        assert 1 in exec_common._ACTIVE_PROCS.values(), "subprocesso do executor não registrado"
+    assert 1 in _registered_repo_ids(), "subprocesso do executor não registrado"
 
     resp = client.delete("/api/repositories/1")
     assert resp.status_code == 204
@@ -291,8 +292,7 @@ def test_delete_stops_running_execution(settings, bare_repo, tmp_path):
         assert s.query(TaskStep).count() == 0
     assert not os.path.isdir(os.path.join(settings.workspace_dir, "1"))
     # subprocesso do projeto foi morto e desregistrado (kill seletivo por repo)
-    with exec_common._ACTIVE_LOCK:
-        assert 1 not in exec_common._ACTIVE_PROCS.values()
+    assert 1 not in _registered_repo_ids()
 
 
 def test_stop_file_kills_proc_and_step_does_not_advance(settings, bare_repo, tmp_path):
@@ -332,8 +332,7 @@ def test_stop_file_kills_proc_and_step_does_not_advance(settings, bare_repo, tmp
     # task cancelada não é mais reclamada (não avança para a próxima fase)
     assert runner.claim_next(sf) is None
     # subprocesso do projeto foi morto e desregistrado (kill seletivo por repo)
-    with exec_common._ACTIVE_LOCK:
-        assert 1 not in exec_common._ACTIVE_PROCS.values()
+    assert 1 not in _registered_repo_ids()
 
 
 def test_stop_file_kill_is_selective_per_repo(settings, bare_repo, tmp_path):
@@ -381,8 +380,7 @@ def test_stop_file_kill_is_selective_per_repo(settings, bare_repo, tmp_path):
         assert not th1.is_alive(), "execução do projeto 1 não parou"
         assert th2.is_alive(), "execução do projeto 2 foi afetada indevidamente"
 
-        with exec_common._ACTIVE_LOCK:
-            remaining = [rid for rid in exec_common._ACTIVE_PROCS.values()]
+        remaining = _registered_repo_ids()
         assert 2 in remaining  # subprocesso do projeto 2 segue registrado
         assert 1 not in remaining
     finally:

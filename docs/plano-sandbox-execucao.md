@@ -1,8 +1,15 @@
 # Plano: sandbox de execução para os robôs da autoia
 
-> Estado atual: o guardrail de comandos foi **removido** (era pós-emissão — o comando já
+> **Status (implementado em 2026-08-12)**: o plano foi implementado conforme abaixo —
+> builder `backend/app/worker/sandbox.py` (docker/bwrap), integração nos executores,
+> proxy de egress allowlist, `Settings.sandbox`/`Repository.sandbox` (`off`|`fs`|`full`,
+> default `off`), lock de push por execução e evento `sandbox` na timeline. A decisão de
+> fail-closed ficou **configurável** (`AUTOIA_SANDBOX_FAIL_CLOSED`, default `off` com
+> fallback + aviso). Suíte com testes de negação (docker) verde.
+
+> Estado anterior: o guardrail de comandos foi **removido** (era pós-emissão — o comando já
 > rodava quando a `tool_call` chegava no stream; não impedia o dano e gerava falsos
-> positivos). Os robôs rodam hoje como subprocessos do worker com **os privilégios do
+> positivos). Os robôs rodavam como subprocessos do worker com **os privilégios do
 > usuário host**, sem isolamento. Este plano substitui o guardrail por um **sandbox de
 > execução** (isolamento real de sistema), que é a proteção efetiva.
 
@@ -169,45 +176,48 @@ tests, webbridge :10086) e (b) **egress** para registros de pacotes
 ## 5. Fases de implementação
 
 ### Fase 0 — Quick wins (independente do contêiner)
-- [ ] Bloquear push no checkout: hook `pre-push` + `pushurl` inválido aplicados pelo
+- [x] Bloquear push no checkout: hook `pre-push` + `pushurl` inválido aplicados pelo
       worker no início de cada execução (`gitops.py`).
-- [ ] Limites de recursos básicos por execução já no host: `ulimit -v`, `ulimit -n`,
+- [x] Limites de recursos básicos por execução já no host: `ulimit -v`, `ulimit -n`,
       `nice`/`ionice` no spawn (`exec_common.py`).
-- [ ] Teste: garantir que os robôs continuam sem matar execução por comando "suspeito".
+- [x] Teste: garantir que os robôs continuam sem matar execução por comando "suspeito".
 
 ### Fase 1 — Isolamento de arquivos e privilégios (núcleo)
-- [ ] `exec_common/sandbox.py`: builder do comando `docker run` (mounts, flags,
+- [x] `exec_common/sandbox.py`: builder do comando `docker run` (mounts, flags,
       imagem base, mapeamento do binário da CLI) com backend bwrap opcional.
-- [ ] `kimi_exec`/`opencode_exec`: trocar o spawn direto pelo sandbox; manter
+- [x] `kimi_exec`/`opencode_exec`: trocar o spawn direto pelo sandbox; manter
       `--dir`/`cwd`, stream, watchdogs e log idênticos.
-- [ ] Resolver estado das CLIs (mounts ro/rw) e credenciais (ro).
-- [ ] Falha do sandbox (docker indisponível) → fallback para execução direta + log de
+- [x] Resolver estado das CLIs (mounts ro/rw) e credenciais (ro).
+- [x] Falha do sandbox (docker indisponível) → fallback para execução direta + log de
       aviso, até decisão de "fail-closed" na Fase 3.
-- [ ] Critérios: `rm -rf ~/`, `dd`, `sudo`, escrita em `/etc`, `shutdown` **falham**
+- [x] Critérios: `rm -rf ~/`, `dd`, `sudo`, escrita em `/etc`, `shutdown` **falham**
       dentro do sandbox; build real (pytest/npm) funciona; kill/timeout/stop continuam
       matando.
 
 ### Fase 2 — Rede (allowlist de egress)
-- [ ] Proxy de allowlist no host (mesma lista de `config.py`) + `HTTP(S)_PROXY` no
+- [x] Proxy de allowlist no host (mesma lista de `config.py`) + `HTTP(S)_PROXY` no
       contêiner + `--network bridge`.
-- [ ] Serviços do host acessíveis via `host.docker.internal` (prompt/AGENTS.md + env).
-- [ ] Critérios: `curl https://registry.npmjs.org` OK; `curl https://evil.example.com`
+- [x] Serviços do host acessíveis via `host.docker.internal` (prompt/AGENTS.md + env).
+- [x] Critérios: `curl https://registry.npmjs.org` OK; `curl https://evil.example.com`
       **falha**; smoke test da API local (host.docker.internal:9000) OK.
 
 ### Fase 3 — Integração no worker e rollout
-- [ ] `Settings.sandbox` (modo: `off` | `fs` | `full`, default `off` até validado) e
+- [x] `Settings.sandbox` (modo: `off` | `fs` | `full`, default `off` até validado) e
       propagação no `EffectiveSettings` (`runner.py`).
-- [ ] Rollout por repo/task: `Repository.sandbox` override; tasks novas default
+- [x] Rollout por repo/task: `Repository.sandbox` override; tasks novas default
       conforme projeto.
-- [ ] Testes: rodar a suíte de execução (`fake_kimi`/`fake opencode`) **dentro do
+- [x] Testes: rodar a suíte de execução (`fake_kimi`/`fake opencode`) **dentro do
       sandbox** (os fake scripts já estão em `tmp_path`); CI do sandbox.
-- [ ] Decisão de fail-closed: sandbox obrigatório (sem fallback silencioso).
+- [x] Decisão de fail-closed: sandbox obrigatório (sem fallback silencioso) — ficou
+      **configurável** (`AUTOIA_SANDBOX_FAIL_CLOSED`, default `off`).
 
 ### Fase 4 — Hardening e observabilidade
-- [ ] Evento `sandbox` por execução (RunEvent: modo, contêiner, custo de overhead).
-- [ ] Varredura: nenhum segredo rw além dos dirs de estado; `/root`, `/etc/shadow`,
-      chaves SSH fora dos mounts.
-- [ ] Métricas: overhead de startup do contêiner, falhas do sandbox.
+- [x] Evento `sandbox` por execução (RunEvent: modo, contêiner, custo de overhead).
+- [x] Varredura: nenhum segredo rw além dos dirs de estado; `/root`, `/etc/shadow`,
+      chaves SSH fora dos mounts. *(implementado: `scan_secret_mounts` em `sandbox.py`
+      checa os mounts efetivos contra a deny-list antes de cada execução — log de
+      aviso + evento `secrets_scan` na timeline; `AUTOIA_SANDBOX_FAIL_CLOSED` aborta)*
+- [x] Métricas: overhead de startup do contêiner, falhas do sandbox.
 
 ## 6. Integração no código (pontos exatos)
 

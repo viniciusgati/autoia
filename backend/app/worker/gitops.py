@@ -2,6 +2,8 @@
 
 Segurança: todos os caminhos de checkout são controlados pela aplicação
 (workspaces/<repo_id>). O push é feito SOMENTE aqui (pelo merger), nunca pelos robôs.
+`lock_push`/`unlock_push` blindam o checkout durante a execução do robô (defesa em
+profundidade: pushurl inválido + hook pre-push que falha).
 """
 
 from __future__ import annotations
@@ -13,6 +15,13 @@ from pathlib import Path
 
 _GIT_TIMEOUT = 300
 
+# pushurl inválido aplicado pelo worker antes de cada execução do robô: qualquer
+# `git push` falha mesmo com rede liberada (defesa em profundidade com o sandbox).
+_PUSH_LOCK_URL = "none://autoia-push-lock"
+
+# Marcador do hook pre-push instalado pelo worker (para remover só o nosso).
+_PUSH_HOOK_MARKER = "# autoia push-lock"
+
 
 class GitError(Exception):
     def __init__(self, args: tuple, stderr: str):
@@ -22,6 +31,10 @@ class GitError(Exception):
 
 
 def run_git(cwd: str, *args: str, check: bool = True, timeout: int = _GIT_TIMEOUT) -> subprocess.CompletedProcess:
+    if not os.path.isdir(cwd):
+        # Checkout removido (ex.: projeto excluído enquanto uma fase rodava) — o
+        # chamador trata como GitError, não como exceção inesperada do subprocess.
+        raise GitError(args, "checkout não existe (removido durante a execução)")
     cmd = ["git", *args]
     env = {**os.environ, "LANG": "C", "LC_ALL": "C"}  # saída determinística (parse de conflito etc.)
     result = subprocess.run(
@@ -123,6 +136,51 @@ def checkout_default(path: str, base: str) -> None:
 
 def current_branch(path: str) -> str:
     return run_git(path, "branch", "--show-current").stdout.strip()
+
+
+def lock_push(path: str) -> None:
+    """Bloqueia push do checkout durante a execução de um robô.
+
+    Defesa em profundidade para o caso mais caro: além da rede restrita do sandbox,
+    força `remote.origin.pushurl` para um destino inválido e instala um hook
+    `pre-push` que sempre falha. `unlock_push` restaura (idempotente: chamar com o
+    lock já aplicado não repete nem apaga o backup).
+    """
+    # Já travado? (backup presente) — não repete nem sobrescreve o backup.
+    if run_git(path, "config", "--get", "autoia.pushurl-backup", check=False).returncode == 0:
+        return
+    current = run_git(path, "config", "--get", "remote.origin.pushurl", check=False).stdout.strip()
+    run_git(path, "config", "autoia.pushurl-backup", current or "<none>")
+    run_git(path, "config", "--unset-all", "remote.origin.pushurl", check=False)
+    run_git(path, "config", "--add", "remote.origin.pushurl", _PUSH_LOCK_URL)
+
+    hooks_dir = os.path.join(path, ".git", "hooks")
+    os.makedirs(hooks_dir, exist_ok=True)
+    hook = os.path.join(hooks_dir, "pre-push")
+    if not os.path.exists(hook):
+        with open(hook, "w", encoding="utf-8") as f:
+            f.write(
+                f"#!/bin/sh\n{_PUSH_HOOK_MARKER}\n"
+                "echo 'autoia: push bloqueado durante a execucao do robo (merge e do worker)' >&2\n"
+                "exit 1\n"
+            )
+        os.chmod(hook, 0o755)
+
+
+def unlock_push(path: str) -> None:
+    """Restaura o pushurl e remove o hook pre-push do autoia (idempotente)."""
+    backup = run_git(path, "config", "--get", "autoia.pushurl-backup", check=False).stdout.strip()
+    if backup:
+        run_git(path, "config", "--unset-all", "autoia.pushurl-backup", check=False)
+        run_git(path, "config", "--unset-all", "remote.origin.pushurl", check=False)
+        if backup and backup != "<none>":
+            run_git(path, "config", "remote.origin.pushurl", backup)
+    hook = os.path.join(path, ".git", "hooks", "pre-push")
+    try:
+        if os.path.isfile(hook) and _PUSH_HOOK_MARKER in Path(hook).read_text(encoding="utf-8"):
+            os.remove(hook)
+    except OSError:
+        pass
 
 
 def has_uncommitted_changes(path: str) -> bool:

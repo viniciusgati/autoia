@@ -26,6 +26,7 @@ const SETTINGS_FIELDS = [
   "allow_external_tasks",
   "auto_summary",
   "default_pipeline_id",
+  "sandbox",
 ] as const;
 
 /** Mensagem de erro da API sem o prefixo de status ("400: detalhe" → "detalhe"). */
@@ -138,6 +139,7 @@ export default function RepoDashboard() {
         allow_external_tasks: repo.allow_external_tasks,
         auto_summary: repo.auto_summary,
         default_pipeline_id: repo.default_pipeline_id,
+        sandbox: repo.sandbox,
       });
       setRepo(updated);
       setBaseRepo(updated);
@@ -344,6 +346,25 @@ export default function RepoDashboard() {
                       placeholder='ex: ["rm -rf /var", "DROP DATABASE"]'
                       onChange={(e) => updateRepo({ ...repo, risky_patterns_extra: e.target.value || null })}
                     />
+                  </div>
+                </div>
+              </details>
+
+              {/* ── Sandbox de execução ── */}
+              <details className="config-section">
+                <summary>Sandbox de execução</summary>
+                <div className="form-stack">
+                  <div className="form-field">
+                    <label className="form-label">Isolamento <HelpTip>Roda as fases dos robôs em um contêiner isolado (nada fora do checkout/estado é gravável). "off" = spawn direto (legado). "fs" = isolamento de arquivos/privilégios com rede host. "full" = isolamento + rede bridge com egress de allowlist (proxy). Requer Docker no host. Config global: AUTOIA_SANDBOX.</HelpTip></label>
+                    <select
+                      value={repo.sandbox ?? ""}
+                      onChange={(e) => updateRepo({ ...repo, sandbox: e.target.value || null })}
+                    >
+                      <option value="">— global (padrão) —</option>
+                      <option value="off">off — sem isolamento</option>
+                      <option value="fs">fs — arquivos e privilégios</option>
+                      <option value="full">full — + rede allowlist</option>
+                    </select>
                   </div>
                 </div>
               </details>

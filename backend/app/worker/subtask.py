@@ -38,8 +38,23 @@ from ..models import (
     TaskStep,
 )
 from . import exec_common, gitops, kimi_exec
+from .sandbox import SandboxConfig
 
 log = logging.getLogger("autoia.worker.subtask")
+
+
+def _sub_sandbox(settings) -> SandboxConfig | None:
+    """Sandbox efetivo do ciclo de subtarefas (só aplica quando é um SandboxConfig;
+    um `Settings` legado tem `sandbox` como string — executa direto)."""
+    sb = getattr(settings, "sandbox", None)
+    return sb if isinstance(sb, SandboxConfig) else None
+
+
+def _sub_extra_env(settings) -> dict[str, str]:
+    sb = _sub_sandbox(settings)
+    base = sb.host_services_base if sb else "http://127.0.0.1"
+    mode = sb.mode if sb else "off"
+    return {"AUTOIA_HOST_SERVICES_BASE": base, "AUTOIA_SANDBOX": mode}
 
 # Arquivos de controle do autoia (não versionados) que NÃO contam como "mudança
 # de código" no guard de re-declaração de subtarefa já implementada.
@@ -404,20 +419,34 @@ def _run_one_implement(
         )
         s.commit()
 
-    outcome = kimi_exec.run_kimi(
-        prompt,
-        cwd=checkout,
-        kimi_bin=settings.kimi_bin,
-        log_path=log_path,
-        timeout=settings.run_timeout,
-        max_identical_calls=settings.max_identical_calls,
-        risky_patterns=settings.risky_patterns,
-        checkout_path=checkout,
-        cost_per_interaction=settings.cost_per_interaction,
-        repo_id=repo_id,
-        stop_file=stop_file,
-        on_event=on_event,
-    )
+    sandbox = _sub_sandbox(settings)
+    try:
+        gitops.lock_push(checkout)
+    except gitops.GitError:
+        log.warning("subtask: não foi possível bloquear push em %s", checkout, exc_info=True)
+    try:
+        outcome = kimi_exec.run_kimi(
+            prompt,
+            cwd=checkout,
+            kimi_bin=settings.kimi_bin,
+            log_path=log_path,
+            timeout=settings.run_timeout,
+            max_identical_calls=settings.max_identical_calls,
+            risky_patterns=settings.risky_patterns,
+            checkout_path=checkout,
+            cost_per_interaction=settings.cost_per_interaction,
+            repo_id=repo_id,
+            stop_file=stop_file,
+            sandbox=sandbox,
+            workspace_dir=getattr(settings, "workspace_dir", None),
+            extra_env=_sub_extra_env(settings),
+            on_event=on_event,
+        )
+    finally:
+        try:
+            gitops.unlock_push(checkout)
+        except gitops.GitError:
+            log.warning("subtask: não foi possível liberar push em %s", checkout, exc_info=True)
 
     with session_factory() as s:
         st = s.get(SubTask, subtask.id)
@@ -626,20 +655,34 @@ def _run_one_verify(
         )
         s.commit()
 
-    outcome = kimi_exec.run_kimi(
-        prompt,
-        cwd=checkout,
-        kimi_bin=settings.kimi_bin,
-        log_path=log_path,
-        timeout=settings.run_timeout,
-        max_identical_calls=settings.max_identical_calls,
-        risky_patterns=settings.risky_patterns,
-        checkout_path=checkout,
-        cost_per_interaction=settings.cost_per_interaction,
-        repo_id=repo_id,
-        stop_file=stop_file,
-        on_event=on_event,
-    )
+    sandbox = _sub_sandbox(settings)
+    try:
+        gitops.lock_push(checkout)
+    except gitops.GitError:
+        log.warning("subtask: não foi possível bloquear push em %s", checkout, exc_info=True)
+    try:
+        outcome = kimi_exec.run_kimi(
+            prompt,
+            cwd=checkout,
+            kimi_bin=settings.kimi_bin,
+            log_path=log_path,
+            timeout=settings.run_timeout,
+            max_identical_calls=settings.max_identical_calls,
+            risky_patterns=settings.risky_patterns,
+            checkout_path=checkout,
+            cost_per_interaction=settings.cost_per_interaction,
+            repo_id=repo_id,
+            stop_file=stop_file,
+            sandbox=sandbox,
+            workspace_dir=getattr(settings, "workspace_dir", None),
+            extra_env=_sub_extra_env(settings),
+            on_event=on_event,
+        )
+    finally:
+        try:
+            gitops.unlock_push(checkout)
+        except gitops.GitError:
+            log.warning("subtask: não foi possível liberar push em %s", checkout, exc_info=True)
 
     with session_factory() as s:
         st = s.get(SubTask, subtask.id)

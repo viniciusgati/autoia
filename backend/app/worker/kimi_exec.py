@@ -15,6 +15,7 @@ watchdogs de progresso: loop de tool calls idênticas, timeout total e timeout d
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import threading
 import time
@@ -22,6 +23,8 @@ import time
 from .. import guardrails
 from .exec_common import (
     ExecOutcome,
+    build_spawn_command,
+    cleanup_container,
     drain_stderr,
     kill_group,
     make_no_progress_watchdog,
@@ -30,6 +33,7 @@ from .exec_common import (
     register_proc,
     unregister_proc,
 )
+from .sandbox import SandboxConfig
 
 # Tipos de evento emitidos para o callback.
 EVENT_TOOL_CALL = "tool_call"
@@ -58,6 +62,9 @@ def run_kimi(
     repo_id: int | None = None,
     stop_file: str | None = None,
     skills_dir: str | None = None,
+    sandbox: SandboxConfig | None = None,
+    workspace_dir: str | None = None,
+    extra_env: dict[str, str] | None = None,
     on_event,
 ) -> KimiOutcome:
     """Roda o kimi e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
@@ -70,6 +77,10 @@ def run_kimi(
 
     `skills_dir` (opcional): diretório no checkout com as skills do projeto
     (`.autoia/skills/`), anunciado ao kimi via `--skills-dir <path>`.
+
+    `sandbox` (opcional): configuração de isolamento — com modo ligado, o comando
+    roda dentro de um contêiner (mesma árvore do checkout); `workspace_dir` é a raiz
+    de workspaces (mount rw) e `extra_env` injeta variáveis no ambiente da execução.
     """
     cmd = [kimi_bin, "-p", prompt, "--output-format", "stream-json"]
     if resume_session_id:
@@ -79,19 +90,36 @@ def run_kimi(
         # Skills do projeto materializadas no checkout (`.autoia/skills/`).
         cmd += ["--skills-dir", skills_dir]
     outcome = KimiOutcome()
+    outcome.sandbox_mode = sandbox.mode if sandbox else None
     log_lock = threading.Lock()
+    # cidfile ABSOLUTO: o docker roda com `cwd=checkout` e um caminho relativo
+    # (ex.: `data/logs/...`) não existe a partir dali → falha na criação do arquivo.
+    cidfile = os.path.join(
+        os.path.dirname(os.path.abspath(log_path)),
+        f".sandbox-cid-{os.getpid()}-{int(time.time()*1000)}",
+    )
 
     with open(log_path, "w", encoding="utf-8") as logf:
-        proc = subprocess.Popen(
+        spawn_cmd, spawn_env = build_spawn_command(
             cmd,
+            cwd=cwd,
+            sandbox=sandbox,
+            cli_bin=kimi_bin,
+            workspace_dir=workspace_dir,
+            extra_env=extra_env,
+            cidfile=cidfile,
+        )
+        proc = subprocess.Popen(
+            spawn_cmd,
             cwd=cwd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
             bufsize=1,
             start_new_session=True,
+            env=spawn_env,
         )
-        register_proc(proc, repo_id=repo_id)
+        register_proc(proc, repo_id=repo_id, cidfile=cidfile if sandbox and sandbox.enabled else None)
 
         stderr_thread = threading.Thread(
             target=drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
@@ -250,4 +278,17 @@ def run_kimi(
     outcome.exit_code = proc.returncode
     outcome.final_text = final_text
     outcome.interaction_count = interactions
+    if sandbox and sandbox.enabled:
+        try:
+            cid = open(cidfile, encoding="utf-8").read().strip()
+            if cid:
+                outcome.container_id = cid
+        except OSError:
+            pass
+        # Limpeza garantida (o watchdog também tenta; aqui não há corrida).
+        cleanup_container(cidfile)
+        try:
+            os.remove(cidfile)
+        except OSError:
+            pass
     return outcome

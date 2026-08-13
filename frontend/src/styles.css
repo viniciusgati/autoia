@@ -4089,6 +4089,16 @@ strong {
   font-variant-numeric: tabular-nums;
 }
 
+.ws-occ-duration {
+  margin-left: 8px;
+  color: var(--ok);
+  font-weight: 600;
+}
+
+.ws-occ-duration-run {
+  color: var(--run, var(--accent));
+}
+
 .ws-occ-section {
   display: flex;
   flex-direction: column;

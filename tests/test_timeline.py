@@ -90,6 +90,51 @@ def test_timeline_complete_with_guardrail(flow, fake_kimi):
     assert any("guardrail" in e["summary"].lower() for e in blocked)
 
 
+def test_timeline_evento_sandbox_tem_resumo(flow, fake_kimi):
+    """O evento de observabilidade `sandbox` (modo, contêiner, overhead) aparece na
+    timeline com resumo humano."""
+    from sqlalchemy import func
+
+    from app.models import RunEvent, Task
+
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))
+
+    with flow["session_factory"]() as s:
+        step = sorted(s.get(Task, task_id).steps, key=lambda x: x.position)[0]
+        max_seq = (
+            s.query(func.max(RunEvent.seq)).filter(RunEvent.step_id == step.id).scalar() or 0
+        )
+        s.add(RunEvent(
+            step_id=step.id,
+            seq=max_seq + 1,
+            kind="sandbox",
+            payload={"mode": "fs", "container_id": "abc123def456", "wall_ms": 820},
+        ))
+        s.add(RunEvent(
+            step_id=step.id,
+            seq=max_seq + 2,
+            kind="secrets_scan",
+            payload={"mounts": ["/home/x/.ssh (expoe segredo: /home/x/.ssh)"], "mode": "fs"},
+        ))
+        s.commit()
+
+    resp = flow["client"].get(f"/api/tasks/{task_id}/timeline")
+    assert resp.status_code == 200
+    sandbox = [e for e in resp.json() if e["name"] == "sandbox"]
+    assert sandbox
+    assert any("fs" in e["summary"] for e in sandbox)
+    assert any("abc123def" in e["summary"] for e in sandbox)
+    assert any("820 ms" in e["summary"] for e in sandbox)
+    scans = [e for e in resp.json() if e["name"] == "varredura de segredos"]
+    assert scans
+    assert any(".ssh" in e["summary"] for e in scans)
+
+
 def test_timeline_milestones_resumo(flow, fake_kimi):
     """A visão compacta (Nível 1) é um subconjunto de marcos — a derivada no backend
     mantém tool_calls como eventos próprios, mas o frontend filtra."""

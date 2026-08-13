@@ -7,21 +7,30 @@ import signal
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+
+from .sandbox import (
+    SandboxConfig,
+    build_bwrap_command,
+    build_sandbox_command,
+    cleanup_container,
+    resolve_cli_path,
+)
 
 # Registro global de subprocessos ativos (kimi/opencode), mapeando cada processo
-# ao `repository_id` do projeto que ele executa (None quando não se aplica).
+# ao `repository_id` do projeto que ele executa (None quando não se aplica) e ao
+# `cidfile` do contêiner do sandbox (se houver — permite `docker rm -f` no kill).
 # Permite matar TODOS no shutdown do worker — os robôs rodam em sessão própria
 # (start_new_session=True) e NÃO morrem quando o worker morre, virando processos
 # órfãos que continuam trabalhando na mesma branch (corrompendo estado) — OU apenas
 # os de UM projeto excluído (parada cooperativa via `repo_stop_path`/`kill_repo_procs`).
-_ACTIVE_PROCS: dict[subprocess.Popen, int | None] = {}
+_ACTIVE_PROCS: dict[subprocess.Popen, tuple[int | None, str | None]] = {}
 _ACTIVE_LOCK = threading.Lock()
 
 
-def register_proc(proc: subprocess.Popen, repo_id: int | None = None) -> None:
+def register_proc(proc: subprocess.Popen, repo_id: int | None = None, cidfile: str | None = None) -> None:
     with _ACTIVE_LOCK:
-        _ACTIVE_PROCS[proc] = repo_id
+        _ACTIVE_PROCS[proc] = (repo_id, cidfile)
 
 
 def unregister_proc(proc: subprocess.Popen) -> None:
@@ -29,15 +38,33 @@ def unregister_proc(proc: subprocess.Popen) -> None:
         _ACTIVE_PROCS.pop(proc, None)
 
 
+def _rm_docker_container(proc: subprocess.Popen) -> None:
+    """Remove o contêiner do sandbox após SIGKILL no docker CLI (evita órfãos).
+
+    O `docker run` com `--sig-proxy` propaga SIGTERM; no caminho de SIGKILL o CLI
+    morre sem derrubar o contêiner — `docker rm -f` limpa pelo cidfile registrado.
+    Best-effort (falha de limpeza não propaga erro). A thread principal do executor
+    também limpa ao final do run (`cleanup_container`), cobrindo a corrida com o
+    `unregister_proc`.
+    """
+    with _ACTIVE_LOCK:
+        cidfile = _ACTIVE_PROCS.get(proc, (None, None))[1]
+    cleanup_container(cidfile)
+
+
+def _signal_group(proc: subprocess.Popen, sig: int) -> None:
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        pass
+
+
 def kill_all_procs() -> None:
     """SIGTERM no grupo de todos os subprocessos ativos (não bloqueia esperando)."""
     with _ACTIVE_LOCK:
         procs = list(_ACTIVE_PROCS)
     for proc in procs:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _signal_group(proc, signal.SIGTERM)
 
 
 def kill_repo_procs(repo_id: int) -> None:
@@ -47,12 +74,9 @@ def kill_repo_procs(repo_id: int) -> None:
     garante que parar um projeto não afeta execuções de outros projetos.
     """
     with _ACTIVE_LOCK:
-        procs = [p for p, rid in _ACTIVE_PROCS.items() if rid == repo_id]
+        procs = [p for p, (rid, _cid) in _ACTIVE_PROCS.items() if rid == repo_id]
     for proc in procs:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            pass
+        _signal_group(proc, signal.SIGTERM)
 
 
 def repo_stop_path(workspace_dir: str, repo_id: int) -> str:
@@ -76,22 +100,28 @@ class ExecOutcome:
     timed_out: bool = False
     abort_reason: str | None = None
     session_id: str | None = None
+    # Observabilidade do sandbox: modo usado e id do contêiner (se houver).
+    sandbox_mode: str | None = None
+    container_id: str | None = None
+    # Violações de segredos detectadas na varredura dos mounts ([] = limpo).
+    sandbox_scan: list[str] = field(default_factory=list)
 
 
 def kill_group(proc: subprocess.Popen) -> None:
-    """SIGTERM no grupo do processo (start_new_session=True); SIGKILL se não sair."""
-    try:
-        os.killpg(proc.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
+    """SIGTERM no grupo do processo (start_new_session=True); SIGKILL se não sair.
+
+    Com o sandbox, o SIGTERM propaga para o contêiner via `--sig-proxy`/`--init`;
+    mas se o docker CLI for morto no meio do startup (ex.: timeout de 1s antes do
+    contêiner anexar), o `--rm` não roda — o contêiner é removido SEMPRE pelo
+    cidfile (`docker rm -f`), best-effort.
+    """
+    _signal_group(proc, signal.SIGTERM)
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
+        _signal_group(proc, signal.SIGKILL)
         proc.wait()
+    _rm_docker_container(proc)
 
 
 def drain_stderr(pipe, logf, lock) -> None:
@@ -168,3 +198,76 @@ def make_stop_watchdog(
     t = threading.Thread(target=_watch, daemon=True, name="stop-watchdog")
     t.start()
     return stop
+
+
+def apply_resource_limits(cmd: list[str], *, as_mb: int = 0, nofile: int = 0) -> list[str]:
+    """Envolve `cmd` em `bash -c` com limites de recurso quando não sandboxado.
+
+    `ulimit -v <as_mb>` (espaço de endereço) e `ulimit -n <nofile>` (fd) protegem o
+    host contra consumo descontrolado da CLI (loop, vazamento de fd). 0 = sem limite.
+    O comando interno é passado como argv (sem interpolação de string) — sem shell
+    injection.
+    """
+    if as_mb <= 0 and nofile <= 0:
+        return cmd
+    pre = []
+    if as_mb > 0:
+        pre.append(f"ulimit -v {as_mb * 1024} 2>/dev/null")
+    if nofile > 0:
+        pre.append(f"ulimit -n {nofile} 2>/dev/null")
+    pre.append('exec "$@"')
+    return ["bash", "-c", "; ".join(pre), "autoia", *cmd]
+
+
+def build_spawn_command(
+    cmd: list[str],
+    *,
+    cwd: str,
+    sandbox: SandboxConfig | None,
+    cli_bin: str | None = None,
+    workspace_dir: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    cidfile: str | None = None,
+) -> tuple[list[str], dict[str, str] | None]:
+    """Monta o comando final do executor: sandbox (docker/bwrap) ou direto + ulimits.
+
+    Retorna `(cmd_final, env)`: `env` None = herda o ambiente do worker; caso
+    contrário é o ambiente do Popen (extra_env injetado em modo não-sandboxado).
+    O stdout do processo final continua sendo o JSONL da CLI — o worker consome igual.
+    """
+    if sandbox is not None and sandbox.enabled:
+        # Resolve o binário da CLI para path absoluto (o mesmo path vale dentro do
+        # contêiner — o diretório é montado no mesmo lugar). Sem isso, `kimi`/`opencode`
+        # bare dependeriam do PATH do contêiner (que pode não ter o dir).
+        inner = list(cmd)
+        resolved = resolve_cli_path(cli_bin, sandbox.home)
+        if resolved and inner and inner[0] == cli_bin:
+            inner[0] = resolved
+        if sandbox.backend == "bwrap":
+            final = build_bwrap_command(
+                inner,
+                checkout=cwd,
+                workspace_dir=workspace_dir or cwd,
+                cli_bin=resolved or cli_bin,
+                home=sandbox.home or os.path.expanduser("~"),
+                extra_env=extra_env,
+            )
+        else:
+            final = build_sandbox_command(
+                inner,
+                config=sandbox,
+                checkout=cwd,
+                workspace_dir=workspace_dir or cwd,
+                cli_bin=resolved or cli_bin,
+                extra_env=extra_env,
+                cidfile=cidfile,
+            )
+        return final or inner, None
+    final = apply_resource_limits(
+        cmd, as_mb=sandbox.ulimit_as_mb if sandbox else 0, nofile=sandbox.ulimit_nofile if sandbox else 0
+    )
+    if extra_env:
+        env = dict(os.environ)
+        env.update(extra_env)
+        return final, env
+    return final, None

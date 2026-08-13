@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from .models import Robot, Task
 
-# Regras de trabalho reforçadas no prompt (orientação — o controle de execução
-# virá com o sandbox; o guardrail de comandos foi removido).
+# Regras de trabalho reforçadas no prompt (orientação — o controle real de execução
+# é o sandbox: as fases rodam isoladas em contêiner, sem capacidade de danificar o
+# host; esta seção guia o comportamento esperado).
 GUARDRAIL_INSTRUCTIONS = """## Regras de trabalho (orientação)
 - Trabalhe SOMENTE dentro do repositório atual (o diretório de trabalho). Prefira usar
   as ferramentas de arquivo (Read/Write/Edit/Glob/Grep) DENTRO do checkout; não deixe
@@ -16,13 +17,18 @@ GUARDRAIL_INSTRUCTIONS = """## Regras de trabalho (orientação)
   deploy) já está provisionada pelo ambiente — NÃO tente instalar, iniciar ou verificar
   serviços do sistema operacional; use as variáveis de ambiente fornecidas (ex.:
   DATABASE_URL) ou mocks nos testes. `curl`/`wget` apenas para loopback
-  (127.0.0.1/localhost) ou hosts de registro de pacotes (ex.: dl.google.com,
-  registry.npmjs.org).
+  (127.0.0.1/localhost), hosts de registro de pacotes (ex.: dl.google.com,
+  registry.npmjs.org) ou `AUTOIA_HOST_SERVICES_BASE` (serviços do host).
 - NÃO rode `git push`. NÃO troque para as branches main/master (`git checkout main`).
   Trabalhe apenas na branch atual — o merge/push da integração é feito pelo sistema.
 - Faça commits locais com `git add -A && git commit -m "mensagem"` quando concluir.
 - Se algo estiver quebrado, corrija o que estiver ao seu alcance e relate o resto.
-  Não invente resultados."""
+  Não invente resultados.
+- A execução roda em um ambiente isolado (sandbox). Use `AUTOIA_HOST_SERVICES_BASE`
+  (ex.: `http://host.docker.internal` quando em modo full) para alcançar serviços que
+  rodam no host — NÃO use `127.0.0.1` para serviços do host se a variável indicar outro
+  endereço. Acesso externo só é permitido a hosts da lista de egress (registros de
+  pacotes); fora dela a conexão é recusada — não tente contornar."""
 
 GIT_WORKFLOW = """### Fluxo de trabalho git
 - Confirme a branch atual com `git status` ou `git branch --show-current` antes de começar.

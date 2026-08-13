@@ -167,6 +167,44 @@ class Settings:
     no_progress_timeout: int = field(
         default_factory=lambda: _int("AUTOIA_NO_PROGRESS_TIMEOUT", 300)
     )
+    # ── Sandbox de execução ────────────────────────────────────────────────────────
+    # Modo de isolamento das execuções dos robôs (ver docs/plano-sandbox-execucao.md):
+    #   "off"  -> spawn direto (comportamento atual; default até o sandbox ser validado)
+    #   "fs"   -> contêiner docker com isolamento de FS/privilégios (rede host, temporário)
+    #   "full" -> contêiner + rede bridge com proxy de egress allowlist (fail-closed)
+    # O modo pode ser sobrescrito por repositório (`Repository.sandbox`).
+    sandbox: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX", "off"))
+    # Imagem base mínima (debian slim etc.). O restante da toolchain vem de mounts ro
+    # do host — não precisa de imagem por ecossistema.
+    sandbox_image: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX_IMAGE", "autoia-sandbox"))
+    sandbox_memory: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX_MEMORY", "4g"))
+    sandbox_cpus: float = field(default_factory=lambda: _float("AUTOIA_SANDBOX_CPUS", 2.0))
+    sandbox_pids_limit: int = field(default_factory=lambda: _int("AUTOIA_SANDBOX_PIDS_LIMIT", 256))
+    sandbox_tmpfs_size: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX_TMPFS_SIZE", "1g"))
+    # Rootfs do contêiner somente-leitura (mounts rw do checkout/estado continuam).
+    sandbox_read_only: bool = field(
+        default_factory=lambda: _env("AUTOIA_SANDBOX_READ_ONLY", "1") == "1"
+    )
+    # tini como PID 1 do contêiner (`--init`): reap de zumbis + forward de sinais.
+    # Default desligado (raça com o mount ro de `/usr` no usrmerge); o kill de
+    # sinais funciona sem ele via --sig-proxy + `docker rm -f` no SIGKILL.
+    sandbox_init: bool = field(
+        default_factory=lambda: _env("AUTOIA_SANDBOX_INIT", "0") == "1"
+    )
+    # Porta do proxy de egress allowlist (modo "full") rodando no host.
+    sandbox_proxy_port: int = field(
+        default_factory=lambda: _int("AUTOIA_SANDBOX_PROXY_PORT", 18080)
+    )
+    # Home do usuário do host (dirs de estado das CLIs são montados de lá). Default:
+    # expanduser("~"). Útil para ambientes de teste com home isolado.
+    sandbox_home: str | None = field(
+        default_factory=lambda: _env("AUTOIA_SANDBOX_HOME", "") or None
+    )
+    # True -> falha do sandbox (docker indisponível) falha a execução (fail-closed).
+    # False -> fallback para execução direta + log de aviso (comportamento transitório).
+    sandbox_fail_closed: bool = field(
+        default_factory=lambda: _env("AUTOIA_SANDBOX_FAIL_CLOSED", "0") == "1"
+    )
 
     def ensure_dirs(self) -> None:
         for d in (

@@ -115,6 +115,18 @@ function fmtTime(iso: string | null): string {
   return d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
 }
 
+/** Formata uma duração em ms como "Xh Ym Zs" (ou "Ym Zs"/"Zs" para tempos curtos). */
+function fmtDur(ms: number | null | undefined): string {
+  if (ms == null || Number.isNaN(ms)) return "";
+  const total = Math.max(0, Math.round(ms));
+  const s = Math.floor((total / 1000) % 60);
+  const m = Math.floor((total / 60000) % 60);
+  const h = Math.floor(total / 3600000);
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
 /** Seletor de "continuar a partir de" (fases já executadas ou todas). */
 function availablePositions(task: Task): { position: number; label: string }[] {
   const sorted = [...task.steps].sort((a, b) => a.position - b.position);
@@ -224,6 +236,12 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
   // Mensagens que o usuário enviou no workspace e motivaram esta execução da fase.
   const interventions = occ.events.filter((e) => e.raw?.kind === "user_intervention");
 
+  // Duração da execução: a do backend quando concluída; em andamento, o tempo
+  // decorrido até agora (atualiza a cada poll de 1,5s da página).
+  const durationMs =
+    occ.duration_ms ??
+    (running && occ.started_at ? Date.now() - new Date(occ.started_at).getTime() : null);
+
   return (
     <article className={`ws-occ ws-occ-${occ.status}`}>
       {running && (
@@ -242,6 +260,11 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
         <span className={`badge ${meta.cls}`}>{meta.label}</span>
         <span className="ws-occ-time">
           {fmtTime(occ.started_at)} {occ.finished_at ? `→ ${fmtTime(occ.finished_at)}` : ""}
+          {durationMs != null && (
+            <span className={`ws-occ-duration${running ? " ws-occ-duration-run" : ""}`}>
+              ⏱ {fmtDur(durationMs)}
+            </span>
+          )}
         </span>
       </header>
 

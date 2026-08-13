@@ -472,6 +472,31 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             timeline.append(_event_base(ev, payload, EV_USER, "tarefa cancelada", "✕ tarefa cancelada — pipeline encerrado", step=step, status="error"))
             continue
 
+        if kind == "sandbox":
+            mode = payload.get("mode") or "off"
+            cid = payload.get("container_id")
+            wall = payload.get("wall_ms")
+            detail = f" (contêiner {cid[:12]})" if cid else ""
+            wall_txt = f" · {wall} ms" if wall is not None else ""
+            timeline.append(_event_base(
+                ev, payload, EV_SYSTEM, "sandbox",
+                f"🛡 execução em sandbox [{mode}]{detail}{wall_txt}",
+                step=step,
+            ))
+            continue
+
+        if kind == "secrets_scan":
+            mounts = payload.get("mounts") or []
+            summary = (
+                f"⚠ varredura de segredos: mounts expõem paths sensíveis — {', '.join(mounts)}"
+                if mounts else "⚠ varredura de segredos: aviso"
+            )
+            timeline.append(_event_base(
+                ev, payload, EV_SYSTEM, "varredura de segredos", summary,
+                step=step, status="error",
+            ))
+            continue
+
         # Evento genérico do worker (worker_recovered, summary_generated, etc.)
         timeline.append(_event_base(
             ev, payload, EV_SYSTEM, kind,
@@ -577,6 +602,7 @@ def _new_occurrence(step: TaskStep, attempt: int, index: int = 1) -> dict:
         "goal": step.goal,
         "started_at": None,
         "finished_at": None,
+        "duration_ms": None,
         "last_activity": None,
         "delivered_text": None,
         "stop": None,
@@ -591,6 +617,13 @@ def _finalize_occurrence(occ: dict, step: TaskStep | None, is_last: bool) -> Non
     if events:
         occ["started_at"] = events[0]["ts"]
         occ["finished_at"] = events[-1]["ts"]
+        # Duração total da execução (determinística, dos timestamps dos eventos).
+        try:
+            start = datetime.fromisoformat(str(occ["started_at"]))
+            end = datetime.fromisoformat(str(occ["finished_at"]))
+            occ["duration_ms"] = max(int((end - start).total_seconds() * 1000), 0)
+        except (TypeError, ValueError):
+            occ["duration_ms"] = None
 
     last_terminal = None
     for ev in events:

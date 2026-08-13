@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 import time
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -387,43 +388,49 @@ def run_api() -> None:
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)
 
 
-def run_worker() -> None:
-    import argparse
+def _worker_setup(settings: Settings, *, recover: bool, logger) -> object:
+    """Engine/session + (opcional) recuperação de órfãos + proxy egress.
+
+    Retorna a session_factory. `recover` só é True para o PRIMEIRO processo do
+    grupo (o pai): se cada processo recuperasse no startup, um worker mais lento
+    resetaria para `pending` uma fase que outro acabou de reclamar → a mesma fase
+    roda 2× em paralelo (bug real observado com `--workers 3`).
+    """
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)  # não depende da API ter subido antes
+    migrate_schema(engine)
+    session_factory = make_session_factory(engine)
+    if recover:
+        recovered = recover_stale_steps(session_factory)
+        if recovered:
+            logger.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
+
+    from app.worker import sandbox as sandbox_mod
+
+    if sandbox_mod.normalize_mode(settings.sandbox) == sandbox_mod.SANDBOX_FULL:
+        port = sandbox_mod.ensure_egress_proxy(settings.sandbox_proxy_port, settings.whitelisted_hosts)
+        logger.info("sandbox full: proxy de egress allowlist na porta %s", port)
+    return engine, session_factory
+
+
+def _worker_process(settings: Settings, logger) -> None:
+    """Loop do worker num processo. Cria engine/sessão PRÓPRIOS (após o fork — o
+    pool de conexões do pai não é fork-safe). Sem lock/recover: o grupo já garantiu."""
+    _engine, session_factory = _worker_setup(settings, recover=False, logger=logger)
+    worker_loop(settings, session_factory, settings.workspace_dir)
+
+
+def _worker_main(settings: Settings) -> None:
+    """Worker de instância única (`--workers 1`): lock exclusivo + recover + loop."""
     import signal
-    import sys
 
-    parser = argparse.ArgumentParser(description="autoia worker")
-    parser.add_argument("--workers", type=int, default=1, help="número de workers (threads)")
-    args = parser.parse_known_args()[0]  # ignora args desconhecidos (uvicorn pode injetar)
+    from app.worker import exec_common
 
-    # Instância única: o pipeline executa UMA fase por task por vez. Threads
-    # paralelas (`--workers N`) com o mesmo processo contornam a garantia do
-    # flock e, se um rewind resetar uma fase running, duas threads reclamam fases
-    # da MESMA task em paralelo → estado corrompido (ver `_rewind_pipeline`).
-    if args.workers > 1:
-        print(
-            "worker não suporta --workers > 1: a autoia executa UMA fase por task "
-            "por vez (workers paralelos corrompem o estado). Remova a opção ou use "
-            "--workers 1.",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    logging.basicConfig(
-        level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
-    )
     logger = logging.getLogger("autoia.worker")
-    settings = Settings()
-    settings.ensure_dirs()
-
-    # Instância única: um segundo `autoia-worker` se recusa a iniciar (evita
-    # dois workers disputando as mesmas tasks → fases rodando em paralelo).
     lock = acquire_worker_lock(os.path.join(settings.workspace_dir, "worker.lock"))
     if lock is None:
         try:
-            pid = open(
-                os.path.join(settings.workspace_dir, "worker.lock"), encoding="utf-8"
-            ).read().strip()
+            pid = open(os.path.join(settings.workspace_dir, "worker.lock"), encoding="utf-8").read().strip()
         except OSError:
             pid = "?"
         print(
@@ -432,32 +439,85 @@ def run_worker() -> None:
         )
         sys.exit(1)
 
-    # No shutdown, mata os subprocessos ativos: os robôs rodam em sessão própria
-    # (start_new_session=True) e, sem isso, virariam órfãos continuando a trabalhar
-    # na mesma branch (corrompendo estado) após restart do worker.
     def _on_shutdown(signum, _frame):
         logger.info("worker recebeu sinal %s — encerrando subprocessos", signum)
-        from app.worker import exec_common
-
         exec_common.kill_all_procs()
         os._exit(0)
 
     signal.signal(signal.SIGTERM, _on_shutdown)
     signal.signal(signal.SIGINT, _on_shutdown)
-
-    # Engine/session compartilhados e recuperação de steps órfãos UMA única vez
-    # ANTES de spawnar as threads. Rodar dentro de cada thread (como antes) tinha
-    # corrida: duas threads recuperavam o mesmo step running ao mesmo tempo e ambas
-    # o reclamavam → duas execuções da mesma fase em paralelo.
-    engine = make_engine(settings.database_url)
-    Base.metadata.create_all(engine)  # não depende da API ter subido antes
-    migrate_schema(engine)
-    session_factory = make_session_factory(engine)
-    recovered = recover_stale_steps(session_factory)
-    if recovered:
-        logger.info("worker recuperou %s step(s) running órfão(s) para re-execução", recovered)
-
+    _engine, session_factory = _worker_setup(settings, recover=True, logger=logger)
     worker_loop(settings, session_factory, settings.workspace_dir)
+
+
+def run_worker() -> None:
+    import argparse
+    import signal
+
+    parser = argparse.ArgumentParser(description="autoia worker")
+    parser.add_argument("--workers", type=int, default=1, help="número de processos de worker")
+    args = parser.parse_known_args()[0]  # ignora args desconhecidos (uvicorn pode injetar)
+
+    # O pipeline executa UMA fase por task por vez — garantido pelo claim atômico
+    # (`claim_next`). Com `--workers N`, N PROCESSOS rodam fases de tasks diferentes
+    # em paralelo. Threads no mesmo processo não são usadas (contornam o lock e
+    # corrompem o estado). O grupo multi-worker é UM dono: o pai segura o lock
+    # EXCLUSIVO (um segundo `autoia-worker` é recusado), recupera órfãos UMA vez
+    # antes do fork, e os filhos só rodam o loop (sem lock/recover — evita que a
+    # recuperação de um filho resetasse uma fase recém-reclamada por outro).
+    workers = max(1, args.workers or 1)
+
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
+    )
+    logger = logging.getLogger("autoia.worker")
+    settings = Settings()
+    settings.ensure_dirs()
+
+    if workers == 1:
+        _worker_main(settings)
+        return
+
+    lock_path = os.path.join(settings.workspace_dir, "worker.lock")
+    lock = acquire_worker_lock(lock_path)
+    if lock is None:
+        try:
+            pid = open(lock_path, encoding="utf-8").read().strip()
+        except OSError:
+            pid = "?"
+        print(
+            f"worker já está rodando (PID {pid}); não é possível iniciar outro.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Recuperação de órfãos UMA única vez, no pai, ANTES de qualquer filho claimar.
+    parent_engine, _sf = _worker_setup(settings, recover=True, logger=logger)
+    parent_engine.dispose()  # fecha o pool antes do fork (os filhos criam o próprio)
+
+    logger.info("iniciando %s processos de worker (parallelismo por task)", workers)
+    children: list[int] = []
+    for _ in range(workers):
+        pid = os.fork()
+        if pid == 0:  # filho: loop puro, sem lock/recover (engine próprio)
+            try:
+                _worker_process(settings, logger)
+            finally:
+                os._exit(0)
+        children.append(pid)
+
+    def _on_signal(signum, _frame):
+        logger.info("pai recebeu sinal %s — encaminhando para os workers", signum)
+        for pid in children:
+            try:
+                os.kill(pid, signum)
+            except ProcessLookupError:
+                pass
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+    for pid in children:
+        os.waitpid(pid, 0)
 
 
 if __name__ == "__main__":

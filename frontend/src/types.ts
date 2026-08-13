@@ -17,6 +17,8 @@ export interface Repository {
   allow_external_tasks: boolean;
   default_pipeline_id: number | null;
   auto_summary: boolean;
+  /** Modo de sandbox de execução do projeto: null (herda global) | "off" | "fs" | "full". */
+  sandbox: string | null;
 }
 
 /** Informações para o diálogo de confirmação de exclusão do projeto
@@ -352,6 +354,8 @@ export interface WorkspaceOccurrence {
   mission_source: string | null;
   started_at: string | null;
   finished_at: string | null;
+  /** Duração total desta execução em ms (dos timestamps dos eventos; null se incompleta). */
+  duration_ms: number | null;
   last_activity: string | null;
   delivered_text: string | null;
   delivered: StepSummary | null;

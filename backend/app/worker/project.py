@@ -87,6 +87,14 @@ instruções abaixo além do que estiver no seu prompt.
 ## Banco de dados
 {db_rule}
 
+## Ambiente de execução (sandbox)
+- Sua execução roda isolada em um contêiner (sem acesso de escrita fora do checkout).
+- Serviços que rodam no HOST (ex.: a API do autoia em :9000, o webbridge em :10086)
+  são alcançados pela variável `AUTOIA_HOST_SERVICES_BASE` — use-a em vez de
+  `127.0.0.1` (ex.: `curl $AUTOIA_HOST_SERVICES_BASE:9000/health`).
+- Acesso externo é restrito a uma allowlist (registros de pacotes). Fora dela, a
+  conexão é recusada — não tente contornar.
+
 ## Padrão obrigatório
 - Trabalhe SOMENTE na tecnologia deste repositório (linguagem, framework, bibliotecas,
   estrutura e convenções de código). Não introduza outra linguagem, framework ou padrão

@@ -43,7 +43,8 @@ backend/app/            # pacote `app`
     exec_common.py      # ExecOutcome + kill por grupo/watchdog (compartilhado)
     kimi_exec.py        # subprocess do kimi (stream-json): streaming JSONL, timeout, kill
     opencode_exec.py    # subprocess do opencode (--format json): tool_use, custo REAL
-    gitops.py           # clone/branch/commit/merge/push/checkout_default/diff
+    sandbox.py          # sandbox de execução (docker/bwrap): mounts, flags, rede, proxy egress
+    gitops.py           # clone/branch/commit/merge/push/checkout_default/diff + lock/unlock push
     project.py          # detecção de ecossistema + AGENTS.md gerado no checkout
     arch_metric.py      # métrica de mudança de arquitetura/deploy (evento arch_metric)
     summarizer.py       # resumo estruturado do desenvolvimento via executor (autoia_summary.json)
@@ -111,11 +112,29 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   arriscados foi **removido** — a detecção era pós-emissão (o comando já rodava quando a
   `tool_call` chegava no stream), não impedia o dano e gerava falsos positivos que
   interrompiam trabalho legítimo (curl em loopback, `git push` em repo local de teste).
-  A proteção real virá com o **sandbox de execução** (ainda a fazer). Permanecem: loop de
-  mesma tool call N vezes (`max_identical_calls`) → kill; timeout por fase
-  (`AUTOIA_RUN_TIMEOUT`); watchdog de "sem progresso" (`AUTOIA_NO_PROGRESS_TIMEOUT`).
-  `guardrails.py` mantém `GuardrailViolation` (usado pelo watchdog de loop) e as funções
-  de análise — sem uso de enforcement por enquanto.
+  A proteção real é o **sandbox de execução** (`backend/app/worker/sandbox.py`):
+  os executores rodam a CLI dentro de um contêiner (`docker run`) com FS do host fora
+  do checkout/estado das CLIs somente-leitura ou ausente, `--cap-drop ALL`,
+  `no-new-privileges`, sem root, `--pids-limit`/`--memory`/`--cpus`, tmpfs `/tmp`
+  (ou bind quando o checkout/fake fica sob `/tmp`) e `--workdir` = checkout (mesmo path
+  absoluto, para o gitops do worker e o robô verem a mesma árvore). Modos (`Settings.sandbox`
+  / `Repository.sandbox`, env `AUTOIA_SANDBOX`): `off` (spawn direto; default até validado
+  em produção) | `fs` (isolamento de FS/privilégios, rede host — transitório) | `full`
+  (rede bridge + `host.docker.internal` + proxy de egress allowlist no host, fail-closed,
+  mesma lista de `config.DEFAULT_WHITELISTED_HOSTS`). Fallback: `AUTOIA_SANDBOX_FAIL_CLOSED=1`
+  faz a falha do sandbox (docker indisponível) falhar a execução; sem ele, cai para direto
+  com aviso no log. Permanecem os watchdogs de progresso: loop de tool calls idênticas
+  (`max_identical_calls`) → kill; timeout por fase (`AUTOIA_RUN_TIMEOUT`); watchdog de
+  "sem progresso" (`AUTOIA_NO_PROGRESS_TIMEOUT`). Kill/stop file matam o contêiner
+  (SIGTERM via `--sig-proxy` + `docker rm -f` pelo `--cidfile` registrado em
+  `exec_common._ACTIVE_PROCS`). `guardrails.py` mantém `GuardrailViolation` (usado pelo
+  watchdog de loop) e as funções de análise — sem uso de enforcement por enquanto.
+- **Push bloqueado durante o robô** (`gitops.lock_push`/`unlock_push`): antes de cada
+  execução o worker força `remote.origin.pushurl` para `none://` + hook `pre-push` que
+  falha (restaurado no `finally`); defesa em profundidade com a rede restrita do sandbox.
+- **Serviços do host**: o robô acessa o host por `AUTOIA_HOST_SERVICES_BASE`
+  (`http://host.docker.internal` no modo `full`, senão `http://127.0.0.1`) — orientação no
+  prompt (`GUARDRAIL_INSTRUCTIONS`) e no `AGENTS.md` gerado (`worker/project.py`).
 - **Observabilidade**: **toda** interação vira `RunEvent` (assistant_text, tool_call,
   tool_result, system…) com payload **completo, sem truncar**. Log bruto em
   `data/logs/<step_id>.log`.

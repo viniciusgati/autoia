@@ -26,6 +26,8 @@ class RepositoryCreate(BaseModel):
     allow_external_tasks: bool = False
     default_pipeline_id: int | None = None
     auto_summary: bool = False
+    # Modo de sandbox de execução do projeto: None herda o global; "off"|"fs"|"full".
+    sandbox: str | None = None
 
 
 class RepositoryUpdate(BaseModel):
@@ -44,6 +46,7 @@ class RepositoryUpdate(BaseModel):
     allow_external_tasks: bool | None = None
     default_pipeline_id: int | None = None
     auto_summary: bool | None = None
+    sandbox: str | None = None
 
 
 class RepositoryOut(BaseModel):
@@ -67,6 +70,7 @@ class RepositoryOut(BaseModel):
     allow_external_tasks: bool = False
     default_pipeline_id: int | None = None
     auto_summary: bool = False
+    sandbox: str | None = None
 
 
 class RepositoryDeleteInfo(BaseModel):
@@ -486,6 +490,8 @@ class WorkspaceOccurrenceOut(BaseModel):
     mission_source: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+    # Duração total desta execução em ms (dos timestamps dos eventos; None se incompleta).
+    duration_ms: int | None = None
     last_activity: str | None = None
     delivered_text: str | None = None
     delivered: StepSummaryOut | None = None

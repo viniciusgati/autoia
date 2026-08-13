@@ -58,6 +58,25 @@ def test_workspace_derives_occurrences(flow, fake_kimi):
     assert len(occ[0]["events"]) >= 1
 
 
+def test_workspace_occurrence_has_duration_ms(flow, fake_kimi):
+    """Workspace: cada ocorrência de fase traz a duração total (ms), derivada dos
+    timestamps dos eventos — determinística, sem LLM."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))
+
+    data = flow["client"].get(f"/api/tasks/{task_id}/workspace").json()
+    occ = data["occurrences"][0]
+    assert occ["status"] == "done"
+    assert occ["started_at"] and occ["finished_at"]
+    assert isinstance(occ["duration_ms"], int)
+    # a fase executou em tempo real (não instântanea nem negativa)
+    assert occ["duration_ms"] >= 0
+
+
 def test_workspace_ignores_ghost_events_on_unrun_steps(flow, fake_kimi):
     """Eventos de PM/worker ancorados num step que NUNCA executou (ex.: pm_decision
     no último step) NÃO criam ocorrência fantasma — a timeline fica em ordem real."""

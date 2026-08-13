@@ -26,6 +26,41 @@ def test_worker_lock_single_instance(tmp_path):
     again.close()
 
 
+def test_worker_lock_shared_permite_varios_e_bloqueia_avulso(tmp_path):
+    """Workers multi-processo (lock compartilhado) coexistem; um `--workers 1`
+    avulso (exclusivo) é recusado enquanto houver workers compartilhados."""
+    lock_path = str(tmp_path / "worker.lock")
+
+    a = acquire_worker_lock(lock_path, shared=True)
+    b = acquire_worker_lock(lock_path, shared=True)
+    assert a is not None and b is not None  # N workers compartilham
+
+    avulso = acquire_worker_lock(lock_path)  # exclusivo
+    assert avulso is None  # recusado com workers compartilhados ativos
+
+    a.close()
+    b.close()
+    avulso = acquire_worker_lock(lock_path)
+    assert avulso is not None
+    avulso.close()
+
+
+def test_worker_lock_exclusivo_recusa_shared(tmp_path):
+    """Instância única (exclusivo) ativa → workers compartilhados são recusados."""
+    lock_path = str(tmp_path / "worker.lock")
+
+    first = acquire_worker_lock(lock_path)  # exclusivo
+    assert first is not None
+
+    shared = acquire_worker_lock(lock_path, shared=True)
+    assert shared is None
+
+    first.close()
+    shared = acquire_worker_lock(lock_path, shared=True)
+    assert shared is not None
+    shared.close()
+
+
 def test_claim_never_runs_two_phases_of_same_task(flow):
     """Com um step já running, o claim não pega outra fase da MESMA task.
 
@@ -101,3 +136,132 @@ def test_heartbeat_keeps_fresh_during_execution(tmp_path):
     finally:
         stop.set()
         thread.join(timeout=1)
+
+
+def test_multi_worker_processes_claim_different_tasks(flow, tmp_path):
+    """Dois processos de worker reclamam fases de TASKS diferentes em paralelo
+    (claim atômico nunca deixa duas fases da MESMA task running)."""
+    import logging
+
+    from app.db import make_engine, make_session_factory
+
+    client = flow["client"]
+    # segunda task no mesmo repo, iniciada
+    task2 = client.post(
+        "/api/tasks",
+        json={"repository_id": 1, "pipeline_id": 1, "title": "t2", "description": "d", "kind": "feature"},
+    ).json()
+    client.post(f"/api/tasks/{task2['id']}/start")
+
+    def child(db_url):
+        # cada processo de worker cria engine/sessão próprios (fork-safe)
+        sf = make_session_factory(make_engine(db_url))
+        from app.worker import runner as r
+
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            step_id = r.claim_next(sf)
+            if step_id is not None:
+                with sf() as s:
+                    st = s.get(r.TaskStep, step_id)
+                    st.status = "running"
+                    s.commit()
+                os._exit(0)
+            time.sleep(0.05)
+        os._exit(1)  # não conseguiu claim em tempo hábil
+
+    pids = []
+    for _ in range(2):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                child(flow["settings"].database_url)
+            finally:
+                os._exit(1)
+        pids.append(pid)
+    for pid in pids:
+        os.waitpid(pid, 0)
+
+    # as duas tasks têm EXATAMENTE uma fase running cada (uma por worker)
+    with flow["session_factory"]() as s:
+        from app.models import Task
+
+        running_by_task = {}
+        for t in s.query(Task).all():
+            running_by_task[t.id] = [
+                st for st in t.steps if st.status == "running"
+            ]
+    assert len(running_by_task.get(flow["task"]["id"], [])) == 1
+    assert len(running_by_task.get(task2["id"], [])) == 1
+
+
+def test_worker_setup_recover_so_no_pai(flow, monkeypatch):
+    """Regressão do double-claim com `--workers N`: a recuperação de órfãos roda
+    SOMENTE no pai do grupo (`recover=True`); os filhos (`recover=False`) NÃO
+    recuperam — se um filho recuperasse no startup, resetaria para `pending` a fase
+    que outro filho acabou de reclamar → a MESMA fase roda 2× em paralelo."""
+    import logging
+
+    from app import main as app_main
+    from app.main import _worker_setup
+
+    calls = []
+    monkeypatch.setattr(app_main, "recover_stale_steps", lambda sf: calls.append(1) or 0)
+
+    engine, sf = _worker_setup(flow["settings"], recover=False, logger=logging.getLogger("t"))
+    assert calls == []  # filho: sem recuperação
+    engine.dispose()
+
+    engine, sf = _worker_setup(flow["settings"], recover=True, logger=logging.getLogger("t"))
+    assert len(calls) == 1  # pai: recupera exatamente uma vez
+    engine.dispose()
+
+
+def test_multi_worker_uma_task_muitos_steps_so_um_running(flow, tmp_path):
+    """Vários workers contra UMA task com todos os steps pendentes: no máximo UMA
+    fase running (claim atômico + sem recuperação nos filhos)."""
+    import logging
+
+    from app.db import make_engine, make_session_factory
+    from app.models import TaskStep
+
+    sf = flow["session_factory"]
+    # deixa todos os steps da task pendentes
+    with sf() as s:
+        t = s.get(runner.Task, flow["task"]["id"])
+        for st in t.steps:
+            st.status = "pending"
+        t.status = "queued"
+        s.commit()
+
+    def child(db_url):
+        sf2 = make_session_factory(make_engine(db_url))
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            step_id = runner.claim_next(sf2)
+            if step_id is not None:
+                with sf2() as s:
+                    st = s.get(TaskStep, step_id)
+                    st.status = "running"
+                    s.commit()
+                os._exit(0)
+            time.sleep(0.05)
+        os._exit(1)
+
+    pids = []
+    for _ in range(3):
+        pid = os.fork()
+        if pid == 0:
+            try:
+                child(flow["settings"].database_url)
+            finally:
+                os._exit(1)
+        pids.append(pid)
+    for pid in pids:
+        os.waitpid(pid, 0)
+
+    # mesmo com 3 workers e a task cheia de pendentes: apenas UMA fase running
+    with sf() as s:
+        t = s.get(runner.Task, flow["task"]["id"])
+        running = [st for st in t.steps if st.status == "running"]
+        assert len(running) == 1

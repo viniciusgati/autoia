@@ -58,7 +58,18 @@ from ..models import (
     TaskProposal,
     TaskStep,
 )
-from . import arch_metric, exec_common, gitops, handoff, kimi_exec, opencode_exec, project, subtask
+from . import (
+    arch_metric,
+    exec_common,
+    gitops,
+    handoff,
+    kimi_exec,
+    opencode_exec,
+    project,
+    sandbox as sandbox_mod,
+    subtask,
+)
+from .sandbox import SandboxConfig
 
 log = logging.getLogger("autoia.worker")
 
@@ -93,6 +104,33 @@ class EffectiveSettings:
     branch_prefix: str
     max_identical_calls: int
     no_progress_timeout: int
+    sandbox: sandbox_mod.SandboxConfig
+
+
+def _sandbox_config(settings: Settings, repo: Repository) -> sandbox_mod.SandboxConfig:
+    """Configuração efetiva do sandbox para o projeto (repo > global).
+
+    `host_services_base` vira `http://host.docker.internal` no modo `full` (o
+    contêiner alcança o host pelo host-gateway) e `http://127.0.0.1` caso contrário
+    (rede host/loopback direto). O mesmo valor é injetado no ambiente da execução
+    como `AUTOIA_HOST_SERVICES_BASE` para os robôs usarem.
+    """
+    mode = sandbox_mod.normalize_mode(repo.sandbox or settings.sandbox)
+    base = "http://host.docker.internal" if mode == sandbox_mod.SANDBOX_FULL else "http://127.0.0.1"
+    return sandbox_mod.SandboxConfig(
+        mode=mode,
+        image=settings.sandbox_image,
+        memory=settings.sandbox_memory,
+        cpus=settings.sandbox_cpus,
+        pids_limit=settings.sandbox_pids_limit,
+        tmpfs_size=settings.sandbox_tmpfs_size,
+        read_only=settings.sandbox_read_only,
+        init=settings.sandbox_init,
+        proxy_port=settings.sandbox_proxy_port,
+        home=settings.sandbox_home,
+        fail_closed=settings.sandbox_fail_closed,
+        host_services_base=base,
+    )
 
 
 def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
@@ -122,6 +160,7 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         workspace_dir=settings.workspace_dir,
         max_identical_calls=settings.max_identical_calls,
         no_progress_timeout=settings.no_progress_timeout,
+        sandbox=_sandbox_config(settings, repo),
     )
 
 
@@ -224,27 +263,33 @@ def _task_workspace(settings, repo_id: int, task_id: int) -> str:
     return os.path.join(settings.workspace_dir, str(repo_id), f"task_{task_id}")
 
 
-def acquire_worker_lock(lock_path: str) -> object | None:
-    """Trava de instância única do worker (flock não-bloqueante).
+def acquire_worker_lock(lock_path: str, shared: bool = False) -> object | None:
+    """Trava de worker (flock). Retorna o handle se adquirido, ou None se negado.
 
-    Retorna o handle do lock se adquirido, ou None se outro worker já está
-    rodando. O lock é liberado automaticamente quando o processo morre
-    (sem lock órfão); o PID é gravado no arquivo para diagnóstico.
-    Usa modo append: não trunca o arquivo antes do flock (senão o segundo
-    worker apagaria o PID do primeiro ao tentar adquirir).
+    - `shared=False` (default): lock EXCLUSIVO — instância única. Um segundo
+      `autoia-worker` se recusa a iniciar.
+    - `shared=True`: lock COMPARTILHADO — usada pelos N processos de um worker
+      multi-processo (`--workers N`): vários workers coexistem, mas um worker
+      avulso (`--workers 1`, exclusivo) é recusado enquanto houver workers
+      compartilhados (e vice-versa).
+
+    O lock é liberado automaticamente quando o processo morre; o PID é gravado no
+    arquivo para diagnóstico. Usa modo append: não trunca o arquivo antes do flock
+    (senão o segundo worker apagaria o PID do primeiro ao tentar adquirir).
     """
     import fcntl
 
     os.makedirs(os.path.dirname(lock_path), exist_ok=True)
     handle = open(lock_path, "a+", encoding="utf-8")
+    flag = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle, flag | fcntl.LOCK_NB)
     except OSError:
         handle.close()
         return None
     handle.seek(0)
     handle.truncate()
-    handle.write(str(os.getpid()))
+    handle.write(f"{os.getpid()}{' (shared)' if shared else ''}")
     handle.flush()
     return handle
 
@@ -699,51 +744,140 @@ def _run_executor(
     `repo_id` identifica o projeto no registro de subprocessos ativos e alimenta o
     watchdog de parada cooperativa (`stop_file`): se a API excluir o projeto
     enquanto o robô roda, o processo é morto.
+
+    O sandbox vem de `eff.sandbox`: com modo ligado, o comando roda dentro de um
+    contêiner (mesma árvore do checkout). No modo `full`, garante o proxy de egress
+    allowlist no host e libera o host do remote git do projeto (fetch para resolver
+    merge sem quebrar). Falha do sandbox (docker indisponível) → falha a execução
+    se `fail_closed`, senão cai para execução direta com aviso no log.
+
+    O push do checkout é bloqueado durante toda a execução (`lock_push`/`unlock_push`)
+    — defesa em profundidade: nem a CLI nem o robô conseguem fazer push, mesmo com
+    a rede liberada. Restaurado no finally (funciona para qualquer executor, PM,
+    missões e resumos em background).
     """
     stop_file = (
         exec_common.repo_stop_path(eff.workspace_dir, repo_id)
         if repo_id is not None
         else None
     )
-    if executor == "opencode":
-        return opencode_exec.run_opencode(
-            prompt,
-            cwd=cwd,
-            opencode_bin=eff.opencode_bin,
-            log_path=log_path,
-            timeout=eff.run_timeout,
-            max_identical_calls=eff.max_identical_calls,
-            risky_patterns=eff.risky_patterns,
-            checkout_path=cwd,
-            whitelisted_hosts=eff.whitelisted_hosts,
-            model=model,
-        no_progress_timeout=eff.no_progress_timeout,
-        repo_id=repo_id,
-        stop_file=stop_file,
-        on_event=on_event,
-    )
-    return kimi_exec.run_kimi(
-        prompt,
-        cwd=cwd,
-        kimi_bin=eff.kimi_bin,
-        log_path=log_path,
-        timeout=eff.run_timeout,
-        max_identical_calls=eff.max_identical_calls,
-        risky_patterns=eff.risky_patterns,
-        checkout_path=cwd,
-        whitelisted_hosts=eff.whitelisted_hosts,
-        cost_per_interaction=(
-            kimi_cost_per_interaction
-            if kimi_cost_per_interaction is not None
-            else eff.cost_per_interaction
-        ),
-        no_progress_timeout=eff.no_progress_timeout,
-        resume_session_id=resume_session_id,
-        repo_id=repo_id,
-        stop_file=stop_file,
-        skills_dir=skills_dir,
-        on_event=on_event,
-    )
+    sandbox = eff.sandbox
+    extra_env = {"AUTOIA_HOST_SERVICES_BASE": sandbox.host_services_base, "AUTOIA_SANDBOX": sandbox.mode}
+    # Resultado da varredura de segredos dos mounts ([] = limpo).
+    sandbox_scan: list[str] = []
+    if sandbox.enabled:
+        # Modo full: proxy de egress + liberar o host do remote git (fetch p/ merge).
+        if sandbox.mode == sandbox_mod.SANDBOX_FULL:
+            sandbox_mod.ensure_egress_proxy(sandbox.proxy_port, eff.whitelisted_hosts)
+            try:
+                remote_url = gitops.run_git(cwd, "remote", "get-url", "origin", check=False).stdout.strip()
+                if "://" in remote_url:
+                    host = remote_url.split("://")[1].split("/")[0]
+                elif remote_url.startswith(("git@", "ssh://")):
+                    host = remote_url.split("@")[-1].split(":")[0]
+                else:
+                    host = ""
+                if host:
+                    sandbox_mod.add_proxy_hosts([host])
+            except gitops.GitError:
+                pass
+        if not (sandbox_mod.docker_available() and sandbox_mod.docker_image_available(sandbox.image)):
+            if sandbox.fail_closed:
+                # Fail-closed: sem sandbox não há execução (meta: falha do sandbox
+                # → falha da execução, nunca dano).
+                outcome = exec_common.ExecOutcome()
+                outcome.aborted = True
+                outcome.abort_reason = (
+                    f"sandbox {sandbox.mode} obrigatório mas docker/imagem "
+                    f"{sandbox.image} indisponíveis (fail-closed)"
+                )
+                outcome.sandbox_mode = sandbox.mode
+                return outcome
+            log.warning(
+                "sandbox %s solicitado mas docker/imagem %s indisponível — executando sem "
+                "isolamento (fallback transitório; AUTOIA_SANDBOX_FAIL_CLOSED=1 para falhar)",
+                sandbox.mode, sandbox.image,
+            )
+            sandbox = SandboxConfig(mode=sandbox_mod.SANDBOX_OFF)
+        else:
+            # Varredura de segredos dos mounts EFETIVOS (chaves SSH, credenciais…):
+            # avisa sempre; com fail_closed, aborta a execução se algo sensível
+            # entrou como mount (regressão do builder é pega na hora).
+            scan_cli = eff.opencode_bin if executor == "opencode" else eff.kimi_bin
+            sandbox_scan = sandbox_mod.scan_secret_mounts(sandbox, cwd, eff.workspace_dir, scan_cli)
+            if sandbox_scan:
+                log.warning(
+                    "sandbox: varredura de segredos encontrou mounts expostos: %s",
+                    sandbox_scan,
+                )
+                if sandbox.fail_closed:
+                    outcome = exec_common.ExecOutcome()
+                    outcome.aborted = True
+                    outcome.abort_reason = (
+                        f"secrets_scan: mounts expõem segredos do host: {sandbox_scan}"
+                    )
+                    outcome.sandbox_mode = sandbox.mode
+                    outcome.sandbox_scan = sandbox_scan
+                    return outcome
+    try:
+        gitops.lock_push(cwd)
+    except gitops.GitError:
+        log.warning("não foi possível bloquear push no checkout %s", cwd, exc_info=True)
+    try:
+        if executor == "opencode":
+            outcome = opencode_exec.run_opencode(
+                prompt,
+                cwd=cwd,
+                opencode_bin=eff.opencode_bin,
+                log_path=log_path,
+                timeout=eff.run_timeout,
+                max_identical_calls=eff.max_identical_calls,
+                risky_patterns=eff.risky_patterns,
+                checkout_path=cwd,
+                whitelisted_hosts=eff.whitelisted_hosts,
+                model=model,
+                no_progress_timeout=eff.no_progress_timeout,
+                repo_id=repo_id,
+                stop_file=stop_file,
+                sandbox=sandbox,
+                workspace_dir=eff.workspace_dir,
+                extra_env=extra_env,
+                on_event=on_event,
+            )
+        else:
+            outcome = kimi_exec.run_kimi(
+                prompt,
+                cwd=cwd,
+                kimi_bin=eff.kimi_bin,
+                log_path=log_path,
+                timeout=eff.run_timeout,
+                max_identical_calls=eff.max_identical_calls,
+                risky_patterns=eff.risky_patterns,
+                checkout_path=cwd,
+                whitelisted_hosts=eff.whitelisted_hosts,
+                cost_per_interaction=(
+                    kimi_cost_per_interaction
+                    if kimi_cost_per_interaction is not None
+                    else eff.cost_per_interaction
+                ),
+                no_progress_timeout=eff.no_progress_timeout,
+                resume_session_id=resume_session_id,
+                repo_id=repo_id,
+                stop_file=stop_file,
+                skills_dir=skills_dir,
+                sandbox=sandbox,
+                workspace_dir=eff.workspace_dir,
+                extra_env=extra_env,
+                on_event=on_event,
+            )
+        if sandbox_scan and not outcome.sandbox_scan:
+            outcome.sandbox_scan = sandbox_scan
+        return outcome
+    finally:
+        try:
+            gitops.unlock_push(cwd)
+        except gitops.GitError:
+            log.warning("não foi possível liberar push no checkout %s", cwd, exc_info=True)
 
 
 def execute_step(settings: Settings, session_factory, step_id: int) -> dict | None:
@@ -907,6 +1041,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
                 )
         return None
 
+    run_started = time.monotonic()
     outcome = _run_executor(
         eff,
         task.executor,
@@ -928,6 +1063,24 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         # re-executada após interrupção (timeout/stall).
         if outcome.session_id:
             step.session_id = outcome.session_id
+        # Observabilidade do sandbox desta execução (modo, contêiner, overhead de
+        # startup medido como tempo até a primeira linha de saída quando possível).
+        _system_event(
+            s, step, "sandbox",
+            {
+                "mode": outcome.sandbox_mode or eff.sandbox.mode,
+                "container_id": outcome.container_id,
+                "wall_ms": round((time.monotonic() - run_started) * 1000),
+                "secrets": outcome.sandbox_scan or [],
+            },
+        )
+        if outcome.sandbox_scan:
+            # Varredura de segredos: mounts expõem paths sensíveis (aviso/auditoria;
+            # com fail_closed a fase teria abortado antes de rodar).
+            _system_event(
+                s, step, "secrets_scan",
+                {"mounts": outcome.sandbox_scan, "mode": outcome.sandbox_mode},
+            )
         verdict_label = _consume_verdict(s, step, checkout)
         s.commit()
     return _decide(eff, session_factory, step_id, checkout, outcome, verdict_label)

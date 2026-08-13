@@ -53,6 +53,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("allow_external_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
         ("auto_summary", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("sandbox", "VARCHAR(10)"),
     ],
     "robots": [
         ("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL"),
