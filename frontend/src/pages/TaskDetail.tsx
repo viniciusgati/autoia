@@ -20,7 +20,7 @@ import Markdown from "../lib/markdown";
 import { fmtBudget, fmtCost } from "../lib/money";
 import { diffSummary, etapaAtualLabel, formatDuration, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
-import type { Pipeline, Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
+import type { Epic, Pipeline, Project, Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
 /** Detalhe da task em 3 níveis de acompanhamento:
  *  - Resumo (Nível 1): "o que aconteceu?" — resumo LLM + timeline compacta;
@@ -75,6 +75,17 @@ export default function TaskDetail() {
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [pipelineSel, setPipelineSel] = useState<number | null>(null);
   const [pipelineBusy, setPipelineBusy] = useState(false);
+  // Associação organizacional Projeto > Épico (editável em qualquer status —
+  // metadados; nomes no resumo independentes da edição).
+  const [editProjects, setEditProjects] = useState<Project[]>([]);
+  const [editProjectsLoading, setEditProjectsLoading] = useState(true);
+  const [projEditSel, setProjEditSel] = useState("");
+  const [editEpics, setEditEpics] = useState<Epic[]>([]);
+  const [editEpicsLoading, setEditEpicsLoading] = useState(false);
+  const [epicEditSel, setEpicEditSel] = useState("");
+  const [assocBusy, setAssocBusy] = useState(false);
+  const [taskEpics, setTaskEpics] = useState<Epic[]>([]);
+  const assocInit = useRef(false);
   const storyInit = useRef(false);
   const prevStatus = useRef<string | null>(null);
 
@@ -118,6 +129,72 @@ export default function TaskDetail() {
     };
   }, [repoIdNum]);
 
+  // Projetos do repositório: alimentam a edição da associação e os nomes no resumo.
+  useEffect(() => {
+    let active = true;
+    setEditProjectsLoading(true);
+    api
+      .listProjects(repoIdNum)
+      .then((list) => {
+        if (active) setEditProjects(list);
+      })
+      .catch(() => {
+        if (active) setEditProjects([]);
+      })
+      .finally(() => {
+        if (active) setEditProjectsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [repoIdNum]);
+
+  // Épicos do projeto selecionado na edição (não reseta o valor: a inicialização
+  // sincroniza o select com a associação atual da task).
+  useEffect(() => {
+    if (projEditSel === "") {
+      setEditEpics([]);
+      setEditEpicsLoading(false);
+      return;
+    }
+    let active = true;
+    setEditEpicsLoading(true);
+    api
+      .listEpics(Number(projEditSel))
+      .then((list) => {
+        if (active) setEditEpics(list);
+      })
+      .catch(() => {
+        if (active) setEditEpics([]);
+      })
+      .finally(() => {
+        if (active) setEditEpicsLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [projEditSel]);
+
+  // Épicos do projeto ATUAL da task (nomes exibidos no resumo).
+  useEffect(() => {
+    if (task?.project_id == null) {
+      setTaskEpics([]);
+      return;
+    }
+    let active = true;
+    api
+      .listEpics(task.project_id)
+      .then((list) => {
+        if (active) setTaskEpics(list);
+      })
+      .catch(() => {
+        if (active) setTaskEpics([]);
+      });
+    return () => {
+      active = false;
+    };
+  }, [task?.project_id]);
+
   usePolling(
     (signal) =>
       api
@@ -127,6 +204,13 @@ export default function TaskDetail() {
           setFeedbackText((current) => current || t.feedback || "");
           setBouncebackTarget((prev) => prev || suggestedBouncebackTarget(t));
           setDetailsText((current) => current || t.details || "");
+          // Associação Projeto > Épico: sincroniza os selects na primeira carga
+          // (depois disso o usuário assume o controle da edição).
+          if (!assocInit.current) {
+            assocInit.current = true;
+            setProjEditSel(t.project_id == null ? "" : String(t.project_id));
+            setEpicEditSel(t.epic_id == null ? "" : String(t.epic_id));
+          }
           const gated = t.steps.find((s) => s.status === "pending" && s.pause_before);
           if (
             !storyInit.current ||
@@ -383,6 +467,30 @@ export default function TaskDetail() {
     }
   };
 
+  /** Troca o projeto na edição: reseta o épico (dependência) e recarrega a lista. */
+  const onProjEditChange = (value: string) => {
+    setProjEditSel(value);
+    setEpicEditSel("");
+  };
+
+  /** Salva a associação Projeto > Épico (PATCH em qualquer status). Opções "Sem
+   *  projeto"/"Sem épico" enviam `null` (remoção); erro 400/404 vira banner no
+   *  topo via `setError`, preservando os valores dos selects. */
+  const saveAssociation = async () => {
+    setAssocBusy(true);
+    try {
+      await api.updateTaskStory(taskId, {
+        project_id: projEditSel === "" ? null : Number(projEditSel),
+        epic_id: epicEditSel === "" ? null : Number(epicEditSel),
+      });
+      await refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAssocBusy(false);
+    }
+  };
+
   const regenerateSummary = async () => {
     setSummaryBusy(true);
     try {
@@ -441,6 +549,12 @@ export default function TaskDetail() {
     user != null && members.some((m) => m.role === "admin" && m.user_id === user.id);
   const canAct = podeAtuar(user, task.responsible_id, isRepoAdmin);
   const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
+
+  // Nomes da associação atual Projeto > Épico (exibidos no resumo; "—" se vazio).
+  const projectNameFor = (id: number | null) =>
+    id == null ? null : (editProjects.find((p) => p.id === id)?.name ?? null);
+  const epicNameFor = (id: number | null) =>
+    id == null ? null : (taskEpics.find((e) => e.id === id)?.name ?? null);
 
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
   const runningStep = steps.find((s) => s.status === "running") ?? null;
@@ -721,6 +835,11 @@ export default function TaskDetail() {
                 <Markdown text={task.acceptance_criteria} />
               </>
             )}
+            {/* Associação organizacional Projeto > Épico (sempre visível; "—" sem associação) */}
+            <div className="muted small" style={{ marginTop: 10 }}>
+              Projeto: <b>{projectNameFor(task.project_id) ?? "—"}</b>
+              {" · "}Épico: <b>{epicNameFor(task.epic_id) ?? "—"}</b>
+            </div>
           </div>
 
           <SituacaoCard
@@ -885,6 +1004,69 @@ export default function TaskDetail() {
             <div className="form-actions">
               <button disabled={detailsBusy || !canAct} title={actTitle} onClick={saveDetails}>
                 {detailsBusy ? "salvando…" : "salvar detalhes"}
+              </button>
+            </div>
+          </div>
+
+          {/* Associação Projeto > Épico (metadados organizacionais) */}
+          <div className="card">
+            <div className="card-title">
+              <strong>Projeto / Épico</strong>
+              <span className="muted small">associação organizacional — não afeta a execução</span>
+            </div>
+            <div className="form-inline">
+              <div className="form-field">
+                <label className="form-label">Projeto</label>
+                <select
+                  value={projEditSel}
+                  onChange={(e) => onProjEditChange(e.target.value)}
+                  disabled={editProjectsLoading}
+                >
+                  {editProjectsLoading ? (
+                    <option value="">Carregando…</option>
+                  ) : editProjects.length === 0 ? (
+                    <option value="">Nenhum projeto cadastrado</option>
+                  ) : (
+                    <>
+                      <option value="">Sem projeto</option>
+                      {editProjects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </select>
+              </div>
+              <div className="form-field">
+                <label className="form-label">Épico</label>
+                <select
+                  value={epicEditSel}
+                  onChange={(e) => setEpicEditSel(e.target.value)}
+                  disabled={editProjectsLoading || projEditSel === "" || editEpicsLoading}
+                >
+                  {projEditSel === "" ? (
+                    <option value="">Selecione um projeto</option>
+                  ) : editEpicsLoading ? (
+                    <option value="">Carregando…</option>
+                  ) : editEpics.length === 0 ? (
+                    <option value="">Nenhum épico deste projeto</option>
+                  ) : (
+                    <>
+                      <option value="">Sem épico</option>
+                      {editEpics.map((ep) => (
+                        <option key={ep.id} value={ep.id}>
+                          {ep.name}
+                        </option>
+                      ))}
+                    </>
+                  )}
+                </select>
+              </div>
+            </div>
+            <div className="form-actions">
+              <button disabled={assocBusy || !canAct} title={actTitle} onClick={() => void saveAssociation()}>
+                {assocBusy ? "Salvando…" : "salvar associação"}
               </button>
             </div>
           </div>

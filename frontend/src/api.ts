@@ -226,6 +226,8 @@ export const api = {
     kind: string;
     executor?: string;
     budget_limit?: number;
+    project_id?: number | null;
+    epic_id?: number | null;
   }) => request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(data) }),
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
   changePipeline: (id: number, pipelineId: number) =>
@@ -264,7 +266,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ position, note }),
     }),
-  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null }) =>
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null }) =>
     request<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
