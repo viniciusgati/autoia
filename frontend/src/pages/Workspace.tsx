@@ -8,7 +8,7 @@ import { usePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
 import { fmtCost } from "../lib/money";
-import type { RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
+import type { Epic, Project, RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
 function statusMeta(status: string): { label: string; cls: string } {
@@ -445,6 +445,9 @@ export default function Workspace() {
   const [busy, setBusy] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [diffPos, setDiffPos] = useState<number | null>(null);
+  // Projetos/épicos do repositório: nomes da associação da tarefa no header.
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [epics, setEpics] = useState<Epic[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const timelineRef = useRef<HTMLElement>(null);
   // Segue automaticamente o fim da timeline conforme a execução avança; pausa
@@ -465,6 +468,39 @@ export default function Workspace() {
       active = false;
     };
   }, [repoId]);
+
+  // Projetos do repositório (nomes da associação da tarefa no header).
+  useEffect(() => {
+    let active = true;
+    api
+      .listProjects(repoId)
+      .then((l) => {
+        if (active) setProjects(l);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [repoId]);
+
+  // Épicos do projeto ATUAL da tarefa (nome no header).
+  useEffect(() => {
+    const projectId = ws?.task.project_id ?? null;
+    if (projectId == null) {
+      setEpics([]);
+      return;
+    }
+    let active = true;
+    api
+      .listEpics(projectId)
+      .then((l) => {
+        if (active) setEpics(l);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [ws?.task.project_id]);
 
   const refresh = () => {
     api
@@ -617,6 +653,14 @@ export default function Workspace() {
               <span className="ws-cost">
                 Custo total: <b>{fmtCost(task.cost_spent)}</b>
                 <span className="muted small"> / {fmtCost(task.budget_limit)}</span>
+              </span>
+              <span className="ws-projeto" title="projeto/épico da tarefa">
+                projeto: <b>{task.project_id != null ? projects.find((p) => p.id === task.project_id)?.name ?? "—" : "—"}</b>
+                {task.epic_id != null && (
+                  <span>
+                    {" "}· épico: <b>{epics.find((e) => e.id === task.epic_id)?.name ?? "—"}</b>
+                  </span>
+                )}
               </span>
               <span className="ws-responsavel" title="responsável pela tarefa">
                 responsável: <b>{task.responsible?.name ?? "Não atribuída"}</b>

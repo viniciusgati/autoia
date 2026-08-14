@@ -273,6 +273,10 @@ class Task(Base):
     # Responsável explícito pela tarefa (default = criador). NULL em tasks
     # pré-existentes até reatribuição: "sem responsável = qualquer autenticado atua".
     responsible_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    # Associação organizacional Projeto > Épico (0..1 cada, opcional). Metadados:
+    # não entram no handoff/prompt dos robôs nem afetam a execução (padrão Chamado).
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    epic_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("epics.id"), nullable=True)
 
     # Detalhes da implementação adicionados MANUALMENTE pelo usuário durante o
     # fluxo (complementam o contexto original, diferenciados de description).
@@ -292,6 +296,8 @@ class Task(Base):
     parent: Mapped["Task | None"] = relationship(remote_side="Task.id", back_populates="children")
     children: Mapped[list["Task"]] = relationship(back_populates="parent")
     responsible: Mapped["User | None"] = relationship(foreign_keys=[responsible_id])
+    project: Mapped["Project | None"] = relationship(back_populates="tasks")
+    epic: Mapped["Epic | None"] = relationship(back_populates="tasks")
     steps: Mapped[list["TaskStep"]] = relationship(
         back_populates="task",
         order_by="TaskStep.position",
@@ -590,6 +596,7 @@ class Project(Base):
         cascade="all, delete-orphan",
     )
     chamados: Mapped[list["Chamado"]] = relationship(back_populates="project")
+    tasks: Mapped[list["Task"]] = relationship(back_populates="project")
 
 
 class Epic(Base):
@@ -610,6 +617,7 @@ class Epic(Base):
 
     project: Mapped[Project] = relationship(back_populates="epics")
     chamados: Mapped[list["Chamado"]] = relationship(back_populates="epic")
+    tasks: Mapped[list["Task"]] = relationship(back_populates="epic")
 
 
 class ChamadoStageType(Base):
