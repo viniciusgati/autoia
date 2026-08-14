@@ -30,16 +30,18 @@ backend/app/            # pacote `app`
   main.py               # create_app(), seed de robôs/pipelines, run_api/run_worker
   config.py             # Settings (env AUTOIA_*); watchdogs e orçamento
   db.py                 # engine/session; migrate_schema() ADITIVO (ADDITIVE_COLUMNS)
-  models.py             # Repository, Robot, Pipeline(+Step), Task(+Step), RunEvent
+  models.py             # Repository, Robot, Pipeline(+Step), Task(+Step), RunEvent + Chamado/Epic/Project
   schemas.py            # Pydantic; espelha os tipos do frontend
   prompts.py            # contratos de saída por role + build_prompt()
-  verdicts.py           # contrato autoia_verdict.txt (parse PASS/FAIL/READY/PM) + autoia_blocked.json/autoia_summary.json
+  chamado_prompts.py    # prompts/contratos do fluxo de chamados (ferramentas + avaliação + conteúdo)
+  verdicts.py           # contrato autoia_verdict.txt (parse PASS/FAIL/READY/PM) + autoia_blocked.json/autoia_summary.json + chamado_decision.json
   guardrails.py         # GuardrailViolation + análise (sem enforcement; ver watchdogs)
   budget.py             # custo por interação + limite
   timeline.py           # derivação DETERMINÍSTICA da timeline de execução (sem LLM)
-  api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard)
+  api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard, chamados)
   worker/
     runner.py           # loop do worker: claim -> executa -> decide (bounce-back/PM)
+    chamado_runner.py   # loop do CHAMADO-worker: ferramentas de etapa + avaliação de fechamento
     exec_common.py      # ExecOutcome + kill por grupo/watchdog (compartilhado)
     kimi_exec.py        # subprocess do kimi (stream-json): streaming JSONL, timeout, kill
     opencode_exec.py    # subprocess do opencode (--format json): tool_use, custo REAL
@@ -55,14 +57,53 @@ frontend/               # Vite + React (páginas em src/pages/, tipos em src/typ
 tests/                  # pytest; fixtures compartilhadas em conftest.py
 ```
 
+## Subsistema de CHAMADOS (fluxo de atendimento — paralelo à pipeline)
+
+- **Conceito**: `Chamado` é entidade NOVA, independente de `Task`. Hierarquia
+  **Projeto > Épico > Chamado** (`Project`/`Epic` pertencem a um `Repository`).
+  O chamado percorre etapas de um **catálogo** (`ChamadoStageType`, global ou por
+  repo; seed `SEED_STAGE_TYPES` em `main.py`: entrada/analise/desenvolvimento/deploy).
+  `Chamado.workflow_status` = nome da etapa atual (status PRINCIPAL, sem relação com
+  pipeline); `Chamado.status` = vida do chamado (aberto/em_andamento/respondido/
+  cancelado/concluido/falhou).
+- **Etapas** (`ChamadoStage`): `pendente`→`ativa` (aguardando usuário) → `aguardando`
+  (ação encaminhada) → `executando` (worker) → `fechada`. `pending_action` sinaliza o
+  que processar: `tool:<chave>` (rodar a ferramenta) ou `evaluate` (avaliar fechamento).
+  Ao fechar, `decision` = `next_stage:<tipo>` | `resposta` | `cancelar` | `concluir`,
+  validado contra `close_options` do catálogo (decisão inválida mantém a etapa `ativa`).
+- **Ferramentas por etapa**: `allowed_tools` do catálogo (assistente/escopo/resposta —
+  presets em `chamado_prompts.TOOL_PRESETS`). Rodam o executor (kimi/opencode) contra o
+  checkout do chamado (`chamado_<id>`/`chamado_runner.py`) na branch default **read-only**
+  (`gitops.checkout_default` + `lock_push` do `_run_executor`), **sem commit/veredicto/
+  merge/bounce**. Interações viram `ChamadoMessage` (transcript por etapa, payload
+  SEMPRE completo — espelho do `RunEvent`, porém task-independente).
+- **Avaliação de fechamento**: robô escreve `chamado_decision.json` (parse em
+  `verdicts.py`); worker aplica a transição. `POST /api/chamados/{id}/close` encaminha
+  a avaliação; `POST .../tools/{tool}` encaminha a ferramenta com a última msg `user`.
+- **Worker separado**: `autoia-chamado-worker` (`app.main:run_chamado_worker`), lock
+  próprio (`chamado-worker.lock`), heartbeat `chamado-worker.heartbeat` (endpoint
+  `/api/chamados/worker/status`). Recupera etapas `executando` órfãs no startup.
+- **Conteúdo LLM de Projeto/Épico** (`chamado_runner.start_content_generation`):
+  one-shot sem checkout (resumo do projeto, escopo/resumo do épico) em thread daemon
+  com guarda de geração em voo; endpoints `.../summary/regenerate` e `.../scope/regenerate`.
+- **Frontend**: páginas `Chamados.tsx` (lista+criação), `ChamadoDetail.tsx` (stepper de
+  etapas + chat + ferramentas + fechamento), `Projects.tsx` (projetos/épicos + LLM);
+  rotas `/:repoId/chamados`, `/:repoId/chamados/:id`, `/:repoId/projects`. Polling 2–5 s.
+- **Testes**: `tests/test_chamados.py` usa `fake_kimi` com `write_file=chamado_decision.json`
+  (regra própria, não `VERDICT_RULES`); o runner roda síncrono via `chamado_runner.claim/execute`.
+
 ## Arquitetura do fluxo (entenda antes de mexer)
 
 - **Task** = lista ordenada de **TaskSteps** (fases). Cada fase tem um **Robot** com um
   `role`: `refine` (po), `review` (qa), `implement` (developer), `verify` (tester),
-  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 8 robôs e **2 pipelines**:
+  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 13 robôs e **4 pipelines**:
   `po-qa-dev-tester-avaliador-deploytest` (po, qa, developer, tester, avaliador, merger
-  + deploy-tester pós-merge) e `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
-  para projetos sem deploy).
+  + deploy-tester pós-merge), `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
+  para projetos sem deploy), `po-qa-dev-tester-avaliador-deploytest-browser` (com
+  browser-tester pós-merge) e `iniciador-analista-ux-propositor` (brainstorm/análise:
+  inicia o projeto, define tarefas/lacunas, audita usabilidade e o propositor escreve
+  `autoia_tasks.json` → propostas PENDENTES de decisão humana, sem merge automático de
+  tasks filhas).
 - **Fases `post_merge`** rodam na branch **default integrada** (`gitops.checkout_default`
   = fetch + `reset --hard origin/<base>`); fases normais rodam na branch `autoia/task-<id>`.
   O **merge+push acontece na última fase pré-merge** (feito pelo worker, nunca pelo robô).
@@ -272,6 +313,7 @@ python3 -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 pytest                      # suíte (52 testes; exige git no PATH)
 autoia-api                  # API :9000 (serve frontend/dist; AUTOIA_API_HOST=0.0.0.0 p/ LAN)
 autoia-worker               # worker (processo separado)
+autoia-chamado-worker       # worker dos CHAMADOS (processo separado; pip install -e após mudar)
 cd frontend && npm install && npm run dev   # frontend dev :5173
 cd frontend && npm run build                # atualiza dist (servido pela API)
 ```

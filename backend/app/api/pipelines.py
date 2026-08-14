@@ -56,8 +56,11 @@ def create_pipeline(data: PipelineCreate, session: Session = Depends(get_session
     if len(positions) != len(set(positions)):
         raise HTTPException(400, "posições das fases não podem repetir")
 
-    # Robôs válidos: globais + os do mesmo projeto do pipeline.
-    robot_q = session.query(Robot).filter(_scope_filter(data.repository_id, Robot))
+    # Robôs válidos: globais + os do mesmo projeto do pipeline (não arquivados).
+    robot_q = session.query(Robot).filter(
+        _scope_filter(data.repository_id, Robot),
+        Robot.archived.is_(False),
+    )
     robot_ids = {r.id for r in robot_q.all()}
 
     pipeline = Pipeline(name=data.name, repository_id=data.repository_id)

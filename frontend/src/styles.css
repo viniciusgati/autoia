@@ -262,6 +262,21 @@ summary::marker {
   font-size: 13px;
 }
 
+/* Badge de contagem no menu lateral (ex.: propostas pendentes) */
+.sidebar-badge {
+  margin-left: auto;
+  margin-right: 4px;
+  min-width: 18px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #0d0d12;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.5;
+  text-align: center;
+}
+
 .sidebar-project-name {
   font-size: 13px;
   font-weight: 600;
@@ -836,6 +851,88 @@ select option {
   background: rgba(255, 255, 255, 0.07);
   color: #b9bbc7;
   border-color: rgba(255, 255, 255, 0.1);
+}
+
+/* ═══════════════════════════════════════════
+   StatusIcon (ícone animado de status nos cards)
+   ═══════════════════════════════════════════ */
+
+.status-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  color: #b9bbc7;
+  background: rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+/* spinner: tarefa na fila (aguardando o worker) — azul */
+.status-queue {
+  color: var(--info);
+  background: rgba(96, 165, 250, 0.14);
+  border-color: rgba(96, 165, 250, 0.35);
+}
+
+/* spinner: tarefa rodando de verdade — verde */
+.status-spin {
+  color: var(--ok);
+  background: rgba(52, 211, 153, 0.12);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.status-spinner {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 2px solid rgba(96, 165, 250, 0.3);
+  border-top-color: var(--info);
+  animation: status-spin 0.8s linear infinite;
+}
+
+.status-spinner-queue {
+  border-color: rgba(96, 165, 250, 0.3);
+  border-top-color: var(--info);
+}
+
+.status-spinner-run {
+  border-color: rgba(52, 211, 153, 0.3);
+  border-top-color: var(--ok);
+}
+
+@keyframes status-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.status-ok {
+  color: var(--ok);
+  background: var(--ok-subtle);
+  border-color: rgba(52, 211, 153, 0.35);
+}
+
+.status-err {
+  color: var(--err);
+  background: var(--err-subtle);
+  border-color: rgba(248, 113, 113, 0.35);
+}
+
+.status-warn {
+  color: var(--warn);
+  background: var(--warn-subtle);
+  border-color: rgba(251, 191, 36, 0.35);
+}
+
+/* ponto neutro (criada/pendente) */
+.status-dot-core {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #b9bbc7;
 }
 
 /* ═══════════════════════════════════════════
@@ -1444,6 +1541,7 @@ tr:hover td {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 500;
+  display: block; /* label em linha própria — o valor não cola no fim dele */
 }
 
 .session-value {
@@ -1953,6 +2051,20 @@ tr:hover td {
   padding-top: 2px;
 }
 
+/* Resumo (somente leitura) da configuração no dashboard do projeto. */
+.config-summary {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 14px 20px;
+  margin-top: 12px;
+}
+
+.config-summary > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
 .task-head-actions {
   display: flex;
   gap: 8px;
@@ -1984,6 +2096,14 @@ tr:hover td {
   gap: 20px;
   flex-wrap: wrap;
   margin-top: 10px;
+}
+
+/* Cada campo do painel ao vivo: label em cima, valor embaixo (sem colar). */
+.task-live > div {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
 }
 
 .task-live-value {
@@ -2882,20 +3002,37 @@ tr:hover td {
   overflow-x: auto;
 }
 
-/* Botões de ação com tamanho mínimo uniforme (sem salto de layout entre status). */
-.task-card-actions button,
-.task-card-actions .link-btn {
-  min-height: 32px;
-  min-width: 88px;
+/* Botões de ação em ícone (compactos): pausar/retomar/cancelar/aprovar/… */
+.task-card-actions .icon-btn {
+  width: 30px;
+  height: 30px;
+  min-width: 30px;
+  min-height: 30px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  border: 1px solid var(--surface-border);
+  color: var(--text-secondary);
   flex-shrink: 0;
 }
-
-.task-card-actions .link-btn {
-  margin-left: auto;
+.task-card-actions .icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--surface-border-hover);
 }
+.task-card-actions .icon-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.task-card-actions .icon-btn-danger { color: var(--err); }
+.task-card-actions .icon-btn-ok { color: var(--ok); }
+.task-card-actions .icon-btn-warn { color: var(--warn); }
 
-.task-card-actions .link-btn + .link-btn {
-  margin-left: 0;
+/* Links de workspace/detalhes alinhados à direita no rodapé do card. */
+.task-card-actions a.icon-btn:first-of-type {
+  margin-left: auto;
 }
 
 /* Stepper com labels dentro do card: respiro menor, sem quebrar o layout. */
@@ -3557,6 +3694,52 @@ strong {
   flex-shrink: 0;
 }
 
+.robot-row-archived {
+  cursor: default;
+  opacity: 0.72;
+  background: rgba(13, 15, 21, 0.55);
+}
+.robot-row-archived:hover {
+  border-color: var(--surface-border);
+  background: rgba(13, 15, 21, 0.55);
+  box-shadow: var(--shadow-sm);
+}
+
+.robot-mission-editor {
+  font-family: var(--font-mono, monospace);
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  min-height: 220px;
+}
+
+.robot-placeholders {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.robot-placeholder {
+  font: inherit;
+  color: inherit;
+  background: rgba(13, 15, 21, 0.82);
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+.robot-placeholder:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.modal-wide {
+  max-width: 860px;
+}
+
 /* ── Modal ── */
 .modal-overlay {
   position: fixed;
@@ -3772,6 +3955,25 @@ strong {
   gap: 8px;
   align-items: center;
   flex-wrap: wrap;
+}
+
+/* Modal de proposta completa (ProposalModal) — explora a proposta inteira e decide. */
+.ws-proposal-modal {
+  max-width: 720px;
+}
+
+.proposal-full {
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.proposal-full > :first-child {
+  margin-top: 0;
+}
+
+.proposal-full > :last-child {
+  margin-bottom: 0;
 }
 
 /* ═══════════════════════════════════════════
@@ -4067,30 +4269,30 @@ strong {
   position: sticky;
   top: 0;
   z-index: 5;
-  padding: 14px 18px;
+  padding: 8px 14px;
   background: rgba(13, 15, 20, 0.88);
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 6px;
 }
 
 .ws-header-top {
   display: flex;
   justify-content: space-between;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .ws-header-title {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
   flex-wrap: wrap;
 }
 .ws-header-title h2 {
   margin: 0;
-  font-size: 20px;
+  font-size: 16px;
   line-height: 1.2;
 }
 .ws-status-badge {
@@ -4100,8 +4302,9 @@ strong {
 .ws-header-meta {
   display: flex;
   align-items: center;
-  gap: 18px;
+  gap: 12px;
   flex-wrap: wrap;
+  font-size: 12.5px;
 }
 .ws-cost b {
   color: var(--text);
@@ -4192,12 +4395,13 @@ strong {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 12px;
+  padding: 4px 10px;
   border-radius: var(--radius-full);
   background: var(--panel);
   border: 1px solid var(--surface-border-hover);
-  font-size: 13px;
+  font-size: 12.5px;
   color: var(--text);
+  max-width: 100%;
 }
 .ws-etapa-running {
   border-color: var(--run);
@@ -4205,6 +4409,14 @@ strong {
   color: var(--run);
 }
 .ws-etapa-running b { color: var(--text); }
+
+/* Atividade da fase em execução no header: trunca (uma linha, reticências). */
+.ws-etapa-activity {
+  max-width: min(100%, 420px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .ws-occ-head {
   display: flex;
@@ -4277,6 +4489,15 @@ strong {
   font-weight: 600;
   line-height: 1.5;
   color: var(--text);
+  /* Tamanho CONSISTENTE entre cards vizinhos: máx 3 linhas com reticências e
+     min-height de 3 linhas — assim as seções seguintes começam na mesma altura. */
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: break-word;
+  min-height: 4.5em;
 }
 
 /* Resultado ("o que foi resolvido") — destaque secundário após a missão. */
@@ -4308,8 +4529,23 @@ strong {
   font-size: 14px;
   color: var(--run);
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
+  min-width: 0;
+}
+/* Comando/atividade em andamento no card: máx 2 linhas com reticências. */
+.ws-live-text {
+  flex: 1;
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .ws-live-inline {
   color: var(--run);
@@ -4523,7 +4759,26 @@ strong {
   flex-direction: column;
   gap: 4px;
 }
-.ws-sysact-item { list-style: none; }
+.ws-sysact-item {
+  list-style: none;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+}
+/* Comandos/eventos longos: máx 2 linhas com reticências (tooltip tem o completo). */
+.ws-sysact-text {
+  min-width: 0;
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .ws-decision {
   border: 1px solid var(--warn);
@@ -4917,6 +5172,14 @@ strong {
 .config-section > div {
   padding: 12px;
   border-top: 1px solid var(--surface-border);
+}
+
+/* Checkboxes de projetos-alvo (allowlist de criação de tarefas) na config */
+.config-checkboxes {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 6px 12px;
+  padding-top: 2px;
 }
 
 /* Validação inline: campo inválido (borda vermelha + mensagem abaixo) */

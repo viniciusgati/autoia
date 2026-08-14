@@ -401,6 +401,11 @@ def _run_one_implement(
             if repo_id is not None
             else None
         )
+        task_stop_file = (
+            exec_common.task_stop_path(settings.workspace_dir, task_id)
+            if getattr(settings, "workspace_dir", None)
+            else None
+        )
         try:
             head_before = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
         except gitops.GitError:
@@ -437,6 +442,7 @@ def _run_one_implement(
             cost_per_interaction=settings.cost_per_interaction,
             repo_id=repo_id,
             stop_file=stop_file,
+            task_stop_file=task_stop_file,
             sandbox=sandbox,
             workspace_dir=getattr(settings, "workspace_dir", None),
             extra_env=_sub_extra_env(settings),
@@ -642,6 +648,11 @@ def _run_one_verify(
             if repo_id is not None
             else None
         )
+        task_stop_file = (
+            exec_common.task_stop_path(settings.workspace_dir, task_id)
+            if getattr(settings, "workspace_dir", None)
+            else None
+        )
         st.status = SUB_VERIFYING
         st.started_at = func.now()
         _system_event(
@@ -673,6 +684,7 @@ def _run_one_verify(
             cost_per_interaction=settings.cost_per_interaction,
             repo_id=repo_id,
             stop_file=stop_file,
+            task_stop_file=task_stop_file,
             sandbox=sandbox,
             workspace_dir=getattr(settings, "workspace_dir", None),
             extra_env=_sub_extra_env(settings),

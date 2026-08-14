@@ -2,18 +2,23 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { api } from "./api";
 import { useAuth } from "./auth";
-import { DashboardIcon, PipelinesIcon, ProjectsIcon, RobotsIcon, TasksIcon, TerminalIcon } from "./components/Icons";
+import { DashboardIcon, PipelinesIcon, ProjectsIcon, ProposalIcon, RobotsIcon, TasksIcon, TerminalIcon } from "./components/Icons";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import Repositories from "./pages/Repositories";
 import Robots from "./pages/Robots";
 import Pipelines from "./pages/Pipelines";
 import RepoDashboard from "./pages/RepoDashboard";
+import RepoConfig from "./pages/RepoConfig";
+import RepoProposals from "./pages/RepoProposals";
 import RepoTasks from "./pages/RepoTasks";
 import PhaseDetail from "./pages/PhaseDetail";
 import TaskDetail from "./pages/TaskDetail";
 import Workspace from "./pages/Workspace";
 import Execution from "./pages/Execution";
+import Chamados from "./pages/Chamados";
+import ChamadoDetail from "./pages/ChamadoDetail";
+import Projects from "./pages/Projects";
 import Notifications from "./components/Notifications";
 import { usePolling } from "./lib/polling";
 import type { Repository } from "./types";
@@ -42,6 +47,7 @@ export default function App() {
   const location = useLocation();
   const [repos, setRepos] = useState<Repository[]>([]);
   const [workerAlive, setWorkerAlive] = useState<boolean | null>(null);
+  const [repoPendingCount, setRepoPendingCount] = useState(0);
 
   // App renderizado (não é splash nem Login): auth OFF (legado) ou usuário logado.
   const showApp = !authEnabled || user != null;
@@ -55,6 +61,23 @@ export default function App() {
     if (!appReady) return;
     api.listRepositories().then(setRepos).catch(() => {});
   }, [location.pathname, appReady]);
+
+  // Badge "propostas pendentes" no menu do projeto atual.
+  useEffect(() => {
+    if (!appReady || repoId == null) return;
+    let active = true;
+    const load = () =>
+      api
+        .listRepoProposals(repoId)
+        .then((list) => active && setRepoPendingCount(list.filter((p) => p.status === "pending").length))
+        .catch(() => active && setRepoPendingCount(0));
+    void load();
+    const timer = window.setInterval(load, 10000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [appReady, repoId, location.pathname]);
 
   usePolling(
     (signal) => {
@@ -161,6 +184,27 @@ export default function App() {
                 <TasksIcon size={16} /> Tarefas
               </NavLink>
               <NavLink
+                to={`/${currentRepo.id}/chamados`}
+                className={({ isActive }) => (isActive ? "active" : "")}
+              >
+                <TerminalIcon size={16} /> Chamados
+              </NavLink>
+              <NavLink
+                to={`/${currentRepo.id}/projects`}
+                className={({ isActive }) => (isActive ? "active" : "")}
+              >
+                <ProjectsIcon size={16} /> Projetos / Épicos
+              </NavLink>
+              <NavLink
+                to={`/${currentRepo.id}/proposals`}
+                className={({ isActive }) => (isActive ? "active" : "")}
+              >
+                <ProposalIcon size={16} /> Propostas
+                {repoPendingCount > 0 && (
+                  <span className="sidebar-badge">{repoPendingCount}</span>
+                )}
+              </NavLink>
+              <NavLink
                 to={`/${currentRepo.id}/robots`}
                 className={({ isActive }) => (isActive ? "active" : "")}
               >
@@ -171,6 +215,13 @@ export default function App() {
                 className={({ isActive }) => (isActive ? "active" : "")}
               >
                 <PipelinesIcon size={16} /> Pipelines
+              </NavLink>
+              <NavLink
+                to={`/${currentRepo.id}/config`}
+                className={({ isActive }) => (isActive ? "active" : "")}
+                title="Configuração do projeto (admin)"
+              >
+                <RobotsIcon size={16} /> Configuração
               </NavLink>
             </div>
           )}
@@ -197,7 +248,12 @@ export default function App() {
           <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/repositories" element={<Repositories />} />
           <Route path="/:repoId" element={<RepoDashboard />} />
+          <Route path="/:repoId/config" element={<RepoConfig />} />
           <Route path="/:repoId/tasks" element={<RepoTasks />} />
+          <Route path="/:repoId/chamados" element={<Chamados />} />
+          <Route path="/:repoId/chamados/:chamadoId" element={<ChamadoDetail />} />
+          <Route path="/:repoId/projects" element={<Projects />} />
+          <Route path="/:repoId/proposals" element={<RepoProposals />} />
           <Route path="/:repoId/tasks/:taskId" element={<TaskDetail />} />
           <Route path="/:repoId/tasks/:taskId/workspace" element={<Workspace />} />
           <Route path="/:repoId/tasks/:taskId/phase/:stepId" element={<PhaseDetail />} />

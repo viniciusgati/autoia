@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import ProposalCard from "../components/ProposalCard";
-import StatusBadge from "../components/StatusBadge";
+import StatusIcon from "../components/StatusIcon";
 import TaskCard from "../components/TaskCard";
 import { formatToolCall } from "../lib/events";
 import { fmtBudget } from "../lib/money";
@@ -32,7 +32,7 @@ export default function ExecutionPage() {
     try {
       setData(await api.getExecution(filter ?? undefined, signal));
     } catch (e) {
-      setError(String(e));
+      if (!signal?.aborted) setError(String(e));
     }
   };
 
@@ -212,7 +212,7 @@ function RunningSession({
         <Link to={`/${task.repository_id}/tasks/${task.id}`} className="resumo-title">
           #{task.id} {task.title}
         </Link>
-        <StatusBadge status={task.status} />
+        <StatusIcon status={task.status} />
       </div>
 
       {repoName && <div className="muted small">projeto: {repoName}</div>}

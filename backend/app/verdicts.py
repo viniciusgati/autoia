@@ -30,6 +30,10 @@ STEP_MISSION_FILENAME = "autoia_step_mission.json"
 # Pedido de decisão do agente ao usuário (pausa a fase até o humano responder).
 DECISION_FILENAME = "autoia_decision.json"
 
+# Decisão de fechamento de etapa de um chamado (escrita pelo robô de avaliação no
+# checkout; o chamado-worker lê, remove e aplica a transição de estágio).
+CHAMADO_DECISION_FILENAME = "chamado_decision.json"
+
 # Veredictos esperados por papel
 V_READY = "READY"
 V_NEEDS_WORK = "NEEDS_WORK"
@@ -226,6 +230,41 @@ def read_decision(checkout: str) -> dict | None:
 def remove_decision(checkout: str) -> None:
     try:
         os.remove(os.path.join(checkout, DECISION_FILENAME))
+    except FileNotFoundError:
+        pass
+
+
+def read_chamado_decision(checkout: str) -> dict | None:
+    """Lê a decisão de fechamento de etapa de um chamado (chamado_decision.json).
+
+    Tolerante: `decision` pode ser `next_stage` (com `next_stage`), `resposta`
+    (com `resposta_texto`), `cancelar` ou `concluir`; `justificativa` é opcional.
+    Inválido/ausente → None (o worker trata como erro e mantém a etapa ativa).
+    """
+    path = os.path.join(checkout, CHAMADO_DECISION_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    decision = str(data.get("decision") or "").strip().lower()
+    if decision not in ("next_stage", "resposta", "cancelar", "concluir"):
+        return None
+    return {
+        "decision": decision,
+        "next_stage": str(data.get("next_stage") or "").strip()[:100] or None,
+        "resposta_texto": str(data.get("resposta_texto") or "").strip() or None,
+        "justificativa": str(data.get("justificativa") or "").strip() or None,
+    }
+
+
+def remove_chamado_decision(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, CHAMADO_DECISION_FILENAME))
     except FileNotFoundError:
         pass
 

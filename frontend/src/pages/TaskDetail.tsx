@@ -20,7 +20,7 @@ import Markdown from "../lib/markdown";
 import { fmtBudget, fmtCost } from "../lib/money";
 import { diffSummary, etapaAtualLabel, formatDuration, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
 import { usePolling } from "../lib/polling";
-import type { Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
+import type { Pipeline, Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
 /** Detalhe da task em 3 níveis de acompanhamento:
  *  - Resumo (Nível 1): "o que aconteceu?" — resumo LLM + timeline compacta;
@@ -71,6 +71,10 @@ export default function TaskDetail() {
   const [summaryBusy, setSummaryBusy] = useState(false);
   // Retomada de fase bloqueada
   const [continueBusy, setContinueBusy] = useState(false);
+  // Troca de pipeline (reiniciar o trabalho com outra pipeline)
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+  const [pipelineSel, setPipelineSel] = useState<number | null>(null);
+  const [pipelineBusy, setPipelineBusy] = useState(false);
   const storyInit = useRef(false);
   const prevStatus = useRef<string | null>(null);
 
@@ -90,6 +94,23 @@ export default function TaskDetail() {
       .listMembers(repoIdNum)
       .then((m) => {
         if (active) setMembers(m);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [repoIdNum]);
+
+  // Pipelines disponíveis para trocar o pipeline da task (reiniciar o trabalho).
+  useEffect(() => {
+    let active = true;
+    api
+      .listPipelines(repoIdNum)
+      .then((list) => {
+        if (active) {
+          setPipelines(list);
+          if (list.length > 0) setPipelineSel((prev) => prev ?? list[0].id);
+        }
       })
       .catch(() => {});
     return () => {
@@ -156,7 +177,9 @@ export default function TaskDetail() {
             });
           }
         })
-        .catch((e) => setError(String(e))),
+        .catch((e) => {
+          if (!signal.aborted) setError(String(e));
+        }),
     1500,
     [taskId],
   );
@@ -280,6 +303,30 @@ export default function TaskDetail() {
       setError(String(e));
     } finally {
       setActionBusy(false);
+    }
+  };
+
+  const changePipeline = async () => {
+    if (pipelineSel == null) return;
+    if (
+      !window.confirm(
+        "Trocar a pipeline desta tarefa? As fases atuais são arquivadas (histórico preservado) " +
+          "e o trabalho reinicia do zero com a nova pipeline. Você pode trocar mesmo se a tarefa " +
+          "já rodou — serve para corrigir algo.",
+      )
+    ) {
+      return;
+    }
+    setPipelineBusy(true);
+    try {
+      const updated = await api.changePipeline(taskId, pipelineSel);
+      setTask(updated);
+      setPipelineSel(updated.pipeline_id);
+      setError("");
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setPipelineBusy(false);
     }
   };
 
@@ -526,6 +573,30 @@ export default function TaskDetail() {
                 title={actTitle}
               >
                 cancelar tarefa
+              </button>
+            </div>
+          )}
+          {pipelines.length > 0 && (
+            <div className="task-head-actions" style={{ marginLeft: "auto" }}>
+              <select
+                value={pipelineSel ?? ""}
+                onChange={(e) => setPipelineSel(e.target.value ? Number(e.target.value) : null)}
+                title="Trocar a pipeline da tarefa (reinicia o trabalho do zero, arquivando o histórico)"
+              >
+                {pipelines.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                    {p.repository_id == null ? " (global)" : ""}
+                    {p.id === task.pipeline_id ? " — atual" : ""}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={() => void changePipeline()}
+                disabled={pipelineBusy || !canAct || pipelineSel == null || pipelineSel === task.pipeline_id}
+                title={actTitle}
+              >
+                {pipelineBusy ? "…" : "trocar pipeline"}
               </button>
             </div>
           )}

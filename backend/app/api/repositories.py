@@ -48,6 +48,7 @@ from ..schemas import (
     RepositoryUpdate,
     RepositoryUserOut,
     RepositoryUserUpdate,
+    TaskProposalOut,
 )
 from ..worker import exec_common, gitops
 from ..worker.runner import _system_event
@@ -99,6 +100,31 @@ def _task_anchor_step(task: Task) -> TaskStep | None:
     return next((st for st in steps if st.position == task.current_step), steps[0] if steps else None)
 
 
+def _validate_task_targets(
+    session: Session, repo: Repository, targets: list[str]
+) -> list[str]:
+    """Normaliza e valida a allowlist de repositórios-alvo para criação de tarefas."""
+    cleaned = [t for t in (targets or []) if t.strip()]
+    if not cleaned:
+        return []
+    existing_names = {
+        name
+        for (name,) in session.query(Repository.name)
+        .filter(Repository.name.in_(cleaned))
+        .all()
+    }
+    missing = [t for t in cleaned if t not in existing_names]
+    if missing:
+        raise HTTPException(
+            400, f"repositório(s) alvo não encontrado(s): {', '.join(missing)}"
+        )
+    if repo.name in existing_names:
+        raise HTTPException(
+            400, "um projeto não pode ser alvo de criação de tarefas de si mesmo"
+        )
+    return cleaned
+
+
 @router.post("", response_model=RepositoryOut, status_code=201)
 def create_repository(
     data: RepositoryCreate,
@@ -107,6 +133,10 @@ def create_repository(
 ):
     if session.query(Repository).filter(Repository.name == data.name).first():
         raise HTTPException(409, f"repositório '{data.name}' já existe")
+
+    targets = _validate_task_targets(
+        session, Repository(name=data.name), list(data.task_targets or [])
+    )
 
     repo = Repository(
         name=data.name,
@@ -125,6 +155,8 @@ def create_repository(
         default_pipeline_id=data.default_pipeline_id,
         auto_summary=data.auto_summary,
         sandbox=data.sandbox,
+        task_targets=targets,
+        external_context=data.external_context,
     )
     session.add(repo)
     session.commit()
@@ -165,6 +197,36 @@ def list_repositories(session: Session = Depends(get_session)):
     return session.query(Repository).order_by(Repository.id.desc()).all()
 
 
+@router.get("/{repo_id}/proposals", response_model=list[TaskProposalOut])
+def list_repo_proposals(
+    repo_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Propostas de tasks filhas deste projeto (pendentes + aceitas; rejeitadas saem).
+
+    Espelha o escopo do dashboard: com auth ON, restringe aos projetos do usuário
+    (`_user_repo_ids`); sem auth, lista tudo do projeto.
+    """
+    from .dashboard import _user_repo_ids
+
+    get_repository_or_404(session, repo_id)
+    if user is not None and repo_id not in _user_repo_ids(session, user.id):
+        raise HTTPException(403, "projeto fora do seu escopo")
+    proposals = (
+        session.query(TaskProposal)
+        .join(Task, TaskProposal.task_id == Task.id)
+        .filter(
+            Task.repository_id == repo_id,
+            TaskProposal.status != "rejected",
+        )
+        .order_by(TaskProposal.id.desc())
+        .limit(100)
+        .all()
+    )
+    return proposals
+
+
 @router.put("/{repo_id}", response_model=RepositoryOut)
 def update_repository(
     repo_id: int,
@@ -172,7 +234,10 @@ def update_repository(
     session: Session = Depends(get_session),
 ):
     repo = get_repository_or_404(session, repo_id)
-    for field, value in data.model_dump(exclude_unset=True).items():
+    payload = data.model_dump(exclude_unset=True)
+    if "task_targets" in payload:
+        payload["task_targets"] = _validate_task_targets(session, repo, payload["task_targets"] or [])
+    for field, value in payload.items():
         setattr(repo, field, value)
     session.commit()
     session.refresh(repo)
@@ -295,6 +360,11 @@ def delete_repository(
         # Outros projetos podem apontar para um pipeline escopado deste projeto.
         session.query(Repository).filter(Repository.default_pipeline_id.in_(pipeline_ids)).update(
             {"default_pipeline_id": None}, synchronize_session=False
+        )
+        # Propostas que escolheram um pipeline escopado deste projeto: sem o
+        # pipeline, a filha volta a usar o default do repo/pai (NULL).
+        session.query(TaskProposal).filter(TaskProposal.pipeline_id.in_(pipeline_ids)).update(
+            {"pipeline_id": None}, synchronize_session=False
         )
         session.query(PipelineStep).filter(PipelineStep.pipeline_id.in_(pipeline_ids)).delete(synchronize_session=False)
         session.query(Pipeline).filter(Pipeline.id.in_(pipeline_ids)).delete(synchronize_session=False)

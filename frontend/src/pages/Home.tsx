@@ -2,10 +2,49 @@ import { FormEvent, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
+import ProposalCard from "../components/ProposalCard";
 import StatusBadge from "../components/StatusBadge";
+import StatusIcon from "../components/StatusIcon";
 import { fmtCost } from "../lib/money";
 import { usePolling } from "../lib/polling";
-import type { Dashboard as DashboardData, MyProject, MyTask, Repository, TaskListItem, TaskStepListItem } from "../types";
+import type { Dashboard as DashboardData, MyProject, MyTask, Repository, TaskListItem, TaskProposal, TaskStepListItem } from "../types";
+
+/** Seção de propostas de tasks filhas no dashboard: aparecem enquanto não forem
+ *  rejeitadas (aceitas seguem com link para a task criada). */
+function ProposalsSection({
+  proposals,
+  repos,
+  onChanged,
+  onError,
+}: {
+  proposals: TaskProposal[];
+  repos: Repository[];
+  onChanged: () => void;
+  onError: (message: string) => void;
+}) {
+  const repoNames = Object.fromEntries(repos.map((r) => [r.id, r.name]));
+  if (proposals.length === 0) return null;
+  return (
+    <section style={{ marginTop: 22 }}>
+      <h3>Propostas aguardando decisão</h3>
+      <div className="proposal-list">
+        {proposals.map((p) => (
+          <ProposalCard
+            key={p.id}
+            proposal={p}
+            repoNames={repoNames}
+            parentRepoName={p.repository_id != null ? repoNames[p.repository_id] : undefined}
+            parentDetailPath={
+              p.repository_id != null ? `/${p.repository_id}/tasks` : undefined
+            }
+            onChanged={onChanged}
+            onError={onError}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
 
 /** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
 function faseAtual(task: TaskListItem): TaskStepListItem | null {
@@ -82,7 +121,9 @@ export default function Home() {
         setTasks(t);
         setError("");
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => {
+        if (!signal?.aborted) setError(String(e));
+      });
 
   const loadMyTasks = (signal?: AbortSignal) => {
     setMyTasksLoading(true);
@@ -92,7 +133,9 @@ export default function Home() {
         setMyTasks(t);
         setMyTasksError("");
       })
-      .catch((e) => setMyTasksError(String(e)))
+      .catch((e) => {
+        if (!signal?.aborted) setMyTasksError(String(e));
+      })
       .finally(() => setMyTasksLoading(false));
   };
 
@@ -104,7 +147,9 @@ export default function Home() {
         setMyProjects(p);
         setMyProjectsError("");
       })
-      .catch((e) => setMyProjectsError(String(e)))
+      .catch((e) => {
+        if (!signal?.aborted) setMyProjectsError(String(e));
+      })
       .finally(() => setMyProjectsLoading(false));
   };
 
@@ -196,7 +241,7 @@ export default function Home() {
                   {aguardaMinha(t) && (
                     <span className="badge badge-warn my-task-await">aguardando você</span>
                   )}
-                  <StatusBadge status={t.status} />
+                  <StatusIcon status={t.status} />
                 </div>
                 <div className="my-task-sub">
                   <span>{t.repository_name}</span>
@@ -250,6 +295,14 @@ export default function Home() {
             ))}
           </div>
         )}
+
+        {/* Propostas de tasks filhas (do dashboard pessoal, escopado aos meus projetos) */}
+        <ProposalsSection
+          proposals={dash?.proposals ?? []}
+          repos={repos}
+          onChanged={() => void load()}
+          onError={setError}
+        />
       </div>
     );
   }
@@ -330,6 +383,14 @@ export default function Home() {
         </>
       )}
 
+      {/* Propostas de tasks filhas aguardando decisão humana */}
+      <ProposalsSection
+        proposals={dash.proposals}
+        repos={repos}
+        onChanged={() => void load()}
+        onError={setError}
+      />
+
       {/* lista de projetos */}
       <h3>Todos os projetos</h3>
       {repos.length === 0 ? (
@@ -404,7 +465,7 @@ export default function Home() {
                             {precisa && (
                               <span className="project-task-await">👀 aguarda você</span>
                             )}
-                            <StatusBadge status={task.status} />
+                            <StatusIcon status={task.status} />
                           </div>
                           <div className="project-task-sub">
                             <span>{etapa}</span>

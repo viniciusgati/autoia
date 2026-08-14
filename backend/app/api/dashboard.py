@@ -27,6 +27,7 @@ from ..models import (
     RepositoryUser,
     RunEvent,
     Task,
+    TaskProposal,
     TaskStep,
     User,
 )
@@ -36,6 +37,7 @@ from ..schemas import (
     MyTaskOut,
     NoticeOut,
     RunEventOut,
+    TaskProposalOut,
 )
 from .deps import get_session, get_settings, require_auth
 from .etag import conditional
@@ -368,8 +370,20 @@ def dashboard(
     elif repo_ids is not None:
         event_q = event_q.filter(Task.repository_id.in_(repo_ids))
     max_event_id = event_q.scalar()
+    # Propostas: max id + total não-rejeitadas (aceita continua na lista até o usuário
+    # agir; rejeitada sai). Entram no token p/ o ETag invalidar quando mudar.
+    proposal_q = session.query(TaskProposal).join(Task, TaskProposal.task_id == Task.id)
+    if repository_id is not None:
+        proposal_q = proposal_q.filter(Task.repository_id == repository_id)
+    elif repo_ids is not None:
+        proposal_q = proposal_q.filter(Task.repository_id.in_(repo_ids))
+    max_proposal_id, proposal_count = proposal_q.with_entities(
+        func.max(TaskProposal.id),
+        func.count(TaskProposal.id).filter(TaskProposal.status != "rejected"),
+    ).first()
     not_modified = conditional(
-        request, response, "|".join(str(x) for x in (max_task_ts, token_total, max_event_id))
+        request, response,
+        "|".join(str(x) for x in (max_task_ts, token_total, max_event_id, max_proposal_id, proposal_count))
     )
     if not_modified is not None:
         return not_modified
@@ -427,6 +441,12 @@ def dashboard(
     )
 
     total_tasks = sum(tasks_by_status.values())
+    proposals = (
+        proposal_q.filter(TaskProposal.status != "rejected")
+        .order_by(TaskProposal.id.desc())
+        .limit(50)
+        .all()
+    )
     return DashboardOut(
         tasks_by_status=tasks_by_status,
         total_cost=round(total_cost, 4),
@@ -434,6 +454,7 @@ def dashboard(
         guardrail_events=guardrail_events,
         recent_guardrails=[RunEventOut.model_validate(e) for e in recent_guardrails],
         notices=_build_notices(session, _scoped_notices),
+        proposals=[TaskProposalOut.model_validate(p) for p in proposals],
         user=user,
         my_tasks=_my_tasks(session, user.id) if user is not None else [],
         projects=_my_projects(session, user.id) if user is not None else [],

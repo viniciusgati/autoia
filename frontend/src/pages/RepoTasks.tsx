@@ -25,7 +25,9 @@ export default function RepoTasks() {
         setPipelines(p);
         setError("");
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => {
+        if (!signal?.aborted) setError(String(e));
+      });
 
   // Poll leve (lista): atualiza a cada 15s; página é mais formulário + grid.
   usePolling(load, 15000, [repoId]);

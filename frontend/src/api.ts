@@ -1,10 +1,18 @@
 import type {
   Artifact,
+  Chamado,
+  ChamadoMessage,
+  ChamadoStageType,
+  ChamadoWorkspace,
   Dashboard,
+  Epic,
+  EpicDetail,
   Execution,
   MyProject,
   MyTask,
   Pipeline,
+  Project,
+  ProjectDetail,
   Repository,
   RepositoryDeleteInfo,
   RepositoryMember,
@@ -177,11 +185,16 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(data),
     }),
+  listRepoProposals: (repoId: number, signal?: AbortSignal) =>
+    request<TaskProposal[]>(`/api/repositories/${repoId}/proposals`, { signal }),
 
   // robots
-  listRobots: (repositoryId?: number) => {
-    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
-    return request<Robot[]>(`/api/robots${params}`);
+  listRobots: (repositoryId?: number, includeArchived?: boolean) => {
+    const params = new URLSearchParams();
+    if (repositoryId != null) params.set("repository_id", String(repositoryId));
+    if (includeArchived) params.set("archived", "true");
+    const qs = params.toString();
+    return request<Robot[]>(`/api/robots${qs ? `?${qs}` : ""}`);
   },  createRobot: (data: { name: string; mission: string; role?: string; model?: string; repository_id?: number | null }) =>
     request<Robot>("/api/robots", { method: "POST", body: JSON.stringify(data) }),
   updateRobot: (id: number, data: Partial<Robot>) =>
@@ -215,6 +228,11 @@ export const api = {
     budget_limit?: number;
   }) => request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(data) }),
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
+  changePipeline: (id: number, pipelineId: number) =>
+    request<Task>(`/api/tasks/${id}/change-pipeline`, {
+      method: "POST",
+      body: JSON.stringify({ pipeline_id: pipelineId }),
+    }),
   pauseTask: (id: number) => request<Task>(`/api/tasks/${id}/pause`, { method: "POST" }),
   resumeTask: (id: number) => request<Task>(`/api/tasks/${id}/resume`, { method: "POST" }),
   cancelTask: (id: number) => request<Task>(`/api/tasks/${id}/cancel`, { method: "POST" }),
@@ -285,6 +303,11 @@ export const api = {
     request<Task>(`/api/tasks/${taskId}/proposals/${proposalId}/accept`, { method: "POST" }),
   rejectProposal: (taskId: number, proposalId: number) =>
     request<Task>(`/api/tasks/${taskId}/proposals/${proposalId}/reject`, { method: "POST" }),
+  updateProposal: (taskId: number, proposalId: number, data: { title?: string; description?: string; kind?: string; pipeline_id?: number | null }) =>
+    request<TaskProposal>(`/api/tasks/${taskId}/proposals/${proposalId}`, {
+      method: "PATCH",
+      body: JSON.stringify(data),
+    }),
 
   // subtasks
   retrySubtask: (taskId: number, position: number) =>
@@ -326,6 +349,69 @@ export const api = {
   getArtifactUrl: (artifactId: number) => `/api/steps/artifacts/${artifactId}/file`,
   deleteArtifacts: (stepId: number) =>
     request<{ deleted: number }>(`/api/steps/${stepId}/artifacts`, { method: "DELETE" }),
+
+  // ── Chamados (fluxo de atendimento) ──────────────────────────────────────
+  listProjects: (repositoryId?: number, signal?: AbortSignal) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<Project[]>(`/api/projects${params}`, { signal });
+  },
+  getProject: (id: number, signal?: AbortSignal) => request<ProjectDetail>(`/api/projects/${id}`, { signal }),
+  createProject: (data: { repository_id: number; name: string; description?: string; status?: string }) =>
+    request<Project>("/api/projects", { method: "POST", body: JSON.stringify(data) }),
+  updateProject: (id: number, data: Partial<Pick<Project, "name" | "description" | "status">>) =>
+    request<Project>(`/api/projects/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deleteProject: (id: number) => request<void>(`/api/projects/${id}`, { method: "DELETE" }),
+  regenerateProjectSummary: (id: number) =>
+    request<{ started: boolean }>(`/api/projects/${id}/summary/regenerate`, { method: "POST" }),
+
+  listEpics: (projectId?: number, signal?: AbortSignal) => {
+    const params = projectId != null ? `?project_id=${projectId}` : "";
+    return request<Epic[]>(`/api/epics${params}`, { signal });
+  },
+  getEpic: (id: number, signal?: AbortSignal) => request<EpicDetail>(`/api/epics/${id}`, { signal }),
+  createEpic: (data: { project_id: number; name: string; description?: string; status?: string }) =>
+    request<Epic>("/api/epics", { method: "POST", body: JSON.stringify(data) }),
+  updateEpic: (id: number, data: Partial<Pick<Epic, "name" | "description" | "status">>) =>
+    request<Epic>(`/api/epics/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deleteEpic: (id: number) => request<void>(`/api/epics/${id}`, { method: "DELETE" }),
+  regenerateEpicScope: (id: number) =>
+    request<{ started: boolean }>(`/api/epics/${id}/scope/regenerate`, { method: "POST" }),
+  regenerateEpicSummary: (id: number) =>
+    request<{ started: boolean }>(`/api/epics/${id}/summary/regenerate`, { method: "POST" }),
+
+  listChamadoStageTypes: (repositoryId?: number, signal?: AbortSignal) => {
+    const params = repositoryId != null ? `?repository_id=${repositoryId}` : "";
+    return request<ChamadoStageType[]>(`/api/chamado-stage-types${params}`, { signal });
+  },
+
+  listChamados: (params?: { repository_id?: number; project_id?: number; epic_id?: number; status?: string }, signal?: AbortSignal) => {
+    const query = new URLSearchParams();
+    if (params?.repository_id != null) query.set("repository_id", String(params.repository_id));
+    if (params?.project_id != null) query.set("project_id", String(params.project_id));
+    if (params?.epic_id != null) query.set("epic_id", String(params.epic_id));
+    if (params?.status) query.set("status", params.status);
+    const qs = query.toString() ? `?${query}` : "";
+    return request<Chamado[]>(`/api/chamados${qs}`, { signal });
+  },
+  getChamado: (id: number, signal?: AbortSignal) => request<Chamado>(`/api/chamados/${id}`, { signal }),
+  createChamado: (data: { repository_id: number; project_id?: number | null; epic_id?: number | null; title: string; description?: string; executor?: string; budget_limit?: number }) =>
+    request<Chamado>("/api/chamados", { method: "POST", body: JSON.stringify(data) }),
+  updateChamado: (id: number, data: Partial<Pick<Chamado, "title" | "description" | "executor" | "project_id" | "epic_id">>) =>
+    request<Chamado>(`/api/chamados/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
+  deleteChamado: (id: number) => request<void>(`/api/chamados/${id}`, { method: "DELETE" }),
+  getChamadoWorkspace: (id: number, signal?: AbortSignal) =>
+    request<ChamadoWorkspace>(`/api/chamados/${id}/workspace`, { signal }),
+  getChamadoMessages: (id: number, signal?: AbortSignal) =>
+    request<ChamadoMessage[]>(`/api/chamados/${id}/messages`, { signal }),
+  runChamadoTool: (id: number, tool: string, text: string) =>
+    request<{ ok: boolean; message: string }>(`/api/chamados/${id}/tools/${tool}`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  closeChamadoStage: (id: number) =>
+    request<{ ok: boolean; message: string }>(`/api/chamados/${id}/close`, { method: "POST" }),
+  getChamadoWorkerStatus: (signal?: AbortSignal) =>
+    request<{ alive: boolean; last_heartbeat_sec: number | null }>("/api/chamados/worker/status", { signal }),
 
   // tratador global de 401 (sessão expirada)
   setOnUnauthorized,

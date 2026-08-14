@@ -54,10 +54,13 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
         ("auto_summary", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("sandbox", "VARCHAR(10)"),
+        ("task_targets", "JSON"),
+        ("external_context", "TEXT"),
     ],
     "robots": [
         ("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL"),
         ("repository_id", "INTEGER REFERENCES repositories(id)"),
+        ("archived", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
     "pipelines": [("repository_id", "INTEGER REFERENCES repositories(id)")],
     "tasks": [
@@ -83,12 +86,16 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("responsible_id", "INTEGER REFERENCES users(id)"),
         ("finished_by_id", "INTEGER REFERENCES users(id)"),
         ("session_id", "VARCHAR(200)"),
+        ("archived", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
     "step_artifacts": [],
+    "task_proposals": [
+        ("pipeline_id", "INTEGER REFERENCES pipelines(id)"),
+    ],
 }
 
 

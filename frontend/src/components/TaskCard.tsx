@@ -2,8 +2,9 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
+import { CheckIcon, EyeIcon, PauseIcon, PlayIcon, UndoIcon, WorkspaceIcon, XIcon } from "./Icons";
 import PhaseStepper from "./PhaseStepper";
-import StatusBadge from "./StatusBadge";
+import StatusIcon from "./StatusIcon";
 import { fmtBudget } from "../lib/money";
 import { faseAtual, formatDuration } from "../lib/tasks";
 import type { TaskListItem } from "../types";
@@ -92,7 +93,7 @@ export default function TaskCard({
               sua tarefa
             </span>
           )}
-          <StatusBadge status={task.status} />
+          <StatusIcon status={task.status} />
         </div>
       </div>
 
@@ -129,17 +130,18 @@ export default function TaskCard({
 
       <div className="task-card-actions">
         {task.status === "created" && (
-          <button onClick={() => run(() => api.startTask(task.id))} disabled={busy}>
-            iniciar
+          <button className="icon-btn" title="iniciar tarefa" onClick={() => run(() => api.startTask(task.id))} disabled={busy}>
+            <PlayIcon size={15} />
           </button>
         )}
         {(task.status === "queued" || task.status === "in_progress") && (
           <>
-            <button onClick={() => run(() => api.pauseTask(task.id))} disabled={busy}>
-              pausar
+            <button className="icon-btn" title="pausar" onClick={() => run(() => api.pauseTask(task.id))} disabled={busy}>
+              <PauseIcon size={15} />
             </button>
             <button
-              className="danger"
+              className="icon-btn icon-btn-danger"
+              title="cancelar tarefa"
               onClick={() => {
                 if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
                   run(() => api.cancelTask(task.id));
@@ -147,17 +149,18 @@ export default function TaskCard({
               }}
               disabled={busy}
             >
-              cancelar
+              <XIcon size={15} />
             </button>
           </>
         )}
         {task.status === "paused" && (
           <>
-            <button onClick={() => run(() => api.resumeTask(task.id))} disabled={busy}>
-              retomar
+            <button className="icon-btn" title="retomar" onClick={() => run(() => api.resumeTask(task.id))} disabled={busy}>
+              <PlayIcon size={15} />
             </button>
             <button
-              className="danger"
+              className="icon-btn icon-btn-danger"
+              title="cancelar tarefa"
               onClick={() => {
                 if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
                   run(() => api.cancelTask(task.id));
@@ -165,27 +168,31 @@ export default function TaskCard({
               }}
               disabled={busy}
             >
-              cancelar
+              <XIcon size={15} />
             </button>
           </>
         )}
         {task.status === "needs_review" && (
           <>
             <button
+              className="icon-btn icon-btn-ok"
+              title="aprovar e continuar"
               onClick={() => run(() => api.reviewTask(task.id, { action: "approve", extra_budget: 0 }))}
               disabled={busy}
             >
-              aprovar
+              <CheckIcon size={15} />
             </button>
             <button
-              className="warn-btn"
+              className="icon-btn icon-btn-warn"
+              title="retornar ao dev"
               onClick={() => run(retornarAoDev)}
               disabled={busy}
             >
-              retornar ao dev
+              <UndoIcon size={15} />
             </button>
             <button
-              className="danger"
+              className="icon-btn icon-btn-danger"
+              title="cancelar tarefa"
               onClick={() => {
                 if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
                   run(() => api.cancelTask(task.id));
@@ -193,15 +200,15 @@ export default function TaskCard({
               }}
               disabled={busy}
             >
-              cancelar
+              <XIcon size={15} />
             </button>
           </>
         )}
-        <Link to={`${detailPath}/${task.id}/workspace`} className="link-btn">
-          workspace ↗
+        <Link to={`${detailPath}/${task.id}/workspace`} className="icon-btn" title="workspace (acompanhar)">
+          <WorkspaceIcon size={15} />
         </Link>
-        <Link to={`${detailPath}/${task.id}`} className="link-btn">
-          ver detalhes →
+        <Link to={`${detailPath}/${task.id}`} className="icon-btn" title="ver detalhes">
+          <EyeIcon size={15} />
         </Link>
       </div>
     </div>

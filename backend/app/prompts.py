@@ -41,13 +41,13 @@ reais). Isso é auditado e usado pelas próximas fases — sem evidência, a fas
 não tem como saber o que de fato aconteceu."""
 
 # Ferramenta de criação de tarefas filhas.
-TASK_SPAWN_TOOL = """### Ferramenta: criar tarefas
+TASK_SPAWN_TOOL = """### Ferramenta: criar tarefas (propostas)
 
-Se esta tarefa pode ou deve ser decomposta em tarefas menores (ex.: uma feature complexa
-que naturalmente se divide em várias entregas), crie um arquivo `autoia_tasks.json` na
-raiz do projeto. O sistema lerá este arquivo automaticamente ao final da fase e criará
-as tarefas. Use APENAS se a decomposição for realmente necessária — não crie tarefas
-triviais ou de 1 linha.
+Se esta tarefa pode ou deve ser decomposta em tarefas menores (ex.: um brainstorm que
+gera várias entregas), crie um arquivo `autoia_tasks.json` na raiz do projeto. O sistema
+lerá este arquivo ao final da fase e registrará cada entrada como uma PROPOSTA de tarefa
+filha, aguardando decisão humana (aceitar/rejeitar) — nada é criado automaticamente. Use
+APENAS se a decomposição for realmente necessária — não crie tarefas triviais ou de 1 linha.
 
 ### Exclusividade (IMPORTANTE)
 Esta ferramenta é EXCLUDENTE com subtarefas: se a história desta task foi (ou será)
@@ -71,9 +71,10 @@ Formato do arquivo (JSON array):
 - `title` (obrigatório): nome da tarefa, claro e acionável
 - `description` (opcional): detalhes, contexto, critérios de aceite
 - `kind` (opcional, default "feature"): "feature", "bug", "issue" ou "chore"
-- `repository` (opcional): nome de outro repositório cadastrado no autoia. Se omitido,
-  a tarefa é criada neste mesmo repositório. Use para cross-project: ex.: criar task de
-  documentação no repo "docs" quando uma feature é implementada no repo "api".
+- `repository` (opcional): nome de outro repositório cadastrado no autoia. Use APENAS
+  se o projeto estiver na seção "Repositórios onde este projeto pode criar tarefas"
+  do contexto — propostas para outros repositórios são RECUSADAS. Se omitido, a tarefa
+  é criada neste mesmo repositório.
 """
 
 # Ferramenta: marcar subtarefa como implementada (evita re-implementar o que já está na branch).
@@ -553,6 +554,71 @@ resultado real (PASS/FAIL) e contagem>
   quê, sem abrir o diff.
 - Se você precisou pausar (autoia_blocked.json), relate o motivo e a pergunta feita."""
 
+# Contrato do iniciador (role "analyze"): inicia o projeto — mapeia o estado, prepara a
+# base (se vazio) ou documenta o que existe (se já tem código). Não altera funcionalidade.
+CONTRACT_ANALYZE = """## Formato de saída OBRIGATÓRIO (relatório do iniciador)
+O seu TEXTO FINAL é o relatório desta fase — a próxima fase o lerá no handoff. Escreva
+com EXATAMENTE estas seções:
+
+### Estado atual do projeto
+<estrutura, stack, o que existe e funciona hoje>
+
+### O que foi criado/preparado
+- <caminho> — <para quê> (ou "Nenhum — projeto já estruturado")
+
+### Lacunas de inicialização
+- <o que falta para o projeto estar "iniciado": README, estrutura, build, testes>
+
+### Para a próxima fase
+<o que o analista deve considerar ao definir tarefas/lacunas>"""
+
+# Contrato do analista (role "plan"): define tarefas e lacunas faltantes, com priorização.
+CONTRACT_PLAN = """## Formato de saída OBRIGATÓRIO (relatório do analista)
+O seu TEXTO FINAL é o relatório desta fase — a próxima fase o lerá no handoff. Escreva
+com EXATAMENTE estas seções:
+
+### Lacunas identificadas
+- <lacuna> — <impacto / por quê importa>
+
+### Tarefas sugeridas
+1. <título> — <descrição curta e verificável>
+2. ...
+
+### Priorização
+- <ordem recomendada e justificativa (impacto × esforço)>"""
+
+# Contrato do auditor de usabilidade (role "usability").
+CONTRACT_USABILITY = """## Formato de saída OBRIGATÓRIO (auditoria de usabilidade)
+O seu TEXTO FINAL é a auditoria desta fase — a próxima fase a lerá no handoff. Escreva
+com EXATAMENTE estas seções:
+
+### Fluxos do usuário
+- <fluxo> — <estado atual e o que o usuário vê>
+
+### Problemas de usabilidade
+- <problema> — <onde/impacto no usuário>
+
+### Recomendações priorizadas
+- <recomendação> — <benefício esperado>"""
+
+# Contrato do propositor (role "propose"): consolida as análises e escreve autoia_tasks.json
+# com 1..N propostas. As propostas ficam PENDENTES de decisão humana (nunca auto-criadas).
+CONTRACT_PROPOSE = """## Formato de saída OBRIGATÓRIO (propostas de tarefas)
+O seu TEXTO FINAL é o resumo das propostas geradas — o usuário decidirá aceitar/rejeitar
+cada uma na interface. Escreva com EXATAMENTE estas seções:
+
+### Propostas criadas
+- <título> — <kind> — <resumo do porquê e o que entrega>
+
+### Critérios de decisão
+- <para cada proposta: o que valida a escolha e qual o impacto esperado>
+
+### Pendências
+- <o que ficou de fora propositalmente e por quê>
+
+IMPORTANTE: as propostas ficam PENDENTES de decisão humana — o sistema NÃO cria a task
+automaticamente. Elas só virarão tasks quando o usuário aprovar."""
+
 _CONTRACTS = {
     "refine": CONTRACT_REFINE,
     "review": CONTRACT_REVIEW,
@@ -561,6 +627,10 @@ _CONTRACTS = {
     "pm": CONTRACT_PM,
     "summary": CONTRACT_SUMMARY,
     "merge": CONTRACT_MERGE,
+    "analyze": CONTRACT_ANALYZE,
+    "plan": CONTRACT_PLAN,
+    "usability": CONTRACT_USABILITY,
+    "propose": CONTRACT_PROPOSE,
 }
 
 
@@ -571,6 +641,7 @@ def build_prompt(
     default_branch: str,
     project_info: str = "",
     skills_info: str = "",
+    repo_context: str = "",
 ) -> str:
     mission = (robot.mission or "").strip()
     mission = (
@@ -587,6 +658,10 @@ def build_prompt(
         # Skills do projeto (conhecimento de domínio do usuário) materializadas no
         # checkout; fallback determinístico ao `--skills-dir` passado ao kimi.
         parts.append(skills_info)
+    if repo_context:
+        # Contexto de integração configurado no projeto (repos-alvo para criar
+        # tarefas, DNS de deploy, URLs, env vars etc.) — injetado pelo worker.
+        parts.append(repo_context)
     if task.acceptance_criteria:
         parts.append(f"### Critérios de aceite da história\n{task.acceptance_criteria}")
     if step_context:
@@ -613,10 +688,11 @@ def build_prompt(
     contract = _CONTRACTS.get(robot.role)
     if contract:
         parts.append(contract)
-    # refine (história), pm (decisão), summary (resumo) e merge (relatório de
-    # integração) têm formatos de saída próprios; os demais documentam o trabalho
-    # no texto final, que vira o histórico da fase no handoff.
-    if robot.role not in ("refine", "pm", "summary", "merge"):
+    # refine (história), pm (decisão), summary (resumo), merge (relatório de
+    # integração) e os papéis de brainstorm (analyze/plan/usability/propose) têm
+    # formatos de saída próprios; os demais documentam o trabalho no texto final,
+    # que vira o histórico da fase no handoff.
+    if robot.role not in ("refine", "pm", "summary", "merge", "analyze", "plan", "usability", "propose"):
         parts.append(HANDOFF_DOCUMENT)
     parts.append(EVIDENCE)
     parts.append(GUARDRAIL_INSTRUCTIONS)

@@ -89,6 +89,17 @@ def repo_stop_path(workspace_dir: str, repo_id: int) -> str:
     return os.path.join(workspace_dir, f".stop-{repo_id}")
 
 
+def task_stop_path(workspace_dir: str, task_id: int) -> str:
+    """Caminho do arquivo de parada de UMA task (API → worker).
+
+    A API grava `workspace_dir/.stop-task-<task_id>` quando o usuário pausa a task
+    ou reenvia uma instrução/rewind com uma fase em execução: o executor daquela
+    fase (que observa este arquivo) mata o subprocesso e o `_decide` entrega o
+    controle de volta ao usuário (não avança). Removido pelo worker após processar.
+    """
+    return os.path.join(workspace_dir, f".stop-task-{task_id}")
+
+
 @dataclass
 class ExecOutcome:
     """Resultado de uma execução do robô (kimi ou opencode)."""
@@ -176,20 +187,20 @@ def make_no_progress_watchdog(
 
 
 def make_stop_watchdog(
-    stop_file: str, proc: subprocess.Popen, stopped: threading.Event
+    stop_files: list[str], proc: subprocess.Popen, stopped: threading.Event
 ) -> threading.Event:
-    """Watchdog de parada cooperativa: se o arquivo `.stop-<repo_id>` aparecer no
-    workspace (projeto excluído pela API enquanto o robô roda), mata o processo.
+    """Watchdog de parada cooperativa: se UM dos arquivos de sinalização aparecer
+    (projeto excluído pela API ou task pausada/instruída pelo usuário enquanto o
+    robô roda), mata o processo.
 
-    A API e o worker são processos separados — o arquivo é o canal compartilhado;
-    o kill seletivo evita afetar execuções de outros projetos. Retorna um `Event`
-    de parada para o chamador cancelar o watcher.
+    A API e o worker são processos separados — os arquivos são o canal
+    compartilhado. Retorna um `Event` de parada para o chamador cancelar o watcher.
     """
     stop = threading.Event()
 
     def _watch() -> None:
         while not stop.is_set():
-            if os.path.isfile(stop_file):
+            if any(os.path.isfile(p) for p in stop_files):
                 stopped.set()
                 kill_group(proc)
                 return

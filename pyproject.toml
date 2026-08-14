@@ -26,6 +26,7 @@ dev = [
 [project.scripts]
 autoia-api = "app.main:run_api"
 autoia-worker = "app.main:run_worker"
+autoia-chamado-worker = "app.main:run_chamado_worker"
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend/app"]

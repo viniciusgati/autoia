@@ -55,12 +55,14 @@ from ..schemas import (
     TaskStepListOut,
     TaskSummaryOut,
     TaskUpdateRequest,
+    TaskChangePipelineRequest,
+    TaskProposalUpdate,
     TimelineEventOut,
     WorkspaceOccurrenceOut,
     WorkspaceOut,
 )
 from ..timeline import derive_task_occurrences, derive_task_timeline, fallback_mission
-from ..worker import gitops
+from ..worker import gitops, exec_common
 from ..worker.runner import _effective, _pm_decide, _system_event, _task_workspace, create_child_task
 from ..worker.summarizer import summarize_task
 from .deps import get_repository_or_404, get_session, get_settings, is_repo_admin, require_auth
@@ -137,7 +139,7 @@ def _task_list_item(task: Task) -> TaskListItem:
                 started_at=st.started_at,
                 finished_at=st.finished_at,
             )
-            for st in sorted(task.steps, key=lambda x: x.position)
+            for st in sorted((s for s in task.steps if not s.archived), key=lambda x: x.position)
         ],
     )
 
@@ -340,6 +342,7 @@ def accept_proposal(
         description=proposal.description,
         kind=proposal.kind,
         target_repository_id=proposal.target_repository_id,
+        pipeline_id=proposal.pipeline_id,
     )
     proposal.status = "accepted"
     proposal.accepted_task_id = child.id
@@ -372,6 +375,51 @@ def reject_proposal(
     return _get_task_or_404(session, task_id)
 
 
+@router.patch("/{task_id}/proposals/{proposal_id}", response_model=TaskProposalOut)
+def update_proposal(
+    task_id: int,
+    proposal_id: int,
+    data: TaskProposalUpdate,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Edita uma proposta PENDENTE antes de aceitar: o usuário ajusta título,
+    descrição, kind e a pipeline da task filha — a task nasce com os valores
+    editados. A proposta aceita/rejeitada é imutável (histórico de decisão
+    preservado)."""
+    task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
+    proposal = _get_proposal_or_404(task, proposal_id)
+    if proposal.status != "pending":
+        raise HTTPException(
+            400, f"proposta já foi {proposal.status} — não é mais editável"
+        )
+    payload = data.model_dump(exclude_unset=True)
+    if not payload:
+        raise HTTPException(400, "nada para alterar")
+    proposal.title = payload.get("title") or proposal.title
+    if "description" in payload:
+        proposal.description = payload["description"] or ""
+    proposal.kind = payload.get("kind") or proposal.kind
+    if "pipeline_id" in payload:
+        pipeline_id = payload.get("pipeline_id")
+        if pipeline_id is not None:
+            pipeline = session.get(Pipeline, pipeline_id)
+            if pipeline is None:
+                raise HTTPException(404, "pipeline não encontrado")
+            if pipeline.repository_id not in (None, proposal.target_repository_id or task.repository_id):
+                raise HTTPException(
+                    400, "pipeline não pertence ao projeto da task filha"
+                )
+        proposal.pipeline_id = pipeline_id
+    _system_event(
+        session, _anchor_step(task), "proposal_edited",
+        {"proposal_id": proposal.id, **payload},
+    )
+    session.commit()
+    return proposal
+
+
 @router.post("/{task_id}/start", response_model=TaskOut)
 def start_task(
     task_id: int,
@@ -385,7 +433,74 @@ def start_task(
         raise HTTPException(400, f"tarefa não está em 'created' (status atual: {task.status})")
     task.branch = f"{settings.branch_prefix}/task-{task.id}"
     task.status = TASK_QUEUED
-    min(task.steps, key=lambda st: st.position).status = STEP_PENDING
+    min(_active_steps(task), key=lambda st: st.position).status = STEP_PENDING
+    session.commit()
+    return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/change-pipeline", response_model=TaskOut)
+def change_task_pipeline(
+    task_id: int,
+    data: TaskChangePipelineRequest,
+    session: Session = Depends(get_session),
+    settings=Depends(get_settings),
+    user: User | None = Depends(require_auth),
+):
+    """Troca a pipeline de uma task e recria as fases do zero — reiniciar o
+    trabalho (correção) com outra pipeline, mesmo que a task já tenha rodado.
+
+    Funciona em QUALQUER status:
+    - fase em execução → é interrompida (stop file; o worker entrega o controle);
+    - histórico (RunEvent/ocorrências) NÃO é apagado — a nova execução vira novas
+      ocorrências na timeline;
+    - a task volta para `created` (sem branch) e o usuário dá start quando quiser.
+    """
+    task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
+    pipeline = session.get(Pipeline, data.pipeline_id)
+    if pipeline is None:
+        raise HTTPException(404, "pipeline não encontrado")
+    if pipeline.repository_id not in (None, task.repository_id):
+        raise HTTPException(400, "pipeline não pertence a este projeto")
+    if not pipeline.steps:
+        raise HTTPException(400, "pipeline sem fases")
+
+    # Interrompe fase em execução (a task sai de running; o worker não decide mais).
+    _force_stop_running(session, task, settings)
+
+    # Arquiva as fases antigas (histórico preservado — RunEvent/summaries/missions
+    # continuam no banco) e recria as fases do zero com a nova pipeline.
+    for st in task.steps:
+        st.archived = True
+        st.status = "created"
+        st.started_at = None
+        st.finished_at = None
+        st.error = None
+    task.pipeline_id = pipeline.id
+    task.current_step = 0
+    task.acceptance_criteria = None
+    task.branch = None
+    task.error = None
+    task.feedback = None
+    task.status = TASK_CREATED
+    for step in sorted(pipeline.steps, key=lambda x: x.position):
+        task.steps.append(
+            TaskStep(
+                position=step.position,
+                robot_id=step.robot_id,
+                post_merge=step.post_merge,
+                pause_before=step.pause_before,
+                status="created",
+            )
+        )
+    _system_event(
+        session, _anchor_step(task), "pipeline_changed",
+        {
+            "pipeline_id": pipeline.id,
+            "fases": len(pipeline.steps),
+            "arquivadas": len([st for st in task.steps if st.archived]),
+        },
+    )
     session.commit()
     return _get_task_or_404(session, task_id)
 
@@ -394,15 +509,18 @@ def start_task(
 def pause_task(
     task_id: int,
     session: Session = Depends(get_session),
+    settings=Depends(get_settings),
     user: User | None = Depends(require_auth),
 ):
-    """Pausa uma tarefa em andamento (worker para de reclamar fases)."""
+    """Pausa uma tarefa em andamento: interrompe a fase em execução (se houver) e
+    o worker para de reclamar fases."""
     task = _get_task_or_404(session, task_id)
     _ensure_can_act(session, task, user)
     if task.status not in (TASK_QUEUED, TASK_IN_PROGRESS):
         raise HTTPException(
             400, f"só dá para pausar tarefa em andamento (status atual: {task.status})"
         )
+    _force_stop_running(session, task, settings)
     task.status = TASK_PAUSED
     anchor = _anchor_step(task)
     _system_event(session, anchor, "task_paused", {"status_anterior": "in_progress"})
@@ -449,10 +567,51 @@ def cancel_task(
     return _get_task_or_404(session, task_id)
 
 
+def _active_steps(task: Task) -> list[TaskStep]:
+    """Steps ativos da task (ordena por posição), ignorando os arquivados por
+    mudança de pipeline (`change-pipeline`)."""
+    return sorted(
+        (st for st in task.steps if not st.archived),
+        key=lambda st: st.position,
+    )
+
+
 def _anchor_step(task: Task) -> TaskStep:
     """Step usado como âncora para eventos de nível de task (corrente ou o primeiro)."""
-    steps = sorted(task.steps, key=lambda st: st.position)
+    steps = _active_steps(task)
     return next((st for st in steps if st.position == task.current_step), steps[0] if steps else None)
+
+
+def _force_stop_running(session: Session, task: Task, settings) -> TaskStep | None:
+    """Interrompe a fase em execução da task (se houver) e ENTREGA o controle ao
+    usuário: grava o stop file da task (o executor mata o subprocesso), reseta a
+    fase para `pending` e registra o evento. O worker, ao final da execução morta,
+    vê a fase fora de `running` e NÃO decide por ela (não avança o pipeline).
+
+    Chamado pelo pause e por instrução/rewind/retry — antes disso eles eram
+    recusados com "fase em execução", deixando o usuário sem conseguir parar nem
+    injetar nada.
+    """
+    running = next((st for st in task.steps if st.status == STEP_RUNNING), None)
+    if running is None:
+        return None
+    try:
+        os.makedirs(settings.workspace_dir, exist_ok=True)
+        with open(exec_common.task_stop_path(settings.workspace_dir, task.id), "w", encoding="utf-8") as f:
+            f.write(str(datetime.now(timezone.utc).timestamp()))
+    except OSError:
+        log.warning("não foi possível gravar o stop da task %s", task.id, exc_info=True)
+    running.status = STEP_PENDING
+    running.started_at = None
+    running.error = None
+    _system_event(
+        session, running, "execution_stopped",
+        {
+            "reason": "execução interrompida pelo usuário (pause/instrução/rewind)",
+            "position": running.position,
+        },
+    )
+    return running
 
 
 @router.post("/{task_id}/review", response_model=TaskOut)
@@ -471,13 +630,13 @@ def review_task(
         task.budget_limit = (task.budget_limit or 0.0) + data.extra_budget
         task.status = TASK_IN_PROGRESS
         task.error = None
-        for st in task.steps:
+        for st in _active_steps(task):
             if st.status == STEP_PENDING:
                 st.error = None
     else:
         task.status = "failed"
         task.error = data.note or "cancelada na revisão humana"
-        for st in task.steps:
+        for st in _active_steps(task):
             if st.status == STEP_PENDING:
                 st.status = STEP_FAILED
                 st.error = task.error
@@ -510,13 +669,13 @@ def bounceback_task(
     if task.status != TASK_NEEDS_REVIEW:
         raise HTTPException(400, f"tarefa não está aguardando revisão (status: {task.status})")
 
-    target = next((st for st in task.steps if st.position == data.target_position), None)
+    target = next((st for st in _active_steps(task) if st.position == data.target_position), None)
     if target is None:
         raise HTTPException(404, f"fase {data.target_position} não encontrada")
 
     # Valida que o alvo é anterior ao último step executado
     max_executed = max(
-        (st.position for st in task.steps if st.status not in (STEP_PENDING,)),
+        (st.position for st in _active_steps(task) if st.status not in (STEP_PENDING,)),
         default=None,
     )
     if max_executed is not None and data.target_position >= max_executed:
@@ -538,7 +697,7 @@ def bounceback_task(
     target.started_at = None
 
     # Reseta todos os steps seguintes
-    for st in task.steps:
+    for st in _active_steps(task):
         if st.position > data.target_position:
             st.status = STEP_PENDING
             st.error = None
@@ -579,6 +738,7 @@ def retry_step(
     position: int,
     data: RetryRequest | None = None,
     session: Session = Depends(get_session),
+    settings=Depends(get_settings),
     user: User | None = Depends(require_auth),
 ):
     """Reabre uma fase para re-execução, opcionalmente com uma nota (feedback externo).
@@ -594,20 +754,15 @@ def retry_step(
     _ensure_can_act(session, task, user)
     if task.status == "created":
         raise HTTPException(400, "tarefa ainda não foi iniciada")
-    step = next((st for st in task.steps if st.position == position), None)
+    step = next((st for st in _active_steps(task) if st.position == position), None)
     if step is None:
         raise HTTPException(404, "fase não encontrada")
     if step.status in (STEP_PENDING, "running"):
         raise HTTPException(400, f"fase em andamento (status: {step.status})")
-    # Mesmo caso do rewind: resetar uma fase enquanto OUTRA está executando faz o
-    # worker rodar duas fases da MESMA task em paralelo (estado corrompido).
-    running_step = next((st for st in task.steps if st.status == STEP_RUNNING), None)
-    if running_step is not None:
-        raise HTTPException(
-            409,
-            f"fase {running_step.position} ({running_step.robot.name if running_step.robot else '?'}) "
-            "ainda está em execução — aguarde concluir ou cancele a tarefa antes de reexecutar.",
-        )
+    # Se outra fase está executando, interrompe ANTES de reexecutar: o usuário
+    # mandou parar e seguir o comando — o robô é morto e a fase atual é entregue
+    # ao usuário (não avança). Antes isso era recusado com 409.
+    _force_stop_running(session, task, settings)
 
     if data and data.note:
         task.feedback = data.note
@@ -643,7 +798,7 @@ def approve_step(
             400,
             f"tarefa não está aguardando aprovação (status atual: {task.status})",
         )
-    step = next((st for st in task.steps if st.position == data.position), None)
+    step = next((st for st in _active_steps(task) if st.position == data.position), None)
     if step is None:
         raise HTTPException(404, f"fase {data.position} não encontrada")
     if not step.pause_before:
@@ -853,7 +1008,7 @@ def continue_blocked(
         raise HTTPException(
             400, f"tarefa não está bloqueada aguardando instrução (status: {task.status})"
         )
-    blocked_steps = [st for st in task.steps if st.status == STEP_BLOCKED]
+    blocked_steps = [st for st in _active_steps(task) if st.status == STEP_BLOCKED]
     if not blocked_steps:
         raise HTTPException(400, "nenhuma fase bloqueada aguardando instrução")
     step = max(blocked_steps, key=lambda st: st.position)
@@ -917,7 +1072,7 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     target.verdict = None
     target.finished_at = None
     target.started_at = None
-    for st in task.steps:
+    for st in _active_steps(task):
         if st.position > target.position:
             st.status = STEP_PENDING
             st.error = None
@@ -972,7 +1127,7 @@ def _emit_user_event(session: Session, step: TaskStep, instruction: str, blocked
 
 
 def _step_by_id(task: Task) -> dict[int, TaskStep]:
-    return {st.id: st for st in task.steps}
+    return {st.id: st for st in _active_steps(task)}
 
 
 def _count_tests(pattern: str, text: str) -> int | None:
@@ -1032,7 +1187,7 @@ def task_workspace(
         eff = _effective(settings, repo)
         checkout = _task_workspace(eff, repo.id, task.id)
         if os.path.isdir(os.path.join(checkout, ".git")):
-            for st in task.steps:
+            for st in _active_steps(task):
                 if st.status in (STEP_PENDING, STEP_RUNNING):
                     continue
                 try:
@@ -1101,7 +1256,7 @@ def step_diff(
 ):
     """Diff real (git) do commit da fase — o git é a fonte de verdade da alteração."""
     task = _get_task_or_404(session, task_id)
-    step = next((st for st in task.steps if st.position == position), None)
+    step = next((st for st in _active_steps(task) if st.position == position), None)
     if step is None:
         raise HTTPException(404, f"fase {position} não encontrada")
     repo = task.repository
@@ -1127,6 +1282,7 @@ def send_instruction(
     task_id: int,
     data: InstructionRequest,
     session: Session = Depends(get_session),
+    settings=Depends(get_settings),
     user: User | None = Depends(require_auth),
 ):
     """Canal de trabalho do workspace: envia uma instrução ao agente e continua.
@@ -1142,11 +1298,11 @@ def send_instruction(
     instruction = data.instruction.strip()
     target = None
     if data.position is not None:
-        target = next((st for st in task.steps if st.position == data.position), None)
+        target = next((st for st in _active_steps(task) if st.position == data.position), None)
         if target is None:
             raise HTTPException(404, f"fase {data.position} não encontrada")
         max_executed = max(
-            (st.position for st in task.steps if st.status != STEP_PENDING),
+            (st.position for st in _active_steps(task) if st.status != STEP_PENDING),
             default=-1,
         )
         if data.position > max_executed and task.status != TASK_DONE:
@@ -1163,20 +1319,15 @@ def send_instruction(
     task.block_question = None
     task.block_options = []
 
-    # Nunca rewind/reopen enquanto uma fase da task está em execução: resetar o
-    # status para `pending` com o subprocesso ainda vivo faz o worker reclamar a
-    # MESMA task em duas fases paralelas (corrompe o estado — ver `--workers N`).
-    running_step = next((st for st in task.steps if st.status == STEP_RUNNING), None)
-    if running_step is not None and (
-        data.position is not None
-        or task.status in (TASK_BLOCKED, TASK_NEEDS_REVIEW, TASK_FAILED, TASK_DONE)
+    # Se uma fase está em execução e o usuário está reenviando instrução (rewind,
+    # retomada), INTERROMPE a execução e segue o comando — o robô é morto pelo
+    # stop file da task e a fase atual é entregue ao usuário (não avança). Antes
+    # isso era recusado com 409 ("fase em execução") e o usuário nunca conseguia
+    # injetar nada.
+    if data.position is not None or task.status in (
+        TASK_BLOCKED, TASK_NEEDS_REVIEW, TASK_FAILED, TASK_DONE,
     ):
-        raise HTTPException(
-            409,
-            f"fase {running_step.position} ({running_step.robot.name if running_step.robot else '?'}) "
-            "ainda está em execução — aguarde concluir ou cancele a tarefa antes de "
-            "reenviar esta instrução.",
-        )
+        _force_stop_running(session, task, settings)
 
     anchor: TaskStep | None = None
     blocked_step: int | None = None
@@ -1184,13 +1335,13 @@ def send_instruction(
     if target is not None:
         # Reexecuta a partir da fase escolhida (voltar para etapa anterior).
         if task.status == TASK_WAITING_APPROVAL:
-            gated = next((st for st in task.steps if st.pause_before), None)
+            gated = next((st for st in _active_steps(task) if st.pause_before), None)
             if gated is not None:
                 gated.pause_before = False
         _rewind_pipeline(session, task, target)
         anchor = target
     elif task.status == TASK_BLOCKED:
-        blocked_steps = [st for st in task.steps if st.status == STEP_BLOCKED]
+        blocked_steps = [st for st in _active_steps(task) if st.status == STEP_BLOCKED]
         if not blocked_steps:
             raise HTTPException(400, "nenhuma fase bloqueada aguardando instrução")
         step = max(blocked_steps, key=lambda st: st.position)
@@ -1202,18 +1353,18 @@ def send_instruction(
         task.status = TASK_QUEUED
         anchor = _pick_anchor(task)
     elif task.status == TASK_WAITING_APPROVAL:
-        gated = next((st for st in task.steps if st.pause_before), None)
+        gated = next((st for st in _active_steps(task) if st.pause_before), None)
         if gated is not None:
             gated.pause_before = False
         anchor = gated or _pick_anchor(task)
         task.status = TASK_QUEUED
     elif task.status in (TASK_NEEDS_REVIEW, TASK_FAILED):
-        pending = next((st for st in task.steps if st.status == STEP_PENDING), None)
+        pending = next((st for st in _active_steps(task) if st.status == STEP_PENDING), None)
         if pending is not None:
             anchor = pending
         else:
             failed = next(
-                (st for st in task.steps if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
+                (st for st in _active_steps(task) if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
                 None,
             )
             if failed is None:
@@ -1222,7 +1373,7 @@ def send_instruction(
             anchor = failed
         task.status = TASK_QUEUED
     elif task.status == TASK_DONE:
-        last = max(task.steps, key=lambda st: st.position)
+        last = max(_active_steps(task), key=lambda st: st.position)
         _reopen_step(last)
         anchor = last
         task.status = TASK_QUEUED
@@ -1242,13 +1393,14 @@ def send_instruction(
 
 def _pick_anchor(task: Task) -> TaskStep | None:
     """Fase âncora para eventos (a mais relevante no estado atual)."""
-    if not task.steps:
+    active = _active_steps(task)
+    if not active:
         return None
-    running = next((st for st in task.steps if st.status == STEP_RUNNING), None)
+    running = next((st for st in active if st.status == STEP_RUNNING), None)
     if running:
         return running
-    active = next(
-        (st for st in task.steps if st.status in (STEP_PENDING, STEP_FAILED, STEP_BLOCKED)),
+    pending_failed = next(
+        (st for st in active if st.status in (STEP_PENDING, STEP_FAILED, STEP_BLOCKED)),
         None,
     )
-    return active or sorted(task.steps, key=lambda st: st.position)[-1]
+    return pending_failed or active[-1]

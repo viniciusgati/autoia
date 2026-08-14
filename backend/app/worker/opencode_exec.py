@@ -86,6 +86,7 @@ def run_opencode(
     no_progress_timeout: int = 0,
     repo_id: int | None = None,
     stop_file: str | None = None,
+    task_stop_file: str | None = None,
     sandbox: SandboxConfig | None = None,
     workspace_dir: str | None = None,
     extra_env: dict[str, str] | None = None,
@@ -152,9 +153,10 @@ def run_opencode(
             else None
         )
         stopped = threading.Event()
+        stop_files = [p for p in (stop_file, task_stop_file) if p]
         stop_watch = (
-            make_stop_watchdog(stop_file, proc, stopped)
-            if stop_file
+            make_stop_watchdog(stop_files, proc, stopped)
+            if stop_files
             else None
         )
 
@@ -302,7 +304,7 @@ def run_opencode(
 
     if stopped.is_set() and not outcome.aborted:
         outcome.aborted = True
-        outcome.abort_reason = "projeto excluído durante a execução"
+        outcome.abort_reason = "execução interrompida (projeto excluído ou parada/instrução do usuário)"
     elif stalled.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True

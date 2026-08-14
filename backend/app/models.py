@@ -36,6 +36,37 @@ SUB_VERIFYING = "verifying"
 SUB_DONE = "done"
 SUB_FAILED = "failed"
 
+# ── Chamados (fluxo de atendimento, independente da pipeline de tasks) ──────
+
+# Status de vida de um Projeto/Épico/Chamado (nível de organização, não pipeline).
+PROJECT_ABERTO = "aberto"
+PROJECT_EM_ANDAMENTO = "em_andamento"
+PROJECT_FECHADO = "fechado"
+
+EPIC_ABERTO = "aberto"
+EPIC_EM_ANDAMENTO = "em_andamento"
+EPIC_FECHADO = "fechado"
+
+CHAMADO_ABERTO = "aberto"
+CHAMADO_EM_ANDAMENTO = "em_andamento"
+CHAMADO_RESPONDIDO = "respondido"
+CHAMADO_CANCELADO = "cancelado"
+CHAMADO_CONCLUIDO = "concluido"
+CHAMADO_FALHOU = "falhou"
+
+# Status de UMA etapa (estágio) vivida por um chamado.
+CHAMADO_STAGE_PENDENTE = "pendente"
+CHAMADO_STAGE_ATIVA = "ativa"           # aguardando ações do usuário (ferramentas/fechamento)
+CHAMADO_STAGE_AGUARDANDO = "aguardando" # ação encaminhada (ferramenta ou avaliação) aguardando worker
+CHAMADO_STAGE_EXECUTANDO = "executando" # ação em execução no worker
+CHAMADO_STAGE_FECHADA = "fechada"
+
+# Resultados possíveis ao fechar uma etapa (decisão da avaliação do robô).
+STAGE_DECISION_NEXT = "next_stage"
+STAGE_DECISION_RESPOSTA = "resposta"
+STAGE_DECISION_CANCELAR = "cancelar"
+STAGE_DECISION_CONCLUIR = "concluir"
+
 
 class Repository(Base):
     __tablename__ = "repositories"
@@ -66,6 +97,13 @@ class Repository(Base):
     # Gera o resumo do desenvolvimento (LLM) automaticamente a cada avanço de fase
     # e ao parar em estado terminal/decisão, sem precisar clicar em "regenerar".
     auto_summary: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Repositórios onde este projeto PODE criar tarefas (nomes exatos, allowlist de
+    # saída). Vazio = restritivo: o robô NÃO pode propor tasks para outros projetos
+    # (só para o próprio). Fica visível no prompt/handoff dos robôs.
+    task_targets: Mapped[list] = mapped_column(JSON, default=list)
+    # Informações úteis injetadas no contexto dos robôs (ex.: DNS do deploy, URLs de
+    # staging, env vars, serviços do host) — texto livre, incluído no AGENTS.md e no prompt.
+    external_context: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="repository")
     skills: Mapped[list["RepositorySkill"]] = relationship(
@@ -173,6 +211,7 @@ class Robot(Base):
     role: Mapped[str] = mapped_column(String(30), default="implement")
     model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     active: Mapped[bool] = mapped_column(default=True)
+    archived: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
 
@@ -378,7 +417,9 @@ class TaskProposal(Base):
     PENDENTE de aprovação humana antes de virar uma task real.
 
     O worker NUNCA cria a task automaticamente: grava a proposta (dedup por
-    `task_id + title`) e o humano decide aceitar/rejeitar via API."""
+    `task_id + title`) e o humano decide aceitar/rejeitar via API. `pipeline_id`
+    é opcional: quando definido (escolhido na UI antes de aceitar), a task filha
+    usa esse pipeline em vez do default do repo/pai."""
 
     __tablename__ = "task_proposals"
 
@@ -391,6 +432,10 @@ class TaskProposal(Base):
     kind: Mapped[str] = mapped_column(String(50), default="feature")
     target_repository_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("repositories.id"), nullable=True
+    )
+    # Pipeline que a task filha usará se aceita (NULL = default do repo/pai).
+    pipeline_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("pipelines.id"), nullable=True
     )
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
@@ -432,6 +477,9 @@ class TaskStep(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Fase substituída por uma mudança de pipeline (`change-pipeline`): fica ARQUIVADA
+    # (histórico/RunEvent preservado), mas é ignorada pelo worker e pela UI atual.
+    archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Snapshot do responsável da task no momento do claim + quem concluiu a fase.
     responsible_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
     finished_by_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
@@ -516,3 +564,185 @@ class StepArtifact(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     step: Mapped[TaskStep] = relationship(back_populates="artifacts")
+
+
+class Project(Base):
+    """Projeto (nível organizacional) de um repositório: contém épicos e chamados.
+
+    Pertence a um Repository (mesmo escopo das tasks) e, além dos metadados, pode
+    carregar um `summary` gerado por LLM (recursos de conteúdo — fase 2+)."""
+
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repository_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default=PROJECT_ABERTO)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    repository: Mapped[Repository] = relationship()
+    epics: Mapped[list["Epic"]] = relationship(
+        back_populates="project",
+        order_by="Epic.id",
+        cascade="all, delete-orphan",
+    )
+    chamados: Mapped[list["Chamado"]] = relationship(back_populates="project")
+
+
+class Epic(Base):
+    """Épico de um projeto: agrupa chamados. Pode carregar `scope` (objetivos/escopo
+    gerados por LLM) e `summary` (resumo/métricas)."""
+
+    __tablename__ = "epics"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"))
+    name: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default=EPIC_ABERTO)
+    scope: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    project: Mapped[Project] = relationship(back_populates="epics")
+    chamados: Mapped[list["Chamado"]] = relationship(back_populates="epic")
+
+
+class ChamadoStageType(Base):
+    """Catálogo de tipos de etapa do fluxo de chamados.
+
+    Configurável por repositório (`repository_id` NULL = global/seed). Define quais
+    ferramentas de apoio estão disponíveis na etapa (`allowed_tools`), quais
+    fechamentos são possíveis (`close_options`, ex.: `next:<tipo>`, `resposta`,
+    `cancelar`, `concluir`) e a configuração de entrega (`delivery_config`,
+    ex.: `{"mode": "branch_mr", "url": "https://..."}` — usada na fase 2).
+    """
+
+    __tablename__ = "chamado_stage_types"
+    __table_args__ = (
+        UniqueConstraint("repository_id", "name", name="uq_chamado_stage_type_scope_name"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repository_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("repositories.id"), nullable=True
+    )
+    name: Mapped[str] = mapped_column(String(100))
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_initial: Mapped[bool] = mapped_column(Boolean, default=False)
+    allowed_tools: Mapped[list] = mapped_column(JSON, default=list)
+    close_options: Mapped[list] = mapped_column(JSON, default=list)
+    delivery_config: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+
+class Chamado(Base):
+    """Um chamado (ticket) de atendimento — entidade NOVA, paralela à Task.
+
+    Percorre um fluxo dinâmico de etapas (`ChamadoStage`), cada uma com transcript
+    próprio de LLM (`ChamadoMessage`) e decisão de fechamento. `workflow_status` é o
+    nome da etapa atual (status principal, independente da pipeline). `status` é o
+    estado de vida do chamado. Quando uma etapa precisa de desenvolvimento, o fluxo
+    pode (fase 2) disparar uma entrega configurável ou criar/relacionar uma Task."""
+
+    __tablename__ = "chamados"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    repository_id: Mapped[int] = mapped_column(ForeignKey("repositories.id"))
+    project_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("projects.id"), nullable=True)
+    epic_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("epics.id"), nullable=True)
+    title: Mapped[str] = mapped_column(String(300))
+    description: Mapped[str] = mapped_column(Text, default="")
+    # Nome da etapa atual (ex.: "entrada", "analise", "desenvolvimento").
+    workflow_status: Mapped[str] = mapped_column(String(100), default="")
+    status: Mapped[str] = mapped_column(String(30), default=CHAMADO_ABERTO)
+    executor: Mapped[str] = mapped_column(String(20), default="kimi")
+    budget_limit: Mapped[float] = mapped_column(Float, default=10.0)
+    cost_spent: Mapped[float] = mapped_column(Float, default=0.0)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responsible_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
+
+    repository: Mapped[Repository] = relationship()
+    project: Mapped["Project | None"] = relationship(back_populates="chamados")
+    epic: Mapped["Epic | None"] = relationship(back_populates="chamados")
+    responsible: Mapped["User | None"] = relationship(foreign_keys=[responsible_id])
+    stages: Mapped[list["ChamadoStage"]] = relationship(
+        back_populates="chamado",
+        order_by="ChamadoStage.position",
+        cascade="all, delete-orphan",
+    )
+    messages: Mapped[list["ChamadoMessage"]] = relationship(
+        back_populates="chamado",
+        order_by="ChamadoMessage.seq",
+        cascade="all, delete-orphan",
+    )
+
+    @property
+    def current_stage(self) -> "ChamadoStage | None":
+        """Etapa atual: a mais recente que ainda não foi fechada."""
+        open_stages = [st for st in self.stages if st.status != CHAMADO_STAGE_FECHADA]
+        if not open_stages:
+            return None
+        return max(open_stages, key=lambda st: st.position)
+
+
+class ChamadoStage(Base):
+    """Uma etapa vivida por um chamado.
+
+    `pending_action` sinaliza o que o worker deve processar: `tool:<chave>` (rodar a
+    ferramenta com a última mensagem `user`) ou `evaluate` (avaliar o fechamento da
+    etapa). Ao fechar, `decision` guarda o resultado (ex.: `next_stage:analise`,
+    `resposta`, `cancelar`, `concluir`) e `result` o texto (resposta ao cliente,
+    justificativa)."""
+
+    __tablename__ = "chamado_stages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chamado_id: Mapped[int] = mapped_column(ForeignKey("chamados.id"))
+    stage_type_id: Mapped[int] = mapped_column(ForeignKey("chamado_stage_types.id"))
+    position: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(30), default=CHAMADO_STAGE_PENDENTE)
+    pending_action: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    decision: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    attempt: Mapped[int] = mapped_column(Integer, default=1)
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    chamado: Mapped[Chamado] = relationship(back_populates="stages")
+    stage_type: Mapped[ChamadoStageType] = relationship()
+    messages: Mapped[list["ChamadoMessage"]] = relationship(
+        back_populates="stage",
+        order_by="ChamadoMessage.seq",
+        cascade="all, delete-orphan",
+    )
+
+
+class ChamadoMessage(Base):
+    """Uma interação do fluxo de um chamado (transcript por etapa).
+
+    Espelho do `RunEvent` das tasks, porém **task-independente**: os eventos são
+    atrelados a `(chamado_id, stage_id)` e o payload é SEMPRE completo (nunca truncar).
+    `kind`: `user` (pedido da pessoa, com `tool`), `assistant_text`, `tool_call`,
+    `tool_result`, `system` (decisões/erros/avaliações do worker)."""
+
+    __tablename__ = "chamado_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    chamado_id: Mapped[int] = mapped_column(ForeignKey("chamados.id"))
+    stage_id: Mapped[int] = mapped_column(ForeignKey("chamado_stages.id"))
+    seq: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(default=utcnow)
+    kind: Mapped[str] = mapped_column(String(30))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+
+    chamado: Mapped[Chamado] = relationship(back_populates="messages")
+    stage: Mapped[ChamadoStage] = relationship(back_populates="messages")

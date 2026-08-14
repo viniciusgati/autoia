@@ -87,6 +87,8 @@ instruções abaixo além do que estiver no seu prompt.
 ## Banco de dados
 {db_rule}
 
+{repo_context}
+
 ## Ambiente de execução (sandbox)
 - Sua execução roda isolada em um contêiner (sem acesso de escrita fora do checkout).
 - Serviços que rodam no HOST (ex.: a API do autoia em :9000, o webbridge em :10086)
@@ -110,14 +112,54 @@ AGENTS_MD_NO_STACK = (
 )
 
 
-def build_agents_md(project_info: str, db_rule: str = DEFAULT_DATABASE_RULE) -> str:
-    """Conteúdo do AGENTS.md gerado: stack detectada + regra de banco + regras de padrão."""
+def build_repo_context(task_targets: list[str], external_context: str | None) -> str:
+    """Seção de contexto de integração do projeto (repos-alvo p/ criar tarefas +
+    informações úteis como DNS/URLs/env). Injetada no prompt e no AGENTS.md.
+
+    `task_targets` vazio = restritivo: o robô só pode propor tasks para o PRÓPRIO
+    projeto (nada cross-repo). Retorna '' se não há nada a informar.
+    """
+    sections: list[str] = []
+    if task_targets:
+        lines = [
+            "## Repositórios onde este projeto pode criar tarefas (propostas)",
+            "Você PODE gerar propostas de tasks para estes repositórios (campo "
+            "`repository` no autoia_tasks.json com o nome exato):",
+        ]
+        lines += [f"- {t}" for t in task_targets]
+        lines.append(
+            "NÃO proponha tasks para repositórios fora desta lista — propostas "
+            "para outros projetos serão recusadas."
+        )
+        sections.append("\n".join(lines))
+    if external_context and external_context.strip():
+        sections.append(
+            "## Contexto do ambiente (fornecido pelo usuário)\n"
+            + external_context.strip()
+        )
+    return "\n\n".join(sections)
+
+
+def build_agents_md(
+    project_info: str,
+    db_rule: str = DEFAULT_DATABASE_RULE,
+    repo_context: str = "",
+) -> str:
+    """Conteúdo do AGENTS.md gerado: stack detectada + regra de banco + contexto de
+    integração (repos-alvo, DNS/URLs) + regras de padrão."""
     return AGENTS_MD_TEMPLATE.format(
-        project_info=project_info or AGENTS_MD_NO_STACK, db_rule=db_rule
+        project_info=project_info or AGENTS_MD_NO_STACK,
+        db_rule=db_rule,
+        repo_context=repo_context,
     )
 
 
-def ensure_agents_md(checkout: str, project_info: str, db_rule: str = DEFAULT_DATABASE_RULE) -> None:
+def ensure_agents_md(
+    checkout: str,
+    project_info: str,
+    db_rule: str = DEFAULT_DATABASE_RULE,
+    repo_context: str = "",
+) -> None:
     """Escreve um AGENTS.md não versionado na raiz do checkout com a stack do projeto.
 
     Se o repositório já versiona um AGENTS.md próprio, o dele prevalece (não
@@ -128,7 +170,7 @@ def ensure_agents_md(checkout: str, project_info: str, db_rule: str = DEFAULT_DA
     if gitops.is_tracked(checkout, "AGENTS.md"):
         return
     with open(os.path.join(checkout, "AGENTS.md"), "w", encoding="utf-8") as f:
-        f.write(build_agents_md(project_info, db_rule))
+        f.write(build_agents_md(project_info, db_rule, repo_context))
     exclude_local(checkout, "AGENTS.md")
 
 

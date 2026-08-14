@@ -76,6 +76,8 @@ log = logging.getLogger("autoia.worker")
 # Prefixo dos arquivos de sinalização de parada de projeto (API → worker):
 # `workspace_dir/.stop-<repo_id>` — ver `process_stop_files`.
 STOP_FILE_PREFIX = ".stop-"
+# Prefixo dos arquivos de parada de UMA task: `workspace_dir/.stop-task-<task_id>`.
+TASK_STOP_FILE_PREFIX = ".stop-task-"
 
 # Papéis que exigem veredicto e o veredicto esperado para avançar.
 VERDICT_EXPECTED = {
@@ -187,6 +189,7 @@ def recover_stale_steps(session_factory) -> int:
             .join(Task)
             .filter(
                 TaskStep.status == STEP_RUNNING,
+                TaskStep.archived.is_(False),
                 Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
             )
             .all()
@@ -230,12 +233,13 @@ def _touch_heartbeat(path: str) -> None:
 
 
 def process_stop_files(workspace_dir: str) -> int:
-    """Processa os arquivos `.stop-<repo_id>` gravados pela API ao excluir um
-    projeto: mata os subprocessos ativos daquele projeto e remove o arquivo.
+    """Processa os arquivos de parada gravados pela API:
+    - `.stop-<repo_id>` (projeto excluído): mata os subprocessos do projeto e remove;
+    - `.stop-task-<task_id>` (task pausada/instruída pelo usuário): o executor da
+      fase observa o arquivo e se mata; aqui apenas o arquivo é removido.
 
-    Canal de parada cooperativa entre API e worker (processos separados). O kill
-    seletivo por projeto não afeta execuções de outros projetos. Retorna quantos
-    arquivos foram processados.
+    Canal de parada cooperativa entre API e worker (processos separados). Retorna
+    quantos arquivos foram processados.
     """
     try:
         names = os.listdir(workspace_dir)
@@ -243,19 +247,41 @@ def process_stop_files(workspace_dir: str) -> int:
         return 0
     count = 0
     for name in names:
-        if not name.startswith(STOP_FILE_PREFIX):
-            continue
-        try:
-            repo_id = int(name[len(STOP_FILE_PREFIX) :])
-        except ValueError:
-            continue
-        exec_common.kill_repo_procs(repo_id)
-        try:
-            os.remove(os.path.join(workspace_dir, name))
-        except OSError:
-            pass
-        count += 1
+        path = os.path.join(workspace_dir, name)
+        if name.startswith(STOP_FILE_PREFIX):
+            try:
+                repo_id = int(name[len(STOP_FILE_PREFIX) :])
+            except ValueError:
+                continue
+            exec_common.kill_repo_procs(repo_id)
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            count += 1
+        elif name.startswith(TASK_STOP_FILE_PREFIX):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            count += 1
     return count
+
+
+def _repo_context(repo: Repository) -> str:
+    """Seção de contexto de integração do projeto (repos-alvo + informações úteis
+    como DNS/URLs) injetada no prompt e no AGENTS.md dos robôs."""
+    return project.build_repo_context(list(repo.task_targets or []), repo.external_context)
+
+
+def _active_steps(task: Task) -> list:
+    """Steps ATIVOS da task (ordena por posição), ignorando os arquivados por uma
+    mudança de pipeline (`change-pipeline`). Os arquivados preservam o histórico
+    (RunEvent) mas não participam mais da execução nem da UI."""
+    return sorted(
+        (st for st in task.steps if not st.archived),
+        key=lambda x: x.position,
+    )
 
 
 def _task_workspace(settings, repo_id: int, task_id: int) -> str:
@@ -382,6 +408,7 @@ def claim_next(session_factory) -> int | None:
             .join(Task)
             .filter(
                 TaskStep.status == STEP_PENDING,
+                TaskStep.archived.is_(False),
                 Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
                 TaskStep.task_id.not_in(running_task_ids),
             )
@@ -549,7 +576,7 @@ def _build_step_context(
     s: Session, task: Task, current_step: TaskStep, checkout: str, base: str, branch: str
 ) -> str:
     parts = []
-    for st in sorted(task.steps, key=lambda x: x.position):
+    for st in _active_steps(task):
         if st.position == current_step.position:
             continue
         robot_name = st.robot.name if st.robot else "?"
@@ -593,7 +620,7 @@ def _build_handoff(
     posteriores que falharam (bounce-back) entram com o relatório completo da falha.
     """
     sections: list[str] = []
-    for st in sorted(task.steps, key=lambda x: x.position):
+    for st in _active_steps(task):
         if st.position == current_step.position:
             continue
         robot_name = st.robot.name if st.robot else "?"
@@ -737,6 +764,7 @@ def _run_executor(
     kimi_cost_per_interaction: float | None = None,
     resume_session_id: str | None = None,
     repo_id: int | None = None,
+    task_id: int | None = None,
     skills_dir: str | None = None,
 ):
     """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`.
@@ -759,6 +787,11 @@ def _run_executor(
     stop_file = (
         exec_common.repo_stop_path(eff.workspace_dir, repo_id)
         if repo_id is not None
+        else None
+    )
+    task_stop_file = (
+        exec_common.task_stop_path(eff.workspace_dir, task_id)
+        if task_id is not None
         else None
     )
     sandbox = eff.sandbox
@@ -839,6 +872,7 @@ def _run_executor(
                 no_progress_timeout=eff.no_progress_timeout,
                 repo_id=repo_id,
                 stop_file=stop_file,
+                task_stop_file=task_stop_file,
                 sandbox=sandbox,
                 workspace_dir=eff.workspace_dir,
                 extra_env=extra_env,
@@ -864,6 +898,7 @@ def _run_executor(
                 resume_session_id=resume_session_id,
                 repo_id=repo_id,
                 stop_file=stop_file,
+                task_stop_file=task_stop_file,
                 skills_dir=skills_dir,
                 sandbox=sandbox,
                 workspace_dir=eff.workspace_dir,
@@ -894,6 +929,15 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
 
         # Workspace isolado por task — cada task tem seu próprio clone, sem conflito
         checkout = _task_workspace(eff, repo.id, task.id)
+
+        # Remove um possível stop file de task obsoleto (escrito pela API ao
+        # pausar/instruir): uma execução NOVA desta task não pode se auto-matar.
+        try:
+            stale_stop = exec_common.task_stop_path(eff.workspace_dir, task.id)
+            if os.path.isfile(stale_stop):
+                os.remove(stale_stop)
+        except OSError:
+            pass
 
         # Fonte do clone: URL do repo ou caminho local cadastrado
         source = repo.url or repo.local_path or ""
@@ -937,8 +981,9 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
 
         step_context = _build_step_context(s, task, step, checkout, base, branch)
         project_info = project.detect_project(checkout)
+        repo_context = _repo_context(repo)
         try:
-            project.ensure_agents_md(checkout, project_info, eff.db_rule)
+            project.ensure_agents_md(checkout, project_info, eff.db_rule, repo_context)
         except (OSError, gitops.GitError):
             log.warning(
                 "não foi possível escrever AGENTS.md no checkout %s", checkout, exc_info=True
@@ -969,7 +1014,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         else:
             prompt = prompts.build_prompt(
                 step.robot, task, step_context, base,
-                project_info=project_info, skills_info=skills_info,
+                project_info=project_info, skills_info=skills_info, repo_context=repo_context,
             )
         log_path = os.path.join(eff.log_dir, f"step_{step.id}.log")
         step.log_path = str(log_path)
@@ -1052,6 +1097,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         on_event=on_event,
         resume_session_id=resume_session_id,
         repo_id=repo.id,
+        task_id=task.id,
         skills_dir=skills_dir,
     )
 
@@ -1234,6 +1280,13 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
             s.commit()
             return None
 
+        # Entrega ao usuário: se a fase deixou de estar `running` durante a
+        # execução (pause/rewind/instrução pela API — o robô foi morto pelo stop
+        # file da task), o worker NÃO decide por ela: a ação do usuário manda.
+        if step.status != STEP_RUNNING:
+            s.commit()
+            return None
+
         # O agente declarou bloqueio aguardando instrução do usuário (autoia_blocked.json).
         block = _consume_block_declaration(s, step, checkout)
         if block:
@@ -1348,7 +1401,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                         {"count": len(subtask_data), "titles": [sd["title"] for sd in subtask_data]},
                     )
 
-        steps = sorted(task.steps, key=lambda x: x.position)
+        steps = _active_steps(task)
         nxt = next((st for st in steps if st.position > step.position), None)
 
         if step.post_merge:
@@ -1451,7 +1504,7 @@ def _handle_failure(eff: EffectiveSettings, s: Session, step: TaskStep, task: Ta
     previous = next(
         (
             st
-            for st in sorted(task.steps, key=lambda x: -x.position)
+            for st in reversed(_active_steps(task))
             if st.position < step.position
         ),
         None,
@@ -1513,6 +1566,12 @@ def _decide_subtask_implement(
             s.commit()
             return None
 
+        # Entrega ao usuário: fase resetada (pause/rewind/instrução) durante a
+        # execução das subtarefas — o worker não decide por ela.
+        if step.status != STEP_RUNNING:
+            s.commit()
+            return None
+
         block = _consume_block_declaration(s, step, checkout)
         if block:
             _mark_blocked(s, step, task, block)
@@ -1561,7 +1620,7 @@ def _decide_subtask_implement(
         step.status = STEP_DONE
         task.current_step = step.position
         nxt = next(
-            (st for st in sorted(task.steps, key=lambda x: x.position)
+            (st for st in _active_steps(task)
              if st.position > step.position),
             None,
         )
@@ -1608,6 +1667,12 @@ def _decide_subtask_verify(
             s.commit()
             return None
 
+        # Entrega ao usuário: fase resetada (pause/rewind/instrução) durante a
+        # execução das subtarefas — o worker não decide por ela.
+        if step.status != STEP_RUNNING:
+            s.commit()
+            return None
+
         block = _consume_block_declaration(s, step, checkout)
         if block:
             _mark_blocked(s, step, task, block)
@@ -1621,7 +1686,7 @@ def _decide_subtask_verify(
             step.verdict = "PASS"
             task.current_step = step.position
             nxt = next(
-                (st for st in sorted(task.steps, key=lambda x: x.position)
+                (st for st in _active_steps(task)
                  if st.position > step.position),
                 None,
             )
@@ -1667,7 +1732,7 @@ def _decide_subtask_verify(
 
             # Bounce-back: volta para o implement step
             previous = next(
-                (st for st in sorted(task.steps, key=lambda x: -x.position)
+                (st for st in reversed(_active_steps(task))
                  if st.position < step.position),
                 None,
             )
@@ -1747,7 +1812,7 @@ def _pm_context(s: Session, task: Task) -> str:
         f"Branch: {task.branch}",
         f"Decisões de PM já tomadas: {task.pm_decisions}",
     ]
-    for st in sorted(task.steps, key=lambda x: x.position):
+    for st in _active_steps(task):
         robot_name = st.robot.name if st.robot else "?"
         lines.append(
             f"Fase {st.position} ({robot_name}) [{st.status}] tentativa {st.attempt}"
@@ -1784,17 +1849,18 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                     log.warning("PM: clone falhou para %s", checkout, exc_info=True)
 
         project_info = project.detect_project(checkout) if os.path.isdir(checkout) else ""
+        repo_context = _repo_context(task.repository)
         skills_dir = None
         skills_info = ""
         if os.path.isdir(checkout):
             try:
-                project.ensure_agents_md(checkout, project_info, eff.db_rule)
+                project.ensure_agents_md(checkout, project_info, eff.db_rule, repo_context)
                 # Skills do projeto materializadas no checkout do PM também: a
                 # decisão recebe a seção `## Skills do projeto disponíveis`.
                 skills_dir, skills_info = _materialize_skills(
                     s, task.repository, checkout, settings.skills_dir
                 )
-                last_pos = max((st.position for st in task.steps), default=-1)
+                last_pos = max((st.position for st in _active_steps(task)), default=-1)
                 # `post_merge` é lido por _build_handoff (progresso das subtarefas)
                 # mesmo para o "step fantasma" do PM.
                 ghost = types.SimpleNamespace(position=last_pos + 1, robot=None, post_merge=False)
@@ -1812,7 +1878,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
                 )
         prompt = prompts.build_prompt(
             pm_robot, task, context, task.repository.default_branch,
-            project_info=project_info, skills_info=skills_info,
+            project_info=project_info, skills_info=skills_info, repo_context=repo_context,
         )
         log_path = os.path.join(eff.log_dir, f"pm_task_{task_id}.log")
         task.pm_decisions += 1
@@ -1844,6 +1910,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             on_event=None,
             kimi_cost_per_interaction=0.0,
             repo_id=task.repository_id,
+            task_id=task_id,
             skills_dir=skills_dir,
         )
     finally:
@@ -1859,16 +1926,16 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
         task = s.get(Task, task_id)
         if task is None:
             return
-        anchor = sorted(task.steps, key=lambda x: x.position)[-1]
+        anchor = _active_steps(task)[-1]
         _system_event(s, anchor, "pm_decision", {"trigger": trigger, **decision})
 
         if decision["action"] == verdicts.PM_RETRY:
             target = None
             if decision.get("position") is not None:
-                target = next((st for st in task.steps if st.position == decision["position"]), None)
+                target = next((st for st in _active_steps(task) if st.position == decision["position"]), None)
             if target is None:
                 target = next(
-                    (st for st in task.steps if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
+                    (st for st in _active_steps(task) if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
                     None,
                 )
             if target is not None and target.attempt < eff.max_attempts:
@@ -1888,10 +1955,10 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             task.budget_limit = (task.budget_limit or 0.0) + eff.pm_budget_topup
             task.status = TASK_IN_PROGRESS
             task.error = None
-            pending = next((st for st in task.steps if st.status == STEP_PENDING), None)
+            pending = next((st for st in _active_steps(task) if st.status == STEP_PENDING), None)
             if pending is None:
                 failed = next(
-                    (st for st in task.steps if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
+                    (st for st in _active_steps(task) if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
                     None,
                 )
                 if failed is not None:
@@ -2110,7 +2177,7 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
             return
         eff = _effective(settings, task.repository)
         if task.pm_decisions >= eff.max_pm_decisions:
-            anchor = sorted(task.steps, key=lambda x: x.position)[-1] if task.steps else None
+            anchor = _active_steps(task)[-1] if _active_steps(task) else None
             _system_event(
                 s, anchor, "pm_skip",
                 {"reason": f"limite de decisões ({eff.max_pm_decisions}) atingido"},
@@ -2177,6 +2244,21 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
             target_repo_name = (entry.get("repository") or "").strip()
             target_repo_id: int | None = None
             if target_repo_name:
+                # Allowlist de saída do projeto: `task_targets` vazio = restritivo
+                # (propostas só para o próprio projeto). Proposta cross-repo fora
+                # da lista é ignorada com evento de auditoria.
+                allowed_targets = [t for t in (task.repository.task_targets or []) if t.strip()]
+                if target_repo_name not in allowed_targets:
+                    _system_event(
+                        s, step, "task_spawn_blocked",
+                        {
+                            "reason": "repo alvo fora da allowlist (task_targets)",
+                            "target": target_repo_name,
+                            "allowed": allowed_targets,
+                            "title": title,
+                        },
+                    )
+                    continue
                 target_repo = s.query(Repository).filter(Repository.name == target_repo_name).first()
                 if target_repo is None:
                     log.warning("repo alvo '%s' não encontrado para spawn", target_repo_name)
@@ -2220,17 +2302,19 @@ def create_child_task(
     description: str,
     kind: str,
     target_repository_id: int | None = None,
+    pipeline_id: int | None = None,
 ) -> Task:
     """Cria a task filha a partir de uma proposta aprovada.
 
     Reutilizado pelo _spawn_tasks antigo e pela API de aceitação de propostas:
-    copia os steps do pipeline do repo alvo (ou o mesmo da task pai), herda o
-    `executor` da task pai e usa o budget do repo alvo (ou o da task pai).
+    copia os steps do pipeline (escolhido na proposta, senão o default do repo
+    alvo, senão o da task pai), herda o `executor` da task pai e usa o budget do
+    repo alvo (ou o da task pai).
     """
     target_repo = (
         s.get(Repository, target_repository_id) if target_repository_id else parent.repository
     )
-    pipeline_id = target_repo.default_pipeline_id or parent.pipeline_id
+    pipeline_id = pipeline_id or target_repo.default_pipeline_id or parent.pipeline_id
     child = Task(
         repository_id=target_repo.id,
         pipeline_id=pipeline_id,

@@ -22,8 +22,13 @@ def test_seed_roles_and_pipeline(settings):
         assert roles["deploy-tester"] == "verify"
         assert roles["pm"] == "pm"
         assert roles["browser-tester"] == "verify"
+        # pipeline de brainstorm: robôs de análise/propostas
+        assert roles["iniciador"] == "analyze"
+        assert roles["analista"] == "plan"
+        assert roles["auditor-ux"] == "usability"
+        assert roles["propositor"] == "propose"
 
-        assert s.query(Pipeline).count() == 3
+        assert s.query(Pipeline).count() == 4
 
         # com deploy: avaliador pré-merge + deploy-tester pós-merge (7 fases)
         deploy = (
@@ -57,11 +62,22 @@ def test_seed_roles_and_pipeline(settings):
         assert order == ["po", "qa", "developer", "tester", "avaliador", "merger"]
         assert all(not st.post_merge for st in sem_deploy.steps)
 
+        # brainstorm: iniciador → analista → auditor-ux → propositor (todas pré-merge,
+        # o merge acontece na última fase — integra análises na default)
+        brainstorm = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "iniciador-analista-ux-propositor")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(brainstorm.steps, key=lambda x: x.position)]
+        assert order == ["iniciador", "analista", "auditor-ux", "propositor"]
+        assert all(not st.post_merge for st in brainstorm.steps)
+
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
-        assert s.query(Robot).count() == 9
-        assert s.query(Pipeline).count() == 3
+        assert s.query(Robot).count() == 13
+        assert s.query(Pipeline).count() == 4
 
 
 def test_migrate_schema_creates_auth_tables_and_new_columns(settings):

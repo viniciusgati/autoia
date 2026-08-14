@@ -24,6 +24,7 @@ def _scope_filter(repository_id: int | None, model):
 @router.get("", response_model=list[RobotOut])
 def list_robots(
     repository_id: int | None = None,
+    archived: bool | None = None,
     session: Session = Depends(get_session),
 ):
     q = session.query(Robot)
@@ -33,6 +34,10 @@ def list_robots(
     else:
         # página global: apenas robôs do sistema (sem repository_id)
         q = q.filter(Robot.repository_id.is_(None))
+    if archived is not None:
+        q = q.filter(Robot.archived.is_(archived))
+    else:
+        q = q.filter(Robot.archived.is_(False))
     return q.order_by(Robot.name).all()
 
 
@@ -72,6 +77,8 @@ def update_robot(
         robot.model = data.model
     if data.active is not None:
         robot.active = data.active
+    if data.archived is not None:
+        robot.archived = data.archived
     session.commit()
     session.refresh(robot)
     return robot

@@ -276,7 +276,9 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
             <span className="badge ws-badge-delivered">resumo LLM</span>
           )}
         </h4>
-        <p className="ws-mission">{occ.mission || occ.goal || "Execução em preparação…"}</p>
+        <p className="ws-mission" title={occ.mission || occ.goal || undefined}>
+          {occ.mission || occ.goal || "Execução em preparação…"}
+        </p>
       </section>
 
       {/* 4. EM ANDAMENTO — atividade atual da execução. */}
@@ -284,7 +286,8 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
         <section className="ws-occ-section">
           <h4 className="ws-section-title">Em andamento</h4>
           <p className="ws-live">
-            <span className="ws-pulse" /> {occ.last_activity}
+            <span className="ws-pulse" />
+            <span className="ws-live-text" title={occ.last_activity}>{occ.last_activity}</span>
           </p>
         </section>
       )}
@@ -400,7 +403,8 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
           <ul className="ws-sysact">
             {occ.system_activity.map((a, i) => (
               <li key={i} className="ws-sysact-item">
-                <span className="muted small">{fmtTime(a.ts)}</span> {a.summary}
+                <span className="muted small">{fmtTime(a.ts)}</span>
+                <span className="ws-sysact-text" title={a.summary}>{a.summary}</span>
               </li>
             ))}
           </ul>
@@ -413,7 +417,10 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
           <ul className="ws-sysact">
             {occ.events.map((e, i) => (
               <li key={i} className="ws-sysact-item">
-                <span className="muted small">{fmtTime(e.ts)}</span> [{e.type}] {e.name} — {e.summary}
+                <span className="muted small">{fmtTime(e.ts)}</span>
+                <span className="ws-sysact-text" title={`${e.type} — ${e.summary}`}>
+                  [{e.type}] {e.name} — {e.summary}
+                </span>
               </li>
             ))}
           </ul>
@@ -471,7 +478,9 @@ export default function Workspace() {
       api
         .getWorkspace(taskId, signal)
         .then(setWs)
-        .catch((e) => setError(String(e)));
+        .catch((e) => {
+          if (!signal.aborted) setError(String(e));
+        });
     },
     1500,
     [taskId],
@@ -618,7 +627,9 @@ export default function Workspace() {
                   <span className="ws-pulse" />
                   <b>Etapa em execução:</b> {runningOcc.robot?.name} · Fase {runningOcc.position + 1}
                   {runningOcc.last_activity && (
-                    <span className="muted small"> — {runningOcc.last_activity}</span>
+                    <span className="ws-etapa-activity" title={runningOcc.last_activity}>
+                      — {runningOcc.last_activity}
+                    </span>
                   )}
                 </span>
               ) : taskStatus === "queued" && nextStep ? (

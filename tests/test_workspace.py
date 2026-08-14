@@ -35,6 +35,59 @@ def _execute(flow, step_id) -> None:
     runner.execute_step(flow["settings"], flow["session_factory"], step_id)
 
 
+def test_instruction_rewind_forca_parada_de_fase_running(flow, tmp_path):
+    """Instrução/rewind com uma fase em execução NÃO é mais recusado (409): a fase
+    é interrompida (stop file da task + reset p/ pending) e o comando segue."""
+    import os
+
+    from app.worker import exec_common, runner
+
+    task_id = flow["task"]["id"]
+    step_id = runner.claim_next(flow["session_factory"])
+    assert step_id is not None
+    with flow["session_factory"]() as s:
+        assert s.get(runner.TaskStep, step_id).status == "running"
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/instruction",
+        json={"instruction": "mude a abordagem", "position": 0},
+    )
+    assert resp.status_code == 200, resp.text
+
+    with flow["session_factory"]() as s:
+        st = s.get(runner.TaskStep, step_id)
+        assert st.status == "pending"  # fase entregue ao usuário (não avança)
+        t = s.get(runner.Task, task_id)
+        assert t.status == "queued"
+        assert t.resume_instruction == "mude a abordagem"
+    # stop file da task gravado (o executor mata o robô ao vê-lo)
+    assert os.path.exists(
+        exec_common.task_stop_path(flow["settings"].workspace_dir, task_id)
+    )
+
+
+def test_pause_interrompe_fase_running(flow, tmp_path):
+    """Pausar uma task com fase em execução interrompe a fase (não fica running
+    presa — antes o pause só marcava o status e a fase seguia até acabar)."""
+    from app.worker import runner
+
+    task_id = flow["task"]["id"]
+    step_id = runner.claim_next(flow["session_factory"])
+    assert step_id is not None
+    with flow["session_factory"]() as s:
+        assert s.get(runner.TaskStep, step_id).status == "running"
+
+    resp = flow["client"].post(f"/api/tasks/{task_id}/pause")
+    assert resp.status_code == 200, resp.text
+
+    with flow["session_factory"]() as s:
+        t = s.get(runner.Task, task_id)
+        assert t.status == "paused"
+        assert s.get(runner.TaskStep, step_id).status == "pending"
+    # sem fase running, o worker não reclama outra fase da task (pausada)
+    assert runner.claim_next(flow["session_factory"]) is None
+
+
 def test_workspace_derives_occurrences(flow, fake_kimi):
     """Workspace: fase executada vira uma ocorrência com status/atividade/entrega."""
     settings = flow["settings"]
@@ -365,9 +418,9 @@ def test_instruction_rewind_forbidden_future(flow, fake_kimi):
     assert resp.status_code == 400
 
 
-def test_instruction_rewind_forbidden_while_running(flow, fake_kimi):
-    """Rewind (instruction com position) é recusado enquanto uma fase está rodando —
-    resetar step running faria o worker rodar duas fases da MESMA task em paralelo."""
+def test_instruction_rewind_forca_parada_enquanto_running(flow, fake_kimi):
+    """Rewind (instruction com position) com uma fase rodando: a fase em execução é
+    interrompida (stop file + reset p/ pending) e a instrução segue — antes era 409."""
     settings = flow["settings"]
     settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
     settings.task_budget = 100.0
@@ -385,12 +438,22 @@ def test_instruction_rewind_forbidden_while_running(flow, fake_kimi):
         f"/api/tasks/{task_id}/instruction",
         json={"instruction": "volte para o PO", "position": 0},
     )
-    assert resp.status_code == 409
-    assert "em execução" in resp.json()["detail"]
+    assert resp.status_code == 200, resp.text
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        assert t.status == "queued"
+        assert t.resume_instruction == "volte para o PO"
+        qa = next(st for st in t.steps if st.position == 1)
+        assert qa.status == "pending"  # fase running entregue ao usuário
+        po = next(st for st in t.steps if st.position == 0)
+        assert po.status == "pending"
+        assert po.attempt == 2
 
 
-def test_retry_forbidden_while_another_step_running(flow, fake_kimi):
-    """retry_step é recusado enquanto OUTRA fase da task está em execução."""
+def test_retry_forca_parada_enquanto_outra_fase_running(flow, fake_kimi):
+    """retry_step com OUTRA fase rodando: interrompe a running e reexecuta a pedida
+    — antes era 409."""
     settings = flow["settings"]
     settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
     settings.task_budget = 100.0
@@ -405,8 +468,16 @@ def test_retry_forbidden_while_another_step_running(flow, fake_kimi):
         s.commit()
 
     resp = flow["client"].post(f"/api/tasks/{task_id}/steps/0/retry", json={})
-    assert resp.status_code == 409
-    assert "em execução" in resp.json()["detail"]
+    assert resp.status_code == 200, resp.text
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        assert t.status == "queued"
+        qa = next(st for st in t.steps if st.position == 1)
+        assert qa.status == "pending"  # fase running entregue ao usuário
+        po = next(st for st in t.steps if st.position == 0)
+        assert po.status == "pending"
+        assert po.attempt == 2
 
 
 def test_decision_request_blocks_and_answers(flow, fake_kimi):

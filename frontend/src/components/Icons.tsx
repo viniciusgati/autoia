@@ -84,6 +84,43 @@ export const PlayIcon = icon(
   <polygon points="6 4 20 12 6 20" fill="currentColor" stroke="none" />,
 );
 
+export const PauseIcon = icon(
+  <>
+    <rect x="6" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none" />
+    <rect x="14" y="4" width="4" height="16" rx="1" fill="currentColor" stroke="none" />
+  </>,
+);
+
+export const UndoIcon = icon(
+  <>
+    <path d="M9 14 4 9l5-5" />
+    <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+  </>,
+);
+
+export const EyeIcon = icon(
+  <>
+    <path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z" />
+    <circle cx="12" cy="12" r="3" />
+  </>,
+);
+
+export const WorkspaceIcon = icon(
+  <>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <line x1="3" y1="10" x2="21" y2="10" />
+    <line x1="9" y1="4" x2="9" y2="20" />
+  </>,
+);
+
+export const ProposalIcon = icon(
+  <>
+    <rect x="3" y="3" width="18" height="18" rx="3" />
+    <path d="M12 8v8" />
+    <path d="M8 12h8" />
+  </>,
+);
+
 export const ChevronRightIcon = icon(
   <polyline points="9 18 15 12 9 6" />,
 );

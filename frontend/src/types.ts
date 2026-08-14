@@ -19,6 +19,11 @@ export interface Repository {
   auto_summary: boolean;
   /** Modo de sandbox de execução do projeto: null (herda global) | "off" | "fs" | "full". */
   sandbox: string | null;
+  /** Repositórios onde este projeto pode criar tarefas (allowlist de saída;
+   *  vazio = restritivo, só o próprio projeto). */
+  task_targets: string[];
+  /** Informações úteis injetadas no contexto dos robôs (DNS de deploy, URLs, env). */
+  external_context: string | null;
 }
 
 /** Informações para o diálogo de confirmação de exclusão do projeto
@@ -36,6 +41,7 @@ export interface Robot {
   role: string;
   model: string | null;
   active: boolean;
+  archived: boolean;
   created_at: string;
 }
 
@@ -163,6 +169,7 @@ export interface TaskProposal {
   kind: string;
   repository_id: number | null;
   target_repository_id: number | null;
+  pipeline_id: number | null;
   status: "pending" | "accepted" | "rejected";
   created_at: string;
   accepted_task_id: number | null;
@@ -304,6 +311,8 @@ export interface Dashboard {
   guardrail_events: number;
   recent_guardrails: RunEvent[];
   notices: Notice[];
+  // Propostas de tasks filhas aguardando decisão humana (aceitas seguem visíveis).
+  proposals: TaskProposal[];
   // Dashboard pessoal (auth ON): usuário logado, tarefas dele e participações.
   user: User | null;
   my_tasks: MyTask[];
@@ -389,4 +398,111 @@ export interface StepDiff {
   diff: string;
   files: string[];
   commit: string | null;
+}
+
+// ---------- Chamados (fluxo de atendimento: Projeto > Épico > Chamado) ----------
+
+export interface Project {
+  id: number;
+  repository_id: number;
+  name: string;
+  description: string;
+  status: string;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectDetail extends Project {
+  epics: Epic[];
+  chamado_count: number;
+}
+
+export interface Epic {
+  id: number;
+  project_id: number;
+  name: string;
+  description: string;
+  status: string;
+  scope: string | null;
+  summary: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EpicDetail extends Epic {
+  chamado_count: number;
+}
+
+/** Catálogo de tipos de etapa do fluxo de chamados. */
+export interface ChamadoStageType {
+  id: number;
+  repository_id: number | null;
+  name: string;
+  description: string;
+  is_initial: boolean;
+  allowed_tools: string[];
+  close_options: string[];
+  delivery_config: Record<string, unknown>;
+}
+
+export interface ChamadoStage {
+  id: number;
+  chamado_id: number;
+  stage_type_id: number;
+  position: number;
+  status: string;
+  pending_action: string | null;
+  decision: string | null;
+  result: string | null;
+  error: string | null;
+  attempt: number;
+  started_at: string | null;
+  finished_at: string | null;
+  stage_type_name: string | null;
+}
+
+export interface ChamadoMessage {
+  id: number;
+  chamado_id: number;
+  stage_id: number;
+  seq: number;
+  ts: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  cost: number;
+}
+
+export interface Chamado {
+  id: number;
+  repository_id: number;
+  project_id: number | null;
+  epic_id: number | null;
+  title: string;
+  description: string;
+  workflow_status: string;
+  status: string;
+  executor: string;
+  budget_limit: number;
+  cost_spent: number;
+  error: string | null;
+  responsible_id: number | null;
+  created_at: string;
+  updated_at: string;
+  stages: ChamadoStage[];
+}
+
+export interface ToolInfo {
+  key: string;
+  label: string;
+  description: string;
+}
+
+export interface ChamadoWorkspace {
+  chamado: Chamado;
+  stages: ChamadoStage[];
+  messages: ChamadoMessage[];
+  current_stage: ChamadoStage | null;
+  tools: ToolInfo[];
+  close_options: string[];
 }

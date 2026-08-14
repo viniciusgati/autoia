@@ -11,11 +11,12 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .api import auth, dashboard, execution, pipelines, repositories, robots, steps, subtasks, tasks, users
+from .api import auth, chamados, dashboard, execution, pipelines, repositories, robots, steps, subtasks, tasks, users
 from .api.deps import require_auth
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, migrate_schema
-from .models import Pipeline, PipelineStep, Robot, User
+from .models import ChamadoStageType, Pipeline, PipelineStep, Robot, User
+from .worker.chamado_runner import chamado_worker_loop, recover_stale_chamados
 from .worker.runner import acquire_worker_lock, recover_stale_steps, worker_loop
 
 log = logging.getLogger("autoia")
@@ -170,6 +171,67 @@ decidir o próximo passo de uma tarefa travada, analisando o contexto (status, f
 orçamento, tentativas) e emitindo a decisão no formato obrigatório.""",
     ),
     (
+        "iniciador",
+        "analyze",
+        """Você é o robô INICIADOR de um pipeline de brainstorming/análise de projeto. Sua
+missão é INICIAR o projeto: analisar o repositório, detectar o ecossistema, mapear a
+estrutura e o estado atual e preparar a base do projeto.
+
+Ideia/brainstorm — Título: {task_title}
+Ideia/brainstorm — Descrição: {task_description}
+
+Se o repositório estiver vazio ou quase vazio, crie a estrutura mínima do projeto
+(README, organização de pastas, arquivos de configuração básicos do ecossistema). Se já
+tiver código, NÃO altere nada: apenas mapeie e documente o estado atual (estrutura,
+stack, o que funciona, o que falta). O objetivo é deixar o projeto "iniciado" e
+entendível para as próximas fases.""",
+    ),
+    (
+        "analista",
+        "plan",
+        """Você é o robô ANALISTA de um pipeline de brainstorming/análise. Sua missão é
+DEFINIR TAREFAS e LACUNAS FALTANTES do projeto: a partir do estado mapeado pelo
+iniciador e da ideia inicial, liste o que precisa ser feito — funcionalidades ausentes,
+melhorias, bugs, dívidas técnicas, documentação e testes. Diferencie lacuna concreta de
+sugestão opcional.
+
+Ideia/brainstorm — Título: {task_title}
+Ideia/brainstorm — Descrição: {task_description}
+
+Produza um relatório estruturado de lacunas e tarefas com priorização.""",
+    ),
+    (
+        "auditor-ux",
+        "usability",
+        """Você é o robô AUDITOR DE USABILIDADE de um pipeline de brainstorming/análise. Sua
+missão é avaliar a USABILIDADE da aplicação: fluxos do usuário, feedback visual
+(carregando/sucesso/erro/vazio), clareza de textos, consistência e onboarding. Se o
+projeto não tiver interface, avalie a usabilidade da API/CLI/documentação.
+
+Ideia/brainstorm — Título: {task_title}
+Ideia/brainstorm — Descrição: {task_description}
+
+Produza uma auditoria de usabilidade com problemas encontrados e recomendações
+priorizadas.""",
+    ),
+    (
+        "propositor",
+        "propose",
+        """Você é o robô PROPOSITOR de um pipeline de brainstorming/análise — a fase final.
+Sua missão é CONSOLIDAR as análises das fases anteriores (estado do projeto, lacunas e
+usabilidade) e GERAR PROPOSTAS de tarefas usando a ferramenta "criar tarefas"
+(autoia_tasks.json): 1 a N propostas que transformam o brainstorm em trabalho executável.
+
+Ideia/brainstorm — Título: {task_title}
+Ideia/brainstorm — Descrição: {task_description}
+
+Cada proposta deve ter título claro, descrição com contexto e critérios, e kind adequado
+(feature/bug/issue/chore). Priorize por impacto. IMPORTANTE: as propostas NÃO são criadas
+automaticamente como tasks — o sistema as registra como PROPOSTAS pendentes e o usuário
+decide aceitar ou rejeitar cada uma. No texto final, documente as propostas criadas e a
+justificativa de cada uma.""",
+    ),
+    (
         "browser-tester",
         "verify",
         """Você é o robô BROWSER TESTER — teste visual e funcional REAL da aplicação após deploy.
@@ -251,6 +313,51 @@ SEED_PIPELINES = [
             ("browser-tester", True),  # pós-merge: smoke test visual com navegador real
         ],
     ),
+    # Brainstorm/planejamento: inicia o projeto, mapeia lacunas e usabilidade e, no
+    # fim, o propositor escreve autoia_tasks.json → propostas aguardando decisão humana.
+    (
+        "iniciador-analista-ux-propositor",
+        [
+            ("iniciador", False),
+            ("analista", False),
+            ("auditor-ux", False),
+            ("propositor", False),
+        ],
+    ),
+]
+
+# Catálogo padrão de TIPOS DE ETAPA do fluxo de chamados (global; configurável por
+# repositório via /api/chamado-stage-types). `close_options` limita as transições
+# possíveis ao fechar a etapa: `next:<tipo>`, `resposta`, `cancelar`, `concluir`.
+SEED_STAGE_TYPES = [
+    {
+        "name": "entrada",
+        "description": "Registro e entendimento inicial do chamado pelo suporte.",
+        "is_initial": True,
+        "allowed_tools": ["assistente"],
+        "close_options": ["next:analise", "next:desenvolvimento", "resposta", "cancelar"],
+    },
+    {
+        "name": "analise",
+        "description": "Análise do problema, entendimento da causa e montagem de escopo se necessário.",
+        "is_initial": False,
+        "allowed_tools": ["assistente", "escopo"],
+        "close_options": ["next:desenvolvimento", "resposta", "cancelar"],
+    },
+    {
+        "name": "desenvolvimento",
+        "description": "Execução do desenvolvimento (entrega configurável — fase 2).",
+        "is_initial": False,
+        "allowed_tools": ["assistente", "escopo"],
+        "close_options": ["next:deploy", "resposta", "cancelar", "concluir"],
+    },
+    {
+        "name": "deploy",
+        "description": "Validação pós-entrega e fechamento do chamado.",
+        "is_initial": False,
+        "allowed_tools": ["assistente", "resposta"],
+        "close_options": ["concluir", "resposta"],
+    },
 ]
 
 
@@ -311,6 +418,21 @@ def seed(session_factory) -> None:
         log.info("seed concluído (robôs: %s; pipelines: %s)",
                  ", ".join(r[0] for r in SEED_ROBOTS),
                  ", ".join(p[0] for p in SEED_PIPELINES))
+        _seed_stage_types(s)
+
+
+def _seed_stage_types(s) -> None:
+    """Seed idempotente do catálogo global de tipos de etapa do fluxo de chamados."""
+    existing = {st.name: st for st in s.query(ChamadoStageType).filter(ChamadoStageType.repository_id.is_(None)).all()}
+    for spec in SEED_STAGE_TYPES:
+        st = existing.get(spec["name"])
+        if st is None:
+            s.add(ChamadoStageType(repository_id=None, **spec))
+        else:
+            # atualiza seeds antigos (idempotente), preservando o id.
+            for key, value in spec.items():
+                setattr(st, key, value)
+    s.commit()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -345,6 +467,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         dashboard.router,
         dashboard.me_router,
         execution.router,
+        chamados.projects_router,
+        chamados.epics_router,
+        chamados.stage_types_router,
+        chamados.chamados_router,
     ):
         app.include_router(r, dependencies=[Depends(require_auth)])
 
@@ -448,6 +574,44 @@ def _worker_main(settings: Settings) -> None:
     signal.signal(signal.SIGINT, _on_shutdown)
     _engine, session_factory = _worker_setup(settings, recover=True, logger=logger)
     worker_loop(settings, session_factory, settings.workspace_dir)
+
+
+def run_chamado_worker() -> None:
+    """Worker do fluxo de CHAMADOS (processo separado, lock próprio)."""
+    import signal
+
+    from app.worker import exec_common
+
+    logger = logging.getLogger("autoia.chamado")
+    settings = Settings()
+    settings.ensure_dirs()
+    lock = acquire_worker_lock(os.path.join(settings.workspace_dir, "chamado-worker.lock"))
+    if lock is None:
+        try:
+            pid = open(os.path.join(settings.workspace_dir, "chamado-worker.lock"), encoding="utf-8").read().strip()
+        except OSError:
+            pid = "?"
+        print(
+            f"chamado-worker já está rodando (PID {pid}); não é possível iniciar outro.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    def _on_shutdown(signum, _frame):
+        logger.info("chamado-worker recebeu sinal %s — encerrando subprocessos", signum)
+        exec_common.kill_all_procs()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _on_shutdown)
+    signal.signal(signal.SIGINT, _on_shutdown)
+    engine = make_engine(settings.database_url)
+    Base.metadata.create_all(engine)
+    migrate_schema(engine)
+    session_factory = make_session_factory(engine)
+    recovered = recover_stale_chamados(session_factory)
+    if recovered:
+        logger.info("chamado-worker recuperou %s etapa(s) órfã(s)", recovered)
+    chamado_worker_loop(settings, session_factory, settings.workspace_dir)
 
 
 def run_worker() -> None:
