@@ -546,12 +546,32 @@ def _worker_process(settings: Settings, logger) -> None:
     worker_loop(settings, session_factory, settings.workspace_dir)
 
 
-def _worker_main(settings: Settings) -> None:
-    """Worker de instância única (`--workers 1`): lock exclusivo + recover + loop."""
+def _install_worker_shutdown_handler(logger) -> None:
+    """Handler de shutdown do worker (single, filho multi-worker e chamado-worker):
+    mata os executores ativos (kimi/opencode, inclusive o contêiner do sandbox) e
+    sai IMEDIATAMENTE com `os._exit(0)` — sem passar pelo loop do runner, que
+    registraria a execução morta como FALHA da fase ("kimi saiu com código -9").
+
+    Com isso, um desligamento INTENCIONAL deixa o step `running` (nada é gravado);
+    o próximo startup o recupera como `pending` via `recover_stale_steps`. Processos
+    que escapam do grupo do executor (emuladores, gradle daemons, servidores fake)
+    são varridos pelo comando `autoia-stop`.
+    """
     import signal
 
     from app.worker import exec_common
 
+    def _on_shutdown(signum, _frame):
+        logger.info("worker recebeu sinal %s — encerrando subprocessos", signum)
+        exec_common.kill_all_procs()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _on_shutdown)
+    signal.signal(signal.SIGINT, _on_shutdown)
+
+
+def _worker_main(settings: Settings) -> None:
+    """Worker de instância única (`--workers 1`): lock exclusivo + recover + loop."""
     logger = logging.getLogger("autoia.worker")
     lock = acquire_worker_lock(os.path.join(settings.workspace_dir, "worker.lock"))
     if lock is None:
@@ -565,23 +585,13 @@ def _worker_main(settings: Settings) -> None:
         )
         sys.exit(1)
 
-    def _on_shutdown(signum, _frame):
-        logger.info("worker recebeu sinal %s — encerrando subprocessos", signum)
-        exec_common.kill_all_procs()
-        os._exit(0)
-
-    signal.signal(signal.SIGTERM, _on_shutdown)
-    signal.signal(signal.SIGINT, _on_shutdown)
+    _install_worker_shutdown_handler(logger)
     _engine, session_factory = _worker_setup(settings, recover=True, logger=logger)
     worker_loop(settings, session_factory, settings.workspace_dir)
 
 
 def run_chamado_worker() -> None:
     """Worker do fluxo de CHAMADOS (processo separado, lock próprio)."""
-    import signal
-
-    from app.worker import exec_common
-
     logger = logging.getLogger("autoia.chamado")
     settings = Settings()
     settings.ensure_dirs()
@@ -597,13 +607,7 @@ def run_chamado_worker() -> None:
         )
         sys.exit(1)
 
-    def _on_shutdown(signum, _frame):
-        logger.info("chamado-worker recebeu sinal %s — encerrando subprocessos", signum)
-        exec_common.kill_all_procs()
-        os._exit(0)
-
-    signal.signal(signal.SIGTERM, _on_shutdown)
-    signal.signal(signal.SIGINT, _on_shutdown)
+    _install_worker_shutdown_handler(logger)
     engine = make_engine(settings.database_url)
     Base.metadata.create_all(engine)
     migrate_schema(engine)
@@ -617,6 +621,8 @@ def run_chamado_worker() -> None:
 def run_worker() -> None:
     import argparse
     import signal
+
+    from app.worker import exec_common
 
     parser = argparse.ArgumentParser(description="autoia worker")
     parser.add_argument("--workers", type=int, default=1, help="número de processos de worker")
@@ -665,6 +671,9 @@ def run_worker() -> None:
         pid = os.fork()
         if pid == 0:  # filho: loop puro, sem lock/recover (engine próprio)
             try:
+                # Handler de shutdown ANTES de qualquer execução: SIGTERM mata os
+                # executores do filho e sai SEM gravar falha fake na fase.
+                _install_worker_shutdown_handler(logging.getLogger("autoia.worker"))
                 _worker_process(settings, logger)
             finally:
                 os._exit(0)
@@ -677,6 +686,25 @@ def run_worker() -> None:
                 os.kill(pid, signum)
             except ProcessLookupError:
                 pass
+        # Deadline: cada filho mata seus executores e sai com _exit(0); se algum
+        # travar, SIGKILL nele — nunca deixar o pai pendurado nem kimi órfão.
+        deadline = time.monotonic() + 20
+        remaining = list(children)
+        while remaining and time.monotonic() < deadline:
+            for pid in list(remaining):
+                wpid, _status = os.waitpid(pid, os.WNOHANG)
+                if wpid:
+                    remaining.remove(pid)
+            if not remaining:
+                break
+            time.sleep(0.2)
+        for pid in remaining:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        exec_common.kill_all_procs()  # belt-and-braces (filhos já deveriam ter matado)
+        os._exit(0)
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)

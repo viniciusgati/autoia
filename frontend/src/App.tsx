@@ -19,6 +19,7 @@ import Execution from "./pages/Execution";
 import Chamados from "./pages/Chamados";
 import ChamadoDetail from "./pages/ChamadoDetail";
 import Projects from "./pages/Projects";
+import Users from "./pages/Users";
 import Notifications from "./components/Notifications";
 import { usePolling } from "./lib/polling";
 import type { Repository } from "./types";
@@ -261,15 +262,21 @@ export default function App() {
           <NavLink to="/pipelines" className={({ isActive }) => (isActive ? "active" : "")}>
             <PipelinesIcon size={16} /> Pipelines
           </NavLink>
+          {user?.role === "admin" && (
+            <NavLink to="/users" className={({ isActive }) => (isActive ? "active" : "")}>
+              <RobotsIcon size={16} /> Usuários
+            </NavLink>
+          )}
         </div>
       </nav>
-      <main className="content">
+      <main className={`content${location.pathname.includes("/workspace") ? " content-flush" : ""}`}>
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/execucao" element={<Execution />} />
           <Route path="/robots" element={<Robots />} />
           <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/repositories" element={<Repositories />} />
+          <Route path="/users" element={<Users />} />
           <Route path="/:repoId" element={<RepoDashboard />} />
           <Route path="/:repoId/config" element={<RepoConfig />} />
           <Route path="/:repoId/tasks" element={<RepoTasks />} />

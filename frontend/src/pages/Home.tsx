@@ -7,6 +7,7 @@ import StatusBadge from "../components/StatusBadge";
 import StatusIcon from "../components/StatusIcon";
 import { fmtCost } from "../lib/money";
 import { usePolling } from "../lib/polling";
+import { taskStats } from "../lib/tasks";
 import type { Dashboard as DashboardData, MyProject, MyTask, Repository, TaskListItem, TaskProposal, TaskStepListItem } from "../types";
 
 /** Seção de propostas de tasks filhas no dashboard: aparecem enquanto não forem
@@ -405,6 +406,7 @@ export default function Home() {
                 (counts.byStatus["in_progress"] || 0)
               : 0;
             const humanCount = repoTasks.filter(precisaHumano).length;
+            const stats = taskStats(repoTasks);
             const recentTasks = [...repoTasks]
               .sort((a, b) => {
                 const aH = precisaHumano(a) ? 1 : 0;
@@ -435,6 +437,10 @@ export default function Home() {
                     {activeCount > 0 && (
                       <span className="project-card-active">{activeCount} ativas</span>
                     )}
+                    {stats.doneToday > 0 && (
+                      <span>{stats.doneToday} concluída{stats.doneToday === 1 ? "" : "s"} hoje</span>
+                    )}
+                    <span className="mono">{fmtCost(stats.spent)}</span>
                   </div>
                 </Link>
 

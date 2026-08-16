@@ -58,7 +58,12 @@ _ACTIVE_STATUSES = (TASK_QUEUED, TASK_IN_PROGRESS)
 
 
 def _user_repo_ids(session: Session, user_id: int) -> list[int]:
-    """Projetos em que o usuário participa (repository_users)."""
+    """Projetos visíveis ao usuário: participação em `repository_users` — exceto
+    o admin global, que enxerga TODOS os projetos (coerente com `_ensure_can_act`
+    e com a edição de projetos em `repositories.py`)."""
+    user = session.get(User, user_id)
+    if user is not None and user.is_admin:
+        return [rid for (rid,) in session.query(Repository.id).all()]
     return [
         r.repository_id
         for r in session.query(RepositoryUser)

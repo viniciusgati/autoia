@@ -585,6 +585,137 @@ class TestSubtaskWorker:
         assert "[PENDENTE]" in summary
         assert "[FALHOU]" in summary
 
+    def test_subtask_verify_timed_out_before(self, flow):
+        """Detecção determinística de timeout anterior na verificação da subtarefa:
+        só conta evento `subtask_failed` da fase verify, da MESMA posição, com
+        motivo de timeout (falha de infraestrutura ≠ reprovação por veredicto)."""
+        from app.worker.subtask import _subtask_verify_timed_out_before
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+        with session_factory() as s:
+            from app.models import RunEvent, SubTask, TaskStep
+            s.add(SubTask(task_id=task_id, position=0, title="Sub", status="pending"))
+            s.commit()
+            step_ids = [sid for (sid,) in s.query(TaskStep.id).filter(TaskStep.task_id == task_id).all()]
+            assert len(step_ids) > 0
+            verify_id = step_ids[3]
+            s.add(RunEvent(
+                step_id=verify_id, seq=1, kind="subtask_failed",
+                payload={"position": 0, "phase": "verify", "reason": "timeout após 1800s"},
+            ))
+            s.add(RunEvent(
+                step_id=verify_id, seq=2, kind="subtask_failed",
+                payload={"position": 0, "phase": "verify", "reason": "veredicto FAIL"},
+            ))
+            s.commit()
+
+        assert _subtask_verify_timed_out_before(session_factory, task_id, 0) is True
+        assert _subtask_verify_timed_out_before(session_factory, task_id, 1) is False
+
+        # Sem eventos de timeout → False (reprovação por veredicto não conta)
+        with session_factory() as s:
+            for ev in s.query(RunEvent).all():
+                if (ev.payload or {}).get("reason") == "timeout após 1800s":
+                    s.delete(ev)
+            s.commit()
+        assert _subtask_verify_timed_out_before(session_factory, task_id, 0) is False
+
+    def test_verify_prompt_simplifica_apos_timeout_anterior(self, flow, settings, monkeypatch):
+        """Re-verificação de subtarefa que estourou o tempo antes: o prompt orienta
+        o tester a ficar só no caminho headless e avançar avisando (sem emulador)."""
+        import app.worker.kimi_exec as ke
+        import app.verdicts as vmod
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            from app.models import (
+                STEP_DONE, SUB_IMPLEMENTED, RunEvent, SubTask, TaskStep,
+            )
+            s.add(SubTask(task_id=task_id, position=0, title="Sub 1",
+                          description="fazer A", status=SUB_IMPLEMENTED, summary="feito"))
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            steps[0].status = STEP_DONE
+            steps[1].status = STEP_DONE
+            steps[2].status = STEP_DONE
+            steps[3].status = "pending"
+            s.add(RunEvent(
+                step_id=steps[3].id, seq=1, kind="subtask_failed",
+                payload={"position": 0, "phase": "verify", "reason": "timeout após 1800s"},
+            ))
+            s.commit()
+
+        captured: list[str] = []
+
+        def fake_run_kimi(prompt, **kw):
+            captured.append(prompt)
+            return ke.KimiOutcome(exit_code=0, final_text="ok", interaction_count=1)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(ke, "run_kimi", fake_run_kimi)
+            mp.setattr(vmod, "read_verdict", lambda c: "PASS\nSUMMARY: headless ok")
+            mp.setattr(vmod, "remove_verdict", lambda c: None)
+            claimed = claim_next(session_factory)
+            assert claimed is not None
+            trigger = execute_step(settings, session_factory, claimed)
+            assert trigger is None
+
+        assert captured, "verify não chegou a rodar"
+        prompt = captured[0]
+        assert "estourou o tempo" in prompt
+        assert "NÃO suba emulador" in prompt
+        assert "TAREFA SEPARADA" in prompt
+
+        with session_factory() as s:
+            from app.models import SubTask
+            sub = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+            assert sub.status == "done"
+            assert sub.verdict == "PASS"
+
+    def test_verify_prompt_sem_timeout_anterior_nao_simplifica(self, flow, settings, monkeypatch):
+        """Sem histórico de timeout, o prompt de verificação NÃO traz a seção de
+        simplificação (o tester pode usar a verificação completa)."""
+        import app.worker.kimi_exec as ke
+        import app.verdicts as vmod
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            from app.models import (
+                STEP_DONE, SUB_IMPLEMENTED, SubTask, TaskStep,
+            )
+            s.add(SubTask(task_id=task_id, position=0, title="Sub 1",
+                          description="fazer A", status=SUB_IMPLEMENTED, summary="feito"))
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            steps[0].status = STEP_DONE
+            steps[1].status = STEP_DONE
+            steps[2].status = STEP_DONE
+            steps[3].status = "pending"
+            s.commit()
+
+        captured: list[str] = []
+
+        def fake_run_kimi(prompt, **kw):
+            captured.append(prompt)
+            return ke.KimiOutcome(exit_code=0, final_text="ok", interaction_count=1)
+
+        with monkeypatch.context() as mp:
+            mp.setattr(ke, "run_kimi", fake_run_kimi)
+            mp.setattr(vmod, "read_verdict", lambda c: "PASS\nSUMMARY: ok")
+            mp.setattr(vmod, "remove_verdict", lambda c: None)
+            claimed = claim_next(session_factory)
+            assert claimed is not None
+            execute_step(settings, session_factory, claimed)
+
+        assert captured, "verify não chegou a rodar"
+        assert "estourou o tempo" not in captured[0]
+        assert "Limite de tempo desta execução" in captured[0]
+
 
 # ---------------------------------------------------------------------------
 # PO gera subtarefas automaticamente

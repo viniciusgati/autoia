@@ -314,9 +314,18 @@ pytest                      # suíte (52 testes; exige git no PATH)
 autoia-api                  # API :9000 (serve frontend/dist; AUTOIA_API_HOST=0.0.0.0 p/ LAN)
 autoia-worker               # worker (processo separado)
 autoia-chamado-worker       # worker dos CHAMADOS (processo separado; pip install -e após mudar)
+autoia-stop                 # para TUDO: serviços + órfãos dos robôs (emuladores/daemons) + limpeza
 cd frontend && npm install && npm run dev   # frontend dev :5173
 cd frontend && npm run build                # atualiza dist (servido pela API)
 ```
+
+**Parada total (`autoia-stop`)**: SIGTERM nos serviços (os workers matam os
+executores e saem sem gravar falha fake — o step fica `running` e o próximo start
+o recupera como `pending`), varredura de `/proc` para órfãos que escapam do grupo
+do executor (emuladores Android, gradle daemons, processos com cwd no workspace),
+`docker rm -f` pelos cidfiles do sandbox e limpeza de `.stop-*`/heartbeats. Prefira
+sempre `autoia-stop` ou Ctrl+C no worker — `kill -9` direto no worker deixa os
+executores órfãos (o comando varre, mas a fase morre gravada como falha).
 
 ## O que NÃO fazer
 

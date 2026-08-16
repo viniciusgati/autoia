@@ -6,6 +6,7 @@ import StatusIcon from "../components/StatusIcon";
 import TaskCard from "../components/TaskCard";
 import { fmtCost } from "../lib/money";
 import { usePolling } from "../lib/polling";
+import { taskStats } from "../lib/tasks";
 import type { Pipeline, Repository, TaskListItem } from "../types";
 
 const ATIVOS = ["queued", "in_progress", "needs_review", "waiting_approval", "blocked"];
@@ -44,6 +45,7 @@ export default function RepoDashboard() {
 
   const ativas = tasks.filter((t) => ATIVOS.includes(t.status));
   const finalizadas = tasks.filter((t) => !ativas.includes(t));
+  const stats = taskStats(tasks);
 
   return (
     <div className="resumo">
@@ -53,6 +55,21 @@ export default function RepoDashboard() {
           {updatedAt ? `atualizado ${updatedAt.toLocaleTimeString()}` : "carregando…"} ·{" "}
           {ativas.length} ativa(s)
         </span>
+      </div>
+
+      <div className="cards" style={{ marginTop: 14 }}>
+        <div className="card">
+          <div className="card-value">{stats.doneToday}</div>
+          <div className="card-label">concluídas hoje</div>
+        </div>
+        <div className="card">
+          <div className="card-value">{fmtCost(stats.spent)}</div>
+          <div className="card-label">gasto total</div>
+        </div>
+        <div className="card">
+          <div className="card-value">{ativas.length}</div>
+          <div className="card-label">tarefas ativas</div>
+        </div>
       </div>
 
       <div className="resumo-actions">

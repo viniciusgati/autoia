@@ -66,6 +66,29 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** True se o timestamp (ISO/UTC) cai no dia de HOJE no fuso local do navegador. */
+export function isToday(iso: string): boolean {
+  const d = new Date(iso);
+  const now = new Date();
+  return (
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  );
+}
+
+/** Métricas rápidas de um conjunto de tasks para o dashboard:
+ *  concluídas hoje (`status === "done"` com `updated_at` de hoje) + custo acumulado. */
+export function taskStats(tasks: TaskListItem[]): { doneToday: number; spent: number } {
+  let doneToday = 0;
+  let spent = 0;
+  for (const t of tasks) {
+    spent += t.cost_spent ?? 0;
+    if (t.status === "done" && isToday(t.updated_at)) doneToday += 1;
+  }
+  return { doneToday, spent };
+}
+
 /** Extrai resumo legível de um diff_stat (git --stat): "3 arquivos, +45/-12". */
 export function diffSummary(diffStat: string | null): string | null {
   if (!diffStat) return null;

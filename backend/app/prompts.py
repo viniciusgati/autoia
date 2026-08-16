@@ -248,6 +248,23 @@ Esta fase é a GARANTIA DE QUALIDADE AUTOMATIZADA: sem humano revisando depois.
 - NÃO altere código nem arquivos do projeto: você VERIFICA e REPORTA. Correções voltam
   para o developer automaticamente (bounce-back) com o seu relatório.
 
+### Orçamento de tempo (leia com atenção)
+Sua execução tem um TEMPO MÁXIMO definido pela plataforma — se estourar, a fase
+falha por timeout e o veredicto NÃO é aproveitado (nem o parcial). Por isso:
+- Prefira a verificação mais rápida e determinística: a suíte de testes headless do
+  projeto (unit/integração na JVM/Robolectric/etc.), sem subir emulador, navegador
+  ou servidor externo quando o critério não exigir isso explicitamente.
+- Suba emulador/browser/ambiente externo SOMENTE se um critério exigir de forma
+  explícita — e mantenha o roteiro mínimo necessário para o critério.
+- Não re-verifique o que já foi validado nas fases anteriores; foque nos critérios
+  desta fase/subtarefa.
+- Escreva o `autoia_verdict.txt` assim que tiver evidência suficiente. Deixe
+  exploração adicional (se sobrar tempo) para DEPOIS do veredicto.
+- Se uma tentativa ANTERIOR desta mesma fase/subtarefa falhou por estourar o tempo
+  (veja o histórico no handoff), SIMPLIFIQUE: rode só a suíte headless, valide o
+  restante por código/diff e avance com PASS anotando no SUMMARY exatamente o que
+  foi pulado — sugerindo uma tarefa separada para a verificação lenta, se relevante.
+
 ### Testes visuais (smoke test com screenshots)
 Se o projeto tiver interface visual (web, desktop, mobile), faça um smoke test visual:
 - Inicie o projeto e use as ferramentas de navegador (kimi-webbridge) para abrir as
@@ -325,7 +342,7 @@ Você controla o projeto. Analise o contexto da tarefa (status, falhas, orçamen
 tentativas, relatórios) e decida o melhor próximo passo, escrevendo o arquivo
 `autoia_verdict.txt` na raiz do repositório com EXATAMENTE uma das opções na primeira linha:
 
-DECISÃO: retry <posição>
+DECISÃO: retry <posição ou nome da fase>
 MOTIVO: <porquê — falha plausivelmente corrigível>
 
 — ou —
@@ -337,6 +354,9 @@ MOTIVO: <porquê — progresso real, precisa de mais orçamento>
 
 DECISÃO: escalar
 MOTIVO: <porquê — precisa de humano>
+
+No retry, informe a posição da fase (ex.: `retry 3`) ou o nome do robô da fase que
+falhou (ex.: `retry tester`).
 
 ### Heurísticas de decisão
 - retry: a falha tem causa clara e plausivelmente corrigível, e a mesma fase falhou
