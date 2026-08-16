@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -44,6 +44,7 @@ from ..schemas import (
     ApproveStepRequest,
     BlockedContinueRequest,
     BouncebackRequest,
+    DescriptionFromFileOut,
     FeedbackCreate,
     InstructionRequest,
     ResponsibleUpdate,
@@ -309,6 +310,46 @@ def create_task(
     session.add(task)
     session.commit()
     return _get_task_or_404(session, task.id)
+
+
+# ---------- Import de descrição a partir de arquivo (txt/md) ----------
+
+# Extensões aceitas (case-insensitive) e limite de tamanho: exatamente 100 KB é
+# válido; acima disso é erro. O arquivo NÃO é armazenado — só o conteúdo é lido.
+DESCRIPTION_FILE_EXTENSIONS = {".txt", ".md", ".markdown"}
+MAX_DESCRIPTION_FILE_BYTES = 100 * 1024
+
+
+@router.post("/description-from-file", response_model=DescriptionFromFileOut)
+def description_from_file(
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Extrai o conteúdo de um `.txt`/`.md`/`.markdown` para preencher a
+    descrição da tarefa (o arquivo não é armazenado no servidor).
+
+    Validações (qualquer violação → 400 com mensagem específica):
+    extensão permitida (case-insensitive), tamanho ≤ 100 KB (arquivo vazio →
+    erro, para nunca limpar o campo por acidente) e decodificação UTF-8
+    (BOM inicial tolerado via `utf-8-sig`).
+    """
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    if suffix not in DESCRIPTION_FILE_EXTENSIONS:
+        raise HTTPException(
+            400,
+            "extensão não permitida — use .txt, .md ou .markdown",
+        )
+    raw = file.file.read(MAX_DESCRIPTION_FILE_BYTES + 1)
+    if len(raw) == 0:
+        raise HTTPException(400, "arquivo vazio — selecione um arquivo com conteúdo")
+    if len(raw) > MAX_DESCRIPTION_FILE_BYTES:
+        raise HTTPException(400, "arquivo muito grande (máx. 100 KB)")
+    try:
+        description = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, "arquivo não é texto UTF-8 válido") from exc
+    return DescriptionFromFileOut(description=description)
 
 
 @router.get("", response_model=list[TaskListItem])
