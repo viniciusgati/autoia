@@ -552,6 +552,16 @@ export default function Workspace() {
   const canAct = podeAtuar(user, task?.responsible_id ?? null, isRepoAdmin);
   const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
 
+  // Seletor de executor das fases: desabilitado durante requisições e enquanto
+  // houver fase em execução real (a troca só vale para as próximas execuções —
+  // o runner lê `task.executor` a cada fase e na decisão do PM).
+  const executorDisabled = busy || summaryBusy || !canAct || !!runningOcc;
+  const executorTitle = runningOcc
+    ? "fase em execução — troque o executor quando ela terminar"
+    : !canAct
+      ? MSG_SEM_PERMISSAO
+      : "CLI das próximas fases e decisões de PM (kimi code ou opencode)";
+
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -665,7 +675,21 @@ export default function Workspace() {
               <span className="ws-responsavel" title="responsável pela tarefa">
                 responsável: <b>{task.responsible?.name ?? "Não atribuída"}</b>
               </span>
-              <span className="muted small">{task.executor === "opencode" ? "opencode" : "kimi code"}</span>
+              <label className="ws-executor" title={executorTitle}>
+                executor:
+                <select
+                  value={task.executor}
+                  disabled={executorDisabled}
+                  onChange={(e) =>
+                    act(() =>
+                      api.updateTaskStory(taskId, { executor: e.target.value as "kimi" | "opencode" }),
+                    )
+                  }
+                >
+                  <option value="kimi">kimi code</option>
+                  <option value="opencode">opencode</option>
+                </select>
+              </label>
               {runningOcc ? (
                 <span className="ws-etapa-atual ws-etapa-running" title="fase em execução agora">
                   <span className="ws-pulse" />
