@@ -309,6 +309,13 @@ class TaskCreate(BaseModel):
     epic_id: int | None = None
 
 
+class DescriptionFromFileOut(BaseModel):
+    """Conteúdo de um arquivo `.txt`/`.md`/`.markdown` extraído para uso como
+    descrição de tarefa (o arquivo em si não é armazenado no servidor)."""
+
+    description: str
+
+
 class TaskStepOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

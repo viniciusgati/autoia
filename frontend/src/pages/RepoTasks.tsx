@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
 import { TaskCardGrid } from "../components/TaskCard";
@@ -20,6 +20,10 @@ export default function RepoTasks() {
   const [error, setError] = useState("");
   const [formError, setFormError] = useState("");
   const [creating, setCreating] = useState(false);
+  // Import de descrição a partir de arquivo (txt/md): erro inline abaixo do
+  // campo de arquivo e input desabilitado com indicador durante a requisição.
+  const [fileError, setFileError] = useState("");
+  const [fileLoading, setFileLoading] = useState(false);
   // Associação organizacional Projeto > Épico (0..1, opcional — metadados).
   const [projects, setProjects] = useState<Project[]>([]);
   const [projectsLoading, setProjectsLoading] = useState(true);
@@ -87,6 +91,23 @@ export default function RepoTasks() {
       active = false;
     };
   }, [projectSel]);
+
+  const onFileSelected = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = ""; // permite re-selecionar o mesmo arquivo depois
+    if (!file) return;
+    setFileLoading(true);
+    setFileError("");
+    try {
+      const { description: imported } = await api.importDescription(file);
+      setDescription(imported); // substitui o texto atual do campo Descrição
+    } catch (e) {
+      // Campo Descrição permanece inalterado; erro inline abaixo do campo de arquivo.
+      setFileError(String(e));
+    } finally {
+      setFileLoading(false);
+    }
+  };
 
   const submit = async (event: FormEvent) => {
     event.preventDefault();
@@ -213,6 +234,19 @@ export default function RepoTasks() {
             onChange={(e) => setDescription(e.target.value)}
             rows={3}
           />
+        </div>
+        <div className="form-field">
+          <label className="form-label">Carregar arquivo (txt/md)</label>
+          <div className="form-inline">
+            <input
+              type="file"
+              accept=".txt,.md,.markdown"
+              onChange={onFileSelected}
+              disabled={fileLoading}
+            />
+            {fileLoading && <span className="muted">Carregando…</span>}
+          </div>
+          {fileError && <p className="form-error">{fileError}</p>}
         </div>
         {formError && <p className="form-error">{formError}</p>}
         <div className="form-actions">
