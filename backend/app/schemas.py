@@ -303,6 +303,17 @@ class TaskCreate(BaseModel):
     executor: Literal["kimi", "opencode"] = "kimi"
     budget_limit: float | None = Field(default=None, gt=0)
     subtasks: list[SubTaskIn] = []
+    # Associação organizacional Projeto > Épico (0..1, opcional). O épico deriva o
+    # projeto quando enviado sozinho (mesma regra do fluxo de chamados).
+    project_id: int | None = None
+    epic_id: int | None = None
+
+
+class DescriptionFromFileOut(BaseModel):
+    """Conteúdo de um arquivo `.txt`/`.md`/`.markdown` extraído para uso como
+    descrição de tarefa (o arquivo em si não é armazenado no servidor)."""
+
+    description: str
 
 
 class TaskStepOut(BaseModel):
@@ -415,6 +426,8 @@ class TaskListItem(BaseModel):
     parent_task_id: int | None = None
     responsible_id: int | None = None
     responsible: UserOut | None = None
+    project_id: int | None = None
+    epic_id: int | None = None
     steps: list[TaskStepListOut] = []
 
 
@@ -448,6 +461,8 @@ class TaskOut(BaseModel):
     parent_task_id: int | None = None
     responsible_id: int | None = None
     responsible: UserOut | None = None
+    project_id: int | None = None
+    epic_id: int | None = None
     steps: list[TaskStepOut] = []
     subtasks: list[SubTaskOut] = []
     proposals: list[TaskProposalOut] = []
@@ -617,12 +632,22 @@ class ApproveStepRequest(BaseModel):
 
 class TaskUpdateRequest(BaseModel):
     """Edição humana da história (descrição/critérios) — permitida em `created` e
-    `waiting_approval`. `details` (detalhes da implementação) é permitido em qualquer
-    status: complementa o contexto e entra no handoff das próximas fases."""
+    `waiting_approval`. `details` (detalhes da implementação), a associação
+    Projeto > Épico (`project_id`/`epic_id`) e o `executor` das fases são
+    permitidos em qualquer status (o executor só não pode mudar com uma fase em
+    execução real).
+
+    A associação distingue **campo ausente** (via `model_fields_set` — não altera)
+    de **`null` explícito** (remove): `project_id: null` remove projeto e épico;
+    `epic_id: null` remove apenas o épico.
+    """
 
     description: str | None = None
     acceptance_criteria: str | None = None
     details: str | None = None
+    project_id: int | None = None
+    epic_id: int | None = None
+    executor: str | None = Field(default=None, pattern="^(kimi|opencode)$")
 
 
 # ---------- Eventos ----------

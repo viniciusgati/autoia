@@ -8,7 +8,7 @@ import { usePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
 import { fmtCost } from "../lib/money";
-import type { RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
+import type { Epic, Project, RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
 function statusMeta(status: string): { label: string; cls: string } {
@@ -466,6 +466,9 @@ export default function Workspace() {
   const [busy, setBusy] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [diffPos, setDiffPos] = useState<number | null>(null);
+  // Projetos/épicos do repositório: nomes da associação da tarefa no header.
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [epics, setEpics] = useState<Epic[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   // Segue automaticamente o fim da página conforme a execução avança; pausa
   // quando o usuário rola para cima (ler histórico) e volta quando chega ao fim.
@@ -502,6 +505,39 @@ export default function Workspace() {
       active = false;
     };
   }, [repoId]);
+
+  // Projetos do repositório (nomes da associação da tarefa no header).
+  useEffect(() => {
+    let active = true;
+    api
+      .listProjects(repoId)
+      .then((l) => {
+        if (active) setProjects(l);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [repoId]);
+
+  // Épicos do projeto ATUAL da tarefa (nome no header).
+  useEffect(() => {
+    const projectId = ws?.task.project_id ?? null;
+    if (projectId == null) {
+      setEpics([]);
+      return;
+    }
+    let active = true;
+    api
+      .listEpics(projectId)
+      .then((l) => {
+        if (active) setEpics(l);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [ws?.task.project_id]);
 
   const refresh = () => {
     api
@@ -555,6 +591,16 @@ export default function Workspace() {
     user != null && members.some((m) => m.role === "admin" && m.user_id === user.id);
   const canAct = podeAtuar(user, task?.responsible_id ?? null, isRepoAdmin);
   const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
+
+  // Seletor de executor das fases: desabilitado durante requisições e enquanto
+  // houver fase em execução real (a troca só vale para as próximas execuções —
+  // o runner lê `task.executor` a cada fase e na decisão do PM).
+  const executorDisabled = busy || summaryBusy || !canAct || !!runningOcc;
+  const executorTitle = runningOcc
+    ? "fase em execução — troque o executor quando ela terminar"
+    : !canAct
+      ? MSG_SEM_PERMISSAO
+      : "CLI das próximas fases e decisões de PM (kimi code ou opencode)";
 
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -658,10 +704,32 @@ export default function Workspace() {
                 Custo total: <b>{fmtCost(task.cost_spent)}</b>
                 <span className="muted small"> / {fmtCost(task.budget_limit)}</span>
               </span>
+              <span className="ws-projeto" title="projeto/épico da tarefa">
+                projeto: <b>{task.project_id != null ? projects.find((p) => p.id === task.project_id)?.name ?? "—" : "—"}</b>
+                {task.epic_id != null && (
+                  <span>
+                    {" "}· épico: <b>{epics.find((e) => e.id === task.epic_id)?.name ?? "—"}</b>
+                  </span>
+                )}
+              </span>
               <span className="ws-responsavel" title="responsável pela tarefa">
                 responsável: <b>{task.responsible?.name ?? "Não atribuída"}</b>
               </span>
-              <span className="muted small">{task.executor === "opencode" ? "opencode" : "kimi code"}</span>
+              <label className="ws-executor" title={executorTitle}>
+                executor:
+                <select
+                  value={task.executor}
+                  disabled={executorDisabled}
+                  onChange={(e) =>
+                    act(() =>
+                      api.updateTaskStory(taskId, { executor: e.target.value as "kimi" | "opencode" }),
+                    )
+                  }
+                >
+                  <option value="kimi">kimi code</option>
+                  <option value="opencode">opencode</option>
+                </select>
+              </label>
               {runningOcc ? (
                 <span className="ws-etapa-atual ws-etapa-running" title="fase em execução agora">
                   <span className="ws-pulse" />

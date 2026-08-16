@@ -104,6 +104,15 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   inicia o projeto, define tarefas/lacunas, audita usabilidade e o propositor escreve
   `autoia_tasks.json` → propostas PENDENTES de decisão humana, sem merge automático de
   tasks filhas).
+- **Associação Projeto > Épico na Task** (`Task.project_id`/`epic_id`, 0..1
+  opcional — colunas aditivas em `db.ADDITIVE_COLUMNS["tasks"]`): metadados
+  organizacionais, espelhando o fluxo de chamados — NÃO entram no handoff/prompt,
+  não afetam execução/timeline/orçamento e são editáveis em qualquer status
+  (padrão do campo `details`). `epic_id` (com ou sem `project_id`) deriva o
+  `project_id` (o épico prevalece); trocar só o `project_id` limpa o épico se ele
+  não pertencer ao novo projeto; `null` explícito remove (`project_id: null`
+  remove projeto e épico; `epic_id: null` remove apenas o épico) — distinguido de
+  campo ausente via `model_fields_set` no `TaskUpdateRequest` (`_apply_task_association`).
 - **Fases `post_merge`** rodam na branch **default integrada** (`gitops.checkout_default`
   = fetch + `reset --hard origin/<base>`); fases normais rodam na branch `autoia/task-<id>`.
   O **merge+push acontece na última fase pré-merge** (feito pelo worker, nunca pelo robô).

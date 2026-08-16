@@ -236,6 +236,9 @@ export interface Task {
   updated_at: string;
   responsible_id: number | null;
   responsible: User | null;
+  /** Associação organizacional Projeto > Épico (0..1 cada; null = sem associação). */
+  project_id: number | null;
+  epic_id: number | null;
   steps: TaskStep[];
   subtasks: SubTask[];
   proposals: TaskProposal[];
@@ -280,6 +283,8 @@ export interface TaskListItem {
   parent_task_id: number | null;
   responsible_id: number | null;
   responsible: User | null;
+  project_id: number | null;
+  epic_id: number | null;
   steps: TaskStepListItem[];
 }
 

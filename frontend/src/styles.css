@@ -4377,6 +4377,26 @@ strong {
 .ws-cost b {
   color: var(--text);
 }
+.ws-executor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.ws-executor select {
+  font-size: 12.5px;
+  padding: 2px 4px;
+  border: 1px solid var(--surface-border-hover);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  max-width: 140px;
+}
+.ws-executor select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 .ws-controls {
   margin-left: auto;
   display: flex;

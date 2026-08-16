@@ -226,7 +226,34 @@ export const api = {
     kind: string;
     executor?: string;
     budget_limit?: number;
+    project_id?: number | null;
+    epic_id?: number | null;
   }) => request<Task>("/api/tasks", { method: "POST", body: JSON.stringify(data) }),
+  // Import de descrição a partir de arquivo .txt/.md (multipart; o arquivo não
+  // é armazenado no servidor — o backend valida e devolve o conteúdo).
+  importDescription: async (file: File): Promise<{ description: string }> => {
+    // fetch próprio sem Content-Type manual: o browser define o boundary do multipart
+    // (o helper `request` força `Content-Type: application/json`).
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch("/api/tasks/description-from-file", {
+      method: "POST",
+      body: formData,
+      credentials: "same-origin",
+    });
+    if (response.status === 401) onUnauthorized?.();
+    if (!response.ok) {
+      let detail = response.statusText;
+      try {
+        const body = await response.json();
+        detail = body.detail ?? JSON.stringify(body);
+      } catch {
+        /* resposta não-JSON */
+      }
+      throw new Error(`${response.status}: ${detail}`);
+    }
+    return (await response.json()) as { description: string };
+  },
   startTask: (id: number) => request<Task>(`/api/tasks/${id}/start`, { method: "POST" }),
   changePipeline: (id: number, pipelineId: number) =>
     request<Task>(`/api/tasks/${id}/change-pipeline`, {
@@ -264,7 +291,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ position, note }),
     }),
-  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null }) =>
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null; executor?: "kimi" | "opencode" }) =>
     request<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(data),

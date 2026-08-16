@@ -7,7 +7,7 @@ import os
 import re
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, Response
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
@@ -26,7 +26,9 @@ from ..models import (
     TASK_PAUSED,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
+    Epic,
     Pipeline,
+    Project,
     Repository,
     RepositoryUser,
     RunEvent,
@@ -42,6 +44,7 @@ from ..schemas import (
     ApproveStepRequest,
     BlockedContinueRequest,
     BouncebackRequest,
+    DescriptionFromFileOut,
     FeedbackCreate,
     InstructionRequest,
     ResponsibleUpdate,
@@ -123,6 +126,8 @@ def _task_list_item(task: Task) -> TaskListItem:
         parent_task_id=task.parent_task_id,
         responsible_id=task.responsible_id,
         responsible=task.responsible,
+        project_id=task.project_id,
+        epic_id=task.epic_id,
         steps=[
             TaskStepListOut(
                 id=st.id,
@@ -149,6 +154,55 @@ def _get_task_or_404(session: Session, task_id: int) -> Task:
     if task is None:
         raise HTTPException(404, "tarefa não encontrada")
     return task
+
+
+def _project_or_404(session: Session, project_id: int) -> Project:
+    project = session.get(Project, project_id)
+    if project is None:
+        raise HTTPException(404, "projeto não encontrado")
+    return project
+
+
+def _epic_or_404(session: Session, epic_id: int) -> Epic:
+    epic = session.get(Epic, epic_id)
+    if epic is None:
+        raise HTTPException(404, "épico não encontrado")
+    return epic
+
+
+def _apply_task_association(session: Session, task: Task, data: TaskUpdateRequest) -> None:
+    """Aplica a associação Projeto > Épico de um PATCH (editável em qualquer status).
+
+    Espelha `update_chamado` (chamados.py:553-569): projeto de outro repositório
+    → 400; épico atual que não pertence ao novo projeto → limpo (sem erro); épico
+    inexistente → 404; épico de outro repositório → 400; `epic_id` prevalece e
+    deriva o `project_id`. Distingue **campo ausente** (`model_fields_set`) de
+    **`null` explícito**: ausente = não altera; `project_id: null` remove projeto e
+    épico (épico exige projeto); `epic_id: null` remove apenas o épico.
+    """
+    fields = data.model_fields_set
+    if "project_id" in fields:
+        if data.project_id is None:
+            task.project_id = None
+            task.epic_id = None
+        else:
+            project = _project_or_404(session, data.project_id)
+            if project.repository_id != task.repository_id:
+                raise HTTPException(400, "projeto não pertence a este repositório")
+            task.project_id = project.id
+            if task.epic_id is not None:
+                epic = session.get(Epic, task.epic_id)
+                if epic is not None and epic.project_id != project.id:
+                    task.epic_id = None
+    if "epic_id" in fields:
+        if data.epic_id is None:
+            task.epic_id = None
+        else:
+            epic = _epic_or_404(session, data.epic_id)
+            if epic.project.repository_id != task.repository_id:
+                raise HTTPException(400, "épico não pertence a este repositório")
+            task.epic_id = epic.id
+            task.project_id = epic.project_id
 
 
 def _upsert_repo_member(session: Session, repo_id: int, user_id: int, role: str = "member") -> RepositoryUser:
@@ -208,6 +262,20 @@ def create_task(
     if not pipeline.steps:
         raise HTTPException(400, "pipeline sem fases")
 
+    # Associação organizacional Projeto > Épico (0..1, opcional — metadados).
+    # Regras espelhadas no fluxo de chamados: o épico prevalece e deriva o projeto.
+    project_id = data.project_id
+    epic = None
+    if data.epic_id is not None:
+        epic = _epic_or_404(session, data.epic_id)
+        if epic.project.repository_id != data.repository_id:
+            raise HTTPException(400, "épico não pertence a este repositório")
+        project_id = epic.project_id
+    if project_id is not None:
+        project = _project_or_404(session, project_id)
+        if project.repository_id != data.repository_id:
+            raise HTTPException(400, "projeto não pertence a este repositório")
+
     task = Task(
         repository_id=data.repository_id,
         pipeline_id=pipeline.id,
@@ -218,6 +286,8 @@ def create_task(
         budget_limit=data.budget_limit if data.budget_limit is not None else settings.task_budget,
         # Default = criador; com auth OFF (user=None) fica NULL até reatribuição.
         responsible_id=user.id if user else None,
+        project_id=project_id,
+        epic_id=epic.id if epic else data.epic_id,
     )
     for step in sorted(pipeline.steps, key=lambda x: x.position):
         task.steps.append(
@@ -240,6 +310,46 @@ def create_task(
     session.add(task)
     session.commit()
     return _get_task_or_404(session, task.id)
+
+
+# ---------- Import de descrição a partir de arquivo (txt/md) ----------
+
+# Extensões aceitas (case-insensitive) e limite de tamanho: exatamente 100 KB é
+# válido; acima disso é erro. O arquivo NÃO é armazenado — só o conteúdo é lido.
+DESCRIPTION_FILE_EXTENSIONS = {".txt", ".md", ".markdown"}
+MAX_DESCRIPTION_FILE_BYTES = 100 * 1024
+
+
+@router.post("/description-from-file", response_model=DescriptionFromFileOut)
+def description_from_file(
+    file: UploadFile = File(...),
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Extrai o conteúdo de um `.txt`/`.md`/`.markdown` para preencher a
+    descrição da tarefa (o arquivo não é armazenado no servidor).
+
+    Validações (qualquer violação → 400 com mensagem específica):
+    extensão permitida (case-insensitive), tamanho ≤ 100 KB (arquivo vazio →
+    erro, para nunca limpar o campo por acidente) e decodificação UTF-8
+    (BOM inicial tolerado via `utf-8-sig`).
+    """
+    suffix = os.path.splitext(file.filename or "")[1].lower()
+    if suffix not in DESCRIPTION_FILE_EXTENSIONS:
+        raise HTTPException(
+            400,
+            "extensão não permitida — use .txt, .md ou .markdown",
+        )
+    raw = file.file.read(MAX_DESCRIPTION_FILE_BYTES + 1)
+    if len(raw) == 0:
+        raise HTTPException(400, "arquivo vazio — selecione um arquivo com conteúdo")
+    if len(raw) > MAX_DESCRIPTION_FILE_BYTES:
+        raise HTTPException(400, "arquivo muito grande (máx. 100 KB)")
+    try:
+        description = raw.decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, "arquivo não é texto UTF-8 válido") from exc
+    return DescriptionFromFileOut(description=description)
 
 
 @router.get("", response_model=list[TaskListItem])
@@ -846,12 +956,43 @@ def update_task(
     aprovação humana (waiting_approval) — nunca no meio da execução, para não
     divergir do que o PO refinou. O campo `details` (detalhes da implementação)
     pode ser editado a qualquer momento: complementa o contexto e entra no
-    handoff das próximas fases, diferenciado da solicitação original.
+    handoff das próximas fases, diferenciado da solicitação original. A associação
+    Projeto > Épico (`project_id`/`epic_id`) também é editável em qualquer status:
+    são metadados organizacionais que não alteram a história nem a execução. O
+    `executor` (kimi/opencode) também é editável em qualquer status, exceto com
+    uma fase em execução real: o runner lê `task.executor` a cada fase e na
+    decisão do PM, então a troca vale para as próximas execuções (fases já
+    concluídas não são re-executadas).
     """
+    # Executor das fases: o runner já lê `task.executor` por fase e no PM, então a
+    # troca entre execuções é segura. Proibida apenas com uma fase em execução real
+    # (seria ignorada até o fim da fase e confundiria o operador) — vale para
+    # qualquer status, antes da restrição de edição da história.
+    if "executor" in data.model_fields_set:
+        task = _get_task_or_404(session, task_id)
+        _ensure_can_act(session, task, user)
+        if any(st.status == STEP_RUNNING for st in _active_steps(task)):
+            raise HTTPException(
+                400,
+                "não é possível alterar o executor enquanto uma fase está em "
+                "execução; aguarde a fase atual terminar",
+            )
+        if data.executor is not None:
+            task.executor = data.executor
+            session.commit()
+        return _get_task_or_404(session, task_id)
     if data.details is not None:
         task = _get_task_or_404(session, task_id)
         _ensure_can_act(session, task, user)
         task.details = data.details
+        session.commit()
+        return _get_task_or_404(session, task_id)
+    # Associação Projeto > Épico: metadados organizacionais editáveis em qualquer
+    # status (não alteram a história nem o contexto de execução — padrão `details`).
+    if "project_id" in data.model_fields_set or "epic_id" in data.model_fields_set:
+        task = _get_task_or_404(session, task_id)
+        _ensure_can_act(session, task, user)
+        _apply_task_association(session, task, data)
         session.commit()
         return _get_task_or_404(session, task_id)
     task = _get_task_or_404(session, task_id)

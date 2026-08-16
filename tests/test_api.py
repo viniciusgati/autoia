@@ -434,6 +434,113 @@ def test_worker_opencode_executor_runs_pipeline(settings, bare_repo, fake_kimi):
         assert t.cost_spent > 0
 
 
+# ---------- Alteração de executor via PATCH ----------
+
+
+def test_update_task_executor_switch(app_client, registered_repo):
+    """PATCH /api/tasks/{id} com `executor` troca a CLI das fases nos dois
+    sentidos (kimi <-> opencode) em task criada, e rejeita valor fora do padrão
+    com 422 (validação do schema)."""
+    task = app_client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "t-exec",
+            "description": "d",
+            "kind": "feature",
+        },
+    ).json()
+    assert task["executor"] == "kimi"  # default na criação
+
+    r = app_client.patch(f"/api/tasks/{task['id']}", json={"executor": "opencode"})
+    assert r.status_code == 200, r.text
+    assert r.json()["executor"] == "opencode"
+
+    r = app_client.patch(f"/api/tasks/{task['id']}", json={"executor": "kimi"})
+    assert r.status_code == 200, r.text
+    assert r.json()["executor"] == "kimi"
+
+    r = app_client.patch(f"/api/tasks/{task['id']}", json={"executor": "openai"})
+    assert r.status_code == 422
+
+
+def test_update_task_executor_allowed_after_start_without_running(flow):
+    """Após o start (status queued), sem fase em execução real, a troca de
+    executor é permitida (qualquer status exceto com step running)."""
+    r = flow["client"].patch(f"/api/tasks/{flow['task']['id']}", json={"executor": "opencode"})
+    assert r.status_code == 200, r.text
+    assert r.json()["executor"] == "opencode"
+
+
+def test_update_task_executor_blocked_when_step_running(flow):
+    """Com uma fase em execução real (step running), o PATCH de executor retorna
+    400 com mensagem em PT-BR e NÃO altera o valor persistido."""
+    sf = flow["session_factory"]
+    task_id = flow["task"]["id"]
+    with sf() as s:
+        step = s.get(TaskStep, flow["task"]["steps"][0]["id"])
+        step.status = "running"  # simula fase em execução real
+        s.commit()
+
+    r = flow["client"].patch(f"/api/tasks/{task_id}", json={"executor": "opencode"})
+    assert r.status_code == 400, r.text
+    assert "não é possível alterar o executor enquanto uma fase está em execução" in r.text
+    assert "aguarde a fase atual terminar" in r.text
+
+    with sf() as s:
+        assert s.get(Task, task_id).executor == "kimi"
+
+
+def test_worker_uses_updated_executor_after_patch(settings, bare_repo, fake_kimi):
+    """Task criada como kimi e alterada para opencode ANTES do start executa a
+    primeira fase pela CLI opencode (o runner lê `task.executor` a cada fase)."""
+    settings.opencode_bin = fake_kimi(OPENCODE_LINES, verdict="ready_pass")
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "t-patch",
+            "description": "d",
+            "kind": "feature",
+        },
+    ).json()
+    assert task["executor"] == "kimi"  # default até aqui
+
+    r = client.patch(f"/api/tasks/{task['id']}", json={"executor": "opencode"})
+    assert r.status_code == 200, r.text
+    assert r.json()["executor"] == "opencode"
+
+    client.post(f"/api/tasks/{task['id']}/start")
+
+    for _ in range(PIPELINE_STEPS + 2):
+        claimed = runner.claim_next(session_factory)
+        if claimed is None:
+            break
+        runner.execute_step(settings, session_factory, claimed)
+
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "done"
+        first = min(t.steps, key=lambda st: st.position)
+        # a primeira fase rodou pela CLI opencode: tool_call com shape opencode
+        # (chave `tool` minúscula) + system `opencode_step` com custo real
+        tool_calls = [e for e in first.events if e.kind == "tool_call" and "tool" in e.payload]
+        step_finish = [e for e in first.events if e.kind == "system" and "opencode_step" in e.payload]
+        assert tool_calls, "esperava tool_call com shape opencode na primeira fase"
+        assert step_finish, "esperava step_finish opencode (custo real) na primeira fase"
+
+
 def test_worker_advances_phases_and_merges(settings, bare_repo, tmp_path, fake_kimi):
     """po -> qa -> developer -> tester -> avaliador -> merger (merge+push) -> deploy-tester."""
     settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")

@@ -76,6 +76,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("block_question", "TEXT"),
         ("block_options", "JSON"),
         ("responsible_id", "INTEGER REFERENCES users(id)"),
+        ("project_id", "INTEGER REFERENCES projects(id)"),
+        ("epic_id", "INTEGER REFERENCES epics(id)"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
