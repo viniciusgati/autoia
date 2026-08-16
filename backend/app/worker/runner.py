@@ -101,6 +101,7 @@ class EffectiveSettings:
     db_rule: str
     kimi_bin: str
     opencode_bin: str
+    opencode_model: str
     log_dir: str
     workspace_dir: str
     branch_prefix: str
@@ -157,6 +158,7 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         db_rule=repo.db_rule or settings.db_rule,
         kimi_bin=settings.kimi_bin,
         opencode_bin=settings.opencode_bin,
+        opencode_model=settings.opencode_model,
         log_dir=settings.log_dir,
         branch_prefix=settings.branch_prefix,
         workspace_dir=settings.workspace_dir,
@@ -868,7 +870,7 @@ def _run_executor(
                 risky_patterns=eff.risky_patterns,
                 checkout_path=cwd,
                 whitelisted_hosts=eff.whitelisted_hosts,
-                model=model,
+                model=model or eff.opencode_model,
                 no_progress_timeout=eff.no_progress_timeout,
                 repo_id=repo_id,
                 stop_file=stop_file,

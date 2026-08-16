@@ -522,6 +522,7 @@ def generate_text(settings: Settings, executor: str, prompt: str, log_suffix: st
             checkout_path=cwd,
             whitelisted_hosts=[],
             no_progress_timeout=settings.no_progress_timeout,
+            model=settings.opencode_model,
             on_event=on_event,
         )
     else:
