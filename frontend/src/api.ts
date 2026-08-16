@@ -266,7 +266,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ position, note }),
     }),
-  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null }) =>
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null; executor?: "kimi" | "opencode" }) =>
     request<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(data),

@@ -917,8 +917,29 @@ def update_task(
     pode ser editado a qualquer momento: complementa o contexto e entra no
     handoff das próximas fases, diferenciado da solicitação original. A associação
     Projeto > Épico (`project_id`/`epic_id`) também é editável em qualquer status:
-    são metadados organizacionais que não alteram a história nem a execução.
+    são metadados organizacionais que não alteram a história nem a execução. O
+    `executor` (kimi/opencode) também é editável em qualquer status, exceto com
+    uma fase em execução real: o runner lê `task.executor` a cada fase e na
+    decisão do PM, então a troca vale para as próximas execuções (fases já
+    concluídas não são re-executadas).
     """
+    # Executor das fases: o runner já lê `task.executor` por fase e no PM, então a
+    # troca entre execuções é segura. Proibida apenas com uma fase em execução real
+    # (seria ignorada até o fim da fase e confundiria o operador) — vale para
+    # qualquer status, antes da restrição de edição da história.
+    if "executor" in data.model_fields_set:
+        task = _get_task_or_404(session, task_id)
+        _ensure_can_act(session, task, user)
+        if any(st.status == STEP_RUNNING for st in _active_steps(task)):
+            raise HTTPException(
+                400,
+                "não é possível alterar o executor enquanto uma fase está em "
+                "execução; aguarde a fase atual terminar",
+            )
+        if data.executor is not None:
+            task.executor = data.executor
+            session.commit()
+        return _get_task_or_404(session, task_id)
     if data.details is not None:
         task = _get_task_or_404(session, task_id)
         _ensure_can_act(session, task, user)

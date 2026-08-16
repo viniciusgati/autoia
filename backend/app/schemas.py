@@ -625,8 +625,10 @@ class ApproveStepRequest(BaseModel):
 
 class TaskUpdateRequest(BaseModel):
     """Edição humana da história (descrição/critérios) — permitida em `created` e
-    `waiting_approval`. `details` (detalhes da implementação) e a associação
-    Projeto > Épico (`project_id`/`epic_id`) são permitidos em qualquer status.
+    `waiting_approval`. `details` (detalhes da implementação), a associação
+    Projeto > Épico (`project_id`/`epic_id`) e o `executor` das fases são
+    permitidos em qualquer status (o executor só não pode mudar com uma fase em
+    execução real).
 
     A associação distingue **campo ausente** (via `model_fields_set` — não altera)
     de **`null` explícito** (remove): `project_id: null` remove projeto e épico;
@@ -638,6 +640,7 @@ class TaskUpdateRequest(BaseModel):
     details: str | None = None
     project_id: int | None = None
     epic_id: int | None = None
+    executor: str | None = Field(default=None, pattern="^(kimi|opencode)$")
 
 
 # ---------- Eventos ----------
