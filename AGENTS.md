@@ -38,7 +38,8 @@ backend/app/            # pacote `app`
   guardrails.py         # GuardrailViolation + análise (sem enforcement; ver watchdogs)
   budget.py             # custo por interação + limite
   timeline.py           # derivação DETERMINÍSTICA da timeline de execução (sem LLM)
-  api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard, chamados)
+  storage.py            # configuração geral: medição (scan_storage) + limpeza de órfãos (clean_storage)
+  api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard, chamados, system)
   worker/
     runner.py           # loop do worker: claim -> executa -> decide (bounce-back/PM)
     chamado_runner.py   # loop do CHAMADO-worker: ferramentas de etapa + avaliação de fechamento

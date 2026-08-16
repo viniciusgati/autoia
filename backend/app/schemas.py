@@ -937,3 +937,49 @@ class ToolRunRequest(BaseModel):
 class ChamadoMessageResponse(BaseModel):
     ok: bool
     message: str
+
+
+# ---------- Sistema (configuração geral) ----------
+
+class StorageCategory(BaseModel):
+    """Uma categoria do relatório de armazenamento (id = chave estável usada
+    pelo frontend; label = nome PT-BR exibido)."""
+
+    id: str
+    label: str
+    size_bytes: int
+    item_count: int
+    # True = categoria alvo da limpeza de órfãos; False = apenas medida
+    # (database/workspaces/skills nunca são limpáveis).
+    cleanable: bool
+
+
+class StorageReport(BaseModel):
+    """Relatório completo do armazenamento do sistema (5 categorias + total)."""
+
+    categories: list[StorageCategory] = []
+    total_bytes: int = 0
+
+
+class CleanRequest(BaseModel):
+    """Alvos da limpeza de órfãos (ids estáveis: logs, pytest_tmp, smoke,
+    chrome_profiles). Id desconhecido → 400."""
+
+    targets: list[str]
+
+
+class CleanTargetResult(BaseModel):
+    """Resultado da limpeza de um alvo (itens removidos e bytes liberados)."""
+
+    target: str
+    item_count: int
+    bytes_freed: int
+
+
+class CleanResult(BaseModel):
+    """Resposta da limpeza: detalhe por alvo + total liberado + relatório
+    atualizado refletindo a remoção."""
+
+    targets: list[CleanTargetResult] = []
+    total_bytes_freed: int = 0
+    report: StorageReport = StorageReport()

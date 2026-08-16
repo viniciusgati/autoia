@@ -11,7 +11,7 @@ from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 
-from .api import auth, chamados, dashboard, execution, pipelines, repositories, robots, steps, subtasks, tasks, users
+from .api import auth, chamados, dashboard, execution, pipelines, repositories, robots, steps, subtasks, system, tasks, users
 from .api.deps import require_auth
 from .config import Settings
 from .db import Base, make_engine, make_session_factory, migrate_schema
@@ -471,6 +471,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         chamados.epics_router,
         chamados.stage_types_router,
         chamados.chamados_router,
+        system.router,
     ):
         app.include_router(r, dependencies=[Depends(require_auth)])
 
