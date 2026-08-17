@@ -12,12 +12,16 @@ import pytest
 from app.config import Settings
 
 # Regras de veredicto embutidas no script do kimi fake (processo separado).
+# `ready_pass` checa PASS antes de READY: desde a task 79, o `step_context`
+# compactado embute o veredicto de fases antigas (ex.: `veredicto: READY`) no
+# prompt de fases verify/assess — se READY fosse checado primeiro, um prompt de
+# TESTER com a palavra READY no contexto escreveria READY em vez de PASS.
 VERDICT_RULES = {
     "ready_pass": (
-        "if 'VEREDICTO' in prompt.upper() and 'READY' in prompt:\n"
-        "    v = 'READY\\nSUMMARY: historia ok'\n"
-        "elif 'VEREDICTO' in prompt.upper() and 'PASS' in prompt:\n"
+        "if 'VEREDICTO' in prompt.upper() and 'PASS' in prompt:\n"
         "    v = 'PASS\\nSUMMARY: testes ok'\n"
+        "elif 'VEREDICTO' in prompt.upper() and 'READY' in prompt:\n"
+        "    v = 'READY\\nSUMMARY: historia ok'\n"
         "else:\n    v = None"
     ),
     "fail": (

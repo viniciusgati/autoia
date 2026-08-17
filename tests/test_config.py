@@ -47,3 +47,17 @@ def test_settings_auth_env_overrides(monkeypatch):
     assert s.auth_enabled is False
     assert s.session_days == 7
     assert s.cookie_secure is True
+
+
+def test_settings_step_context_recent_phases_default(monkeypatch):
+    """Sem env, a janela de fases recentes do contexto é 1 (default)."""
+    monkeypatch.delenv("AUTOIA_STEP_CONTEXT_RECENT_PHASES", raising=False)
+    assert Settings().step_context_recent_phases == 1
+
+
+def test_settings_step_context_recent_phases_env_overrides(monkeypatch):
+    """`AUTOIA_STEP_CONTEXT_RECENT_PHASES` é respeitado (0 = compactar todas)."""
+    monkeypatch.setenv("AUTOIA_STEP_CONTEXT_RECENT_PHASES", "0")
+    assert Settings().step_context_recent_phases == 0
+    monkeypatch.setenv("AUTOIA_STEP_CONTEXT_RECENT_PHASES", "3")
+    assert Settings().step_context_recent_phases == 3

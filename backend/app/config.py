@@ -158,6 +158,13 @@ class Settings:
     # Gera a missão humana de cada execução de fase ("por que esta execução existe")
     # via LLM dedicada (zero custo contábil). Desligar usa só o fallback determinístico.
     step_mission: bool = field(default_factory=lambda: _env("AUTOIA_STEP_MISSION", "1") == "1")
+    # Janela de fases anteriores que entram com o resumo INTEGRAL no contexto do
+    # prompt (`runner._build_step_context`); as mais antigas são compactadas em 1
+    # linha determinística (status + veredicto + trecho) — menos tokens dinâmicos
+    # não cacheáveis em fases tardias. 0 = compactar todas as fases anteriores.
+    step_context_recent_phases: int = field(
+        default_factory=lambda: _int("AUTOIA_STEP_CONTEXT_RECENT_PHASES", 1)
+    )
     # Autenticação por sessão: ON exige sessão válida em TODOS os routers /api/*
     # (401 sem cookie); OFF preserva o comportamento atual (require_auth -> None).
     auth_enabled: bool = field(default_factory=lambda: _env("AUTOIA_AUTH_ENABLED", "1") == "1")
