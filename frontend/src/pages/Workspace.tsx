@@ -222,12 +222,14 @@ function DiffModal({ taskId, position, onClose }: {
   );
 }
 
-function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
+function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct, expanded, onToggle }: {
   occ: WorkspaceOccurrence;
   onChanged: () => void;
   onError: (msg: string) => void;
   onOpenDiff: (position: number) => void;
   canAct: boolean;
+  expanded: boolean;
+  onToggle: () => void;
 }) {
   const meta = occStatusMeta(occ.status);
   const running = occ.status === "running";
@@ -249,7 +251,22 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
           <span className="ws-pulse" /> ETAPA EM EXECUÇÃO — {occ.robot?.name} · Fase {occ.position + 1}
         </div>
       )}
-      <header className="ws-occ-head">
+      <header
+        className="ws-occ-head"
+        onClick={onToggle}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onToggle();
+          }
+        }}
+        title={expanded ? "Recolher detalhes" : "Ver detalhes"}
+      >
+        <span className={`ws-occ-chevron${expanded ? " ws-occ-chevron-open" : ""}`}>
+          {expanded ? "▾" : "▸"}
+        </span>
         <span className="ws-occ-pos">FASE {occ.position + 1}</span>
         <span className="ws-occ-robot">{occ.robot?.name ?? "?"}</span>
         {occ.is_rerun && (
@@ -268,6 +285,8 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
         </span>
       </header>
 
+      {expanded && (
+        <>
       {/* 2. MISSÃO desta execução — o conteúdo principal do card. */}
       <section className="ws-occ-section ws-mission-box">
         <h4 className="ws-section-title">
@@ -423,8 +442,10 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct }: {
                 </span>
               </li>
             ))}
-          </ul>
-        </details>
+            </ul>
+          </details>
+        )}
+        </>
       )}
     </article>
   );
@@ -449,10 +470,26 @@ export default function Workspace() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [epics, setEpics] = useState<Epic[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const timelineRef = useRef<HTMLElement>(null);
-  // Segue automaticamente o fim da timeline conforme a execução avança; pausa
+  // Segue automaticamente o fim da página conforme a execução avança; pausa
   // quando o usuário rola para cima (ler histórico) e volta quando chega ao fim.
   const [followLatest, setFollowLatest] = useState(true);
+  // Acordeão de ocorrências: chave do cartão aberto (um por vez). Inicialmente
+  // abre a fase em execução (ou a última) na primeira carga; depois o usuário
+  // controla clicando no cabeçalho.
+  const [openOcc, setOpenOcc] = useState<string | null>(null);
+  const occInit = useRef(false);
+
+  // Abre o cartão em execução (ou o último) na primeira carga.
+  useEffect(() => {
+    if (!ws || occInit.current) return;
+    occInit.current = true;
+    const occs = ws.occurrences;
+    if (occs.length === 0) return;
+    const target = occs.find((o) => o.status === "running") ?? occs[occs.length - 1];
+    setOpenOcc(`${target.step_id}-${target.attempt}`);
+  }, [ws]);
+
+  const toggleOcc = (key: string) => setOpenOcc((cur) => (cur === key ? null : key));
 
   // Membros do projeto: define admin do projeto (permissão de atuação) e
   // alimenta o controle de atribuição de responsável.
@@ -522,19 +559,22 @@ export default function Workspace() {
     [taskId],
   );
 
-  // Mantém o fim da timeline sempre visível enquanto a execução evolui.
+  // Mantém o fim da página sempre visível enquanto a execução evolui.
   useEffect(() => {
     if (!followLatest) return;
-    const el = timelineRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    window.scrollTo({ top: document.documentElement.scrollHeight });
   }, [ws, followLatest]);
 
-  const onTimelineScroll = () => {
-    const el = timelineRef.current;
-    if (!el) return;
-    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 90;
-    if (nearBottom !== followLatest) setFollowLatest(nearBottom);
-  };
+  useEffect(() => {
+    const onScroll = () => {
+      const gap =
+        document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
+      const nearBottom = gap < 120;
+      if (nearBottom !== followLatest) setFollowLatest(nearBottom);
+    };
+    window.addEventListener("scroll", onScroll);
+    return () => window.removeEventListener("scroll", onScroll);
+  }, [followLatest]);
 
   const task = ws?.task ?? null;
   const meta = task ? statusMeta(task.status) : null;
@@ -551,6 +591,16 @@ export default function Workspace() {
     user != null && members.some((m) => m.role === "admin" && m.user_id === user.id);
   const canAct = podeAtuar(user, task?.responsible_id ?? null, isRepoAdmin);
   const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
+
+  // Seletor de executor das fases: desabilitado durante requisições e enquanto
+  // houver fase em execução real (a troca só vale para as próximas execuções —
+  // o runner lê `task.executor` a cada fase e na decisão do PM).
+  const executorDisabled = busy || summaryBusy || !canAct || !!runningOcc;
+  const executorTitle = runningOcc
+    ? "fase em execução — troque o executor quando ela terminar"
+    : !canAct
+      ? MSG_SEM_PERMISSAO
+      : "CLI das próximas fases e decisões de PM (kimi code ou opencode)";
 
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -665,7 +715,21 @@ export default function Workspace() {
               <span className="ws-responsavel" title="responsável pela tarefa">
                 responsável: <b>{task.responsible?.name ?? "Não atribuída"}</b>
               </span>
-              <span className="muted small">{task.executor === "opencode" ? "opencode" : "kimi code"}</span>
+              <label className="ws-executor" title={executorTitle}>
+                executor:
+                <select
+                  value={task.executor}
+                  disabled={executorDisabled}
+                  onChange={(e) =>
+                    act(() =>
+                      api.updateTaskStory(taskId, { executor: e.target.value as "kimi" | "opencode" }),
+                    )
+                  }
+                >
+                  <option value="kimi">kimi code</option>
+                  <option value="opencode">opencode</option>
+                </select>
+              </label>
               {runningOcc ? (
                 <span className="ws-etapa-atual ws-etapa-running" title="fase em execução agora">
                   <span className="ws-pulse" />
@@ -723,7 +787,7 @@ export default function Workspace() {
         )}
       </header>
 
-      <main className="ws-timeline" ref={timelineRef} onScroll={onTimelineScroll}>
+      <main className="ws-timeline">
         {!ws && <div className="muted ws-loading">carregando workspace…</div>}
         {ws && ws.occurrences.length === 0 && (
           <div className="ws-empty">
@@ -788,16 +852,21 @@ export default function Workspace() {
           </section>
         ) : null}
 
-        {ws?.occurrences.map((occ) => (
-          <OccurrenceCard
-            key={`${occ.step_id}-${occ.attempt}`}
-            occ={occ}
-            onChanged={refresh}
-            onError={setError}
-            onOpenDiff={setDiffPos}
-            canAct={canAct}
-          />
-        ))}
+        {ws?.occurrences.map((occ) => {
+          const key = `${occ.step_id}-${occ.attempt}`;
+          return (
+            <OccurrenceCard
+              key={key}
+              occ={occ}
+              onChanged={refresh}
+              onError={setError}
+              onOpenDiff={setDiffPos}
+              canAct={canAct}
+              expanded={openOcc === key}
+              onToggle={() => toggleOcc(key)}
+            />
+          );
+        })}
       </main>
 
       <footer className="ws-input">

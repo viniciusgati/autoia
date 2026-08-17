@@ -70,6 +70,26 @@ _AUTOIA_CONTROL_FILES = (
     "AGENTS.md",
 )
 
+# Instrução de simplificação quando a verificação ANTERIOR da mesma subtarefa
+# estourou o tempo (timeout): o tester repete só o caminho rápido (headless) e
+# avança com o aviso no SUMMARY — sem gastar o limite de novo com emulação lenta.
+PRIOR_TIMEOUT_SIMPLIFY = """## Verificação anterior desta subtarefa estourou o tempo (timeout)
+
+Uma tentativa anterior de verificar esta MESMA subtarefa falhou por exceder o
+limite de tempo — em geral por testes lentos baseados em emulação (emulador,
+navegador). Nesta re-execução, SIMPLIFIQUE a verificação:
+
+- Rode APENAS a suíte headless do projeto (testes unitários/integração na
+  JVM/Robolectric, sem subir emulador, navegador, servidor externo ou dispositivo)
+  e os comandos rápidos exigidos pelos critérios.
+- NÃO suba emulador/navegador nem ambiente externo nesta execução.
+- Valide os critérios restantes por leitura de código/diff, sem executar o app.
+- Emita o veredicto normalmente: PASS se o caminho rápido estiver verde. No
+  SUMMARY, liste EXATAMENTE o que foi pulado (ex.: "E2E com emulador NÃO rodado —
+  tentativa anterior estourou o tempo") e, se a verificação pulada for relevante,
+  sugira UMA TAREFA SEPARADA para ela (título + critérios + passos), para o humano
+  criar depois. Não crie arquivos de tarefas."""
+
 
 def _system_event(s: Session, step: TaskStep, kind: str, payload: dict) -> None:
     max_seq = (
@@ -184,6 +204,8 @@ def _build_subtask_verify_prompt(
     base: str,
     branch: str,
     checkout: str,
+    run_timeout: int | None = None,
+    prior_timeout: bool = False,
 ) -> str:
     """Prompt para o tester verificar UMA subtarefa."""
     parts: list[str] = []
@@ -197,6 +219,17 @@ def _build_subtask_verify_prompt(
             .replace("{step_context}", f"Subtarefa {subtask.position + 1}: {subtask.title}")
             .replace("{default_branch}", base or "main")
         )
+
+    if run_timeout and run_timeout > 0:
+        parts.append(
+            f"## Limite de tempo desta execução\n"
+            f"Você tem NO MÁXIMO {run_timeout} segundos para verificar esta subtarefa "
+            f"(matando o processo ao estourar, sem aproveitar o veredicto parcial). "
+            f"Planeje a verificação para caber nesse limite."
+        )
+
+    if prior_timeout:
+        parts.append(PRIOR_TIMEOUT_SIMPLIFY)
 
     parts.append(prompts.GIT_WORKFLOW)
     if project_info:
@@ -342,6 +375,38 @@ def _subtask_previously_failed_verify(session_factory, task_id: int, position: i
             continue
         reason = str(payload.get("reason") or "")
         if "veredicto" in reason.lower():
+            return True
+    return False
+
+
+def _subtask_verify_timed_out_before(session_factory, task_id: int, position: int) -> bool:
+    """True se uma verificação ANTERIOR desta subtarefa falhou por TIMEOUT.
+
+    Usado para simplificar a re-verificação: estourar o tempo indica verificação
+    lenta demais (emulador/browser), então o tester é orientado a repetir apenas
+    o caminho headless e avançar avisando no SUMMARY."""
+    with session_factory() as s:
+        step_ids = [
+            sid for (sid,) in s.query(TaskStep.id).filter(TaskStep.task_id == task_id).all()
+        ]
+        if not step_ids:
+            return False
+        events = (
+            s.query(RunEvent)
+            .filter(
+                RunEvent.step_id.in_(step_ids),
+                RunEvent.kind == "subtask_failed",
+            )
+            .all()
+        )
+    for ev in events:
+        payload = ev.payload or {}
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("phase") != "verify" or payload.get("position") != position:
+            continue
+        reason = str(payload.get("reason") or "")
+        if "timeout" in reason.lower():
             return True
     return False
 
@@ -659,7 +724,12 @@ def _run_one_verify(
             s, step, "subtask_start",
             {"position": st.position, "title": st.title, "attempt": st.attempt, "phase": "verify"},
         )
-        prompt = _build_subtask_verify_prompt(task, st, project_info, base, branch, checkout)
+        prior_timeout = _subtask_verify_timed_out_before(session_factory, task_id, st.position)
+        prompt = _build_subtask_verify_prompt(
+            task, st, project_info, base, branch, checkout,
+            run_timeout=getattr(settings, "run_timeout", None),
+            prior_timeout=prior_timeout,
+        )
         _system_event(
             s, step, "subtask_prompt",
             {"position": st.position, "title": st.title, "prompt": prompt},

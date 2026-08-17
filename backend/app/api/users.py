@@ -1,8 +1,8 @@
-"""Gestão de usuários — restrita a admin global (sem página no frontend).
+"""Gestão de usuários — restrita a admin global (página `/users` no frontend).
 
-O admin gerencia os usuários via API: listar, criar e editar (nome, e-mail,
-senha, papel e ativação). O bootstrap (`/api/auth/register`) cria apenas o
-primeiro usuário; todo o restante passa por aqui.
+O admin gerencia os usuários via API ou pela tela de Usuários: listar, criar e
+editar (nome, e-mail, senha, papel e ativação). O bootstrap (`/api/auth/register`)
+cria apenas o primeiro usuário; todo o restante passa por aqui.
 """
 
 from __future__ import annotations

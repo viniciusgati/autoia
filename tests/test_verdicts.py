@@ -32,6 +32,20 @@ def test_parse_pm_decision():
         "position": 3,
         "reason": "corrigível",
     }
+    # tolerante: nome do robô no lugar da posição → retry sem posição (fallback do runner)
+    assert verdicts.parse_pm_decision("DECISÃO: retry tester\nMOTIVO: timeout corrigível") == {
+        "action": "retry",
+        "position": None,
+        "reason": "timeout corrigível",
+    }
+    # número solto na linha (ex.: "retry fase 3") vale como posição
+    assert verdicts.parse_pm_decision("DECISÃO: retry fase 3\nMOTIVO: corrigível")["position"] == 3
+    # preâmbulo antes da linha de decisão não interfere
+    assert verdicts.parse_pm_decision(
+        "Analisei o contexto.\nDECISÃO: retry 2\nMOTIVO: corrigível"
+    )["position"] == 2
+    # número no MOTIVO não vira posição (só a linha DECISÃO é interpretada)
+    assert verdicts.parse_pm_decision("DECISÃO: retry tester\nMOTIVO: fase 3 falhou")["position"] is None
     assert verdicts.parse_pm_decision("DECISÃO: continuar\nMOTIVO: progresso")["action"] == "continue"
     assert verdicts.parse_pm_decision("DECISÃO: escalar\nMOTIVO: humano")["action"] == "escalate"
     # inválido/ausente → escalar (default seguro)

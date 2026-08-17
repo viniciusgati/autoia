@@ -130,6 +130,10 @@ class Settings:
     skills_dir: str = field(default_factory=lambda: _env("AUTOIA_SKILLS_DIR", "data/skills"))
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
+    # Modelo default do executor opencode (usado quando o robô não define `Robot.model`).
+    opencode_model: str = field(
+        default_factory=lambda: _env("AUTOIA_OPENCODE_MODEL", "deepseek/deepseek-v4-flash")
+    )
     run_timeout: int = field(default_factory=lambda: _int("AUTOIA_RUN_TIMEOUT", 1800))
     max_identical_calls: int = field(default_factory=lambda: _int("AUTOIA_MAX_IDENTICAL_CALLS", 6))
     max_attempts: int = field(default_factory=lambda: _int("AUTOIA_MAX_ATTEMPTS", 3))

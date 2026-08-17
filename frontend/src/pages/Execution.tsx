@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
-import ProposalCard from "../components/ProposalCard";
 import StatusIcon from "../components/StatusIcon";
 import TaskCard from "../components/TaskCard";
 import { formatToolCall } from "../lib/events";
@@ -72,8 +71,7 @@ export default function ExecutionPage() {
             </span>
           )}
           {" · "}
-          {running.length} em execução · {atencao.length} precisam de humano ·{" "}
-          {data.proposals.length} propostas
+          {running.length} em execução · {atencao.length} precisam de humano
         </span>
       </div>
 
@@ -105,24 +103,6 @@ export default function ExecutionPage() {
                 <RunningSession key={task.id} task={task} events={events} repoNames={repoNames} />
               );
             })}
-          </div>
-        )}
-
-        {/* Propostas de tasks filhas */}
-        <h3 className="resumo-section">Propostas</h3>
-        {data.proposals.length === 0 ? (
-          <p className="muted small">Sem propostas aguardando aprovação.</p>
-        ) : (
-          <div className="exec-cards proposal-list">
-            {data.proposals.map((p) => (
-              <ProposalCard
-                key={p.id}
-                proposal={p}
-                repoNames={repoNames}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
           </div>
         )}
 

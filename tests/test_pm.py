@@ -53,6 +53,24 @@ def test_pm_retry_applies(flow, fake_kimi):
         assert any(e.kind == "pm_decision" for e in anchor.events)
 
 
+def test_pm_retry_by_role_name_falls_back_to_failed_step(flow, fake_kimi):
+    """PM escreveu `retry tester` (nome do robô, sem posição): o runner retoma a
+    fase falha — sem isso, a decisão era descartada como inválida (escalar)."""
+    flow["settings"].task_budget = 100.0
+    _set_state(flow, status="needs_review", error="timeout após 1800s")
+    _set_step(flow, 3, "failed", attempt=1, error="timeout após 1800s")
+
+    _pm(flow, fake_kimi, "pm_retry_role")
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        assert t.status == "in_progress"
+        assert t.pm_decisions == 1
+        tester = next(st for st in t.steps if st.position == 3)
+        assert tester.status == "pending"
+        assert tester.attempt == 2
+
+
 def test_pm_continue_applies_budget(flow, fake_kimi):
     flow["settings"].task_budget = 1.0
     _set_state(flow, status="needs_review", budget_limit=1.0, error="orçamento estourado")

@@ -293,7 +293,13 @@ def parse_ready_work(raw: str | None) -> str | None:
 
 
 def parse_pm_decision(raw: str | None) -> dict:
-    """Extrai a decisão do PM do veredicto. Inválido/ausente → escalar (seguro)."""
+    """Extrai a decisão do PM do veredicto. Inválido/ausente → escalar (seguro).
+
+    Tolerante à linha de decisão: aceita ``retry <posição>`` (ex.: ``retry 3``),
+    ``retry <nome da fase>`` (ex.: ``retry tester`` — posição None, o runner cai
+    no fallback da fase falha) e ``retry fase 3``. Apenas a linha ``DECISÃO:`` é
+    interpretada (preâmbulo e MOTIVO não interferem).
+    """
     if not raw:
         return {"action": PM_ESCALATE, "position": None, "reason": "sem veredicto do PM"}
     text = raw.strip()
@@ -302,12 +308,21 @@ def parse_pm_decision(raw: str | None) -> dict:
     if match:
         reason = match.group(1).strip()[:500]
 
-    retry = re.search(r"DECISÃO:\s*retry\s*(\d+)", text, re.IGNORECASE)
-    if retry:
-        return {"action": PM_RETRY, "position": int(retry.group(1)), "reason": reason or "retry indicado"}
-    if re.search(r"DECISÃO:\s*continuar", text, re.IGNORECASE):
+    line_match = re.search(r"DECISÃO\s*:\s*(.*)", text, re.IGNORECASE)
+    if line_match is None:
+        return {"action": PM_ESCALATE, "position": None, "reason": f"decisão inválida do PM: {text[:300]}"}
+    decision_line = line_match.group(1).splitlines()[0].strip()
+
+    if re.match(r"^retry\b", decision_line, re.IGNORECASE):
+        pos_match = re.search(r"\d+", decision_line)
+        return {
+            "action": PM_RETRY,
+            "position": int(pos_match.group(0)) if pos_match else None,
+            "reason": reason or "retry indicado",
+        }
+    if re.match(r"^continuar\b", decision_line, re.IGNORECASE):
         return {"action": PM_CONTINUE, "position": None, "reason": reason or "continuar com mais orçamento"}
-    if re.search(r"DECISÃO:\s*escalar", text, re.IGNORECASE):
+    if re.match(r"^escalar\b", decision_line, re.IGNORECASE):
         return {"action": PM_ESCALATE, "position": None, "reason": reason or "escalado pelo PM"}
     return {"action": PM_ESCALATE, "position": None, "reason": f"decisão inválida do PM: {text[:300]}"}
 

@@ -186,6 +186,43 @@ summary::marker {
   gap: 14px;
 }
 
+.topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Botão hambúrguer (só aparece no mobile) */
+.menu-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border: 1px solid var(--surface-border);
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.menu-toggle:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.08);
+}
+
+/* Overlay atrás do menu lateral aberto (mobile) */
+.sidebar-backdrop {
+  display: none;
+}
+
+/* Cabeçalho do drawer no mobile (marca + fechar) */
+.sidebar-mobile-header {
+  display: none;
+}
+
 .layout-body {
   display: flex;
   flex: 1;
@@ -499,6 +536,11 @@ summary::marker {
   flex: 1;
   padding: 32px 40px;
   min-width: 0;
+}
+
+/* Workspace: página corrida em largura total (tem padding próprio interno). */
+.content-flush {
+  padding: 0;
 }
 
 /* ═══════════════════════════════════════════
@@ -2369,20 +2411,55 @@ tr:hover td {
     flex-direction: column;
   }
 
+  .menu-toggle {
+    display: flex;
+  }
+
   .sidebar {
-    width: 100%;
-    border-right: 0;
-    border-bottom: 1px solid var(--surface-border);
-    padding: 10px 14px;
-    flex-direction: row;
-    align-items: center;
-    gap: 8px;
-    overflow-x: auto;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 70;
+    width: min(300px, 82vw);
+    border-right: 1px solid var(--surface-border);
+    border-bottom: 0;
+    padding: 14px;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 4px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    background: rgba(10, 11, 14, 0.98);
     backdrop-filter: blur(16px);
+    transform: translateX(-100%);
+    transition: transform var(--transition);
+  }
+
+  .sidebar.sidebar-open {
+    transform: translateX(0);
+    box-shadow: var(--shadow-lg);
+  }
+
+  .sidebar-mobile-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 2px 4px 12px;
+    margin-bottom: 4px;
+    border-bottom: 1px solid var(--surface-border);
+  }
+
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    background: rgba(0, 0, 0, 0.55);
   }
 
   .sidebar-section {
-    display: none;
+    display: block;
   }
 
   .content {
@@ -4257,21 +4334,12 @@ strong {
 /* ───────────────────────── Workspace (tela de trabalho) ───────────────────────── */
 
 .ws {
-  display: grid;
-  grid-template-rows: auto 1fr auto;
-  height: calc(100vh - var(--topbar-h, 0px));
-  min-height: 0;
-  gap: 0;
+  display: block;
   position: relative;
 }
 
 .ws-header {
-  position: sticky;
-  top: 0;
-  z-index: 5;
   padding: 8px 14px;
-  background: rgba(13, 15, 20, 0.88);
-  backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--surface-border);
   display: flex;
   flex-direction: column;
@@ -4309,6 +4377,26 @@ strong {
 .ws-cost b {
   color: var(--text);
 }
+.ws-executor {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.ws-executor select {
+  font-size: 12.5px;
+  padding: 2px 4px;
+  border: 1px solid var(--surface-border-hover);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  max-width: 140px;
+}
+.ws-executor select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
 .ws-controls {
   margin-left: auto;
   display: flex;
@@ -4345,12 +4433,10 @@ strong {
 }
 
 .ws-timeline {
-  overflow-y: auto;
   padding: 20px 18px 24px;
   display: flex;
   flex-direction: column;
   gap: 16px;
-  min-height: 0;
 }
 
 .ws-loading,
@@ -4425,6 +4511,21 @@ strong {
   flex-wrap: wrap;
   padding-bottom: 10px;
   border-bottom: 1px dashed var(--surface-border);
+  cursor: pointer;
+  user-select: none;
+}
+.ws-occ-head:hover .ws-occ-chevron {
+  color: var(--accent);
+}
+.ws-occ-chevron {
+  width: 16px;
+  flex: 0 0 auto;
+  color: var(--text-secondary);
+  font-size: 13px;
+  transition: transform var(--transition);
+}
+.ws-occ-chevron-open {
+  color: var(--accent);
 }
 .ws-occ-pos {
   font-weight: 700;
@@ -4641,7 +4742,7 @@ strong {
   background: var(--panel);
 }
 .ws-proposal-title { font-size: 14px; font-weight: 600; }
-.ws-proposal-desc { margin-top: 4px; font-size: 13px; color: var(--text-secondary); }
+.ws-proposal-desc { margin-top: 4px; font-size: 13px; color: var(--text-secondary); white-space: pre-wrap; word-break: break-word; }
 .ws-proposal-actions {
   margin-top: 10px;
   display: flex;

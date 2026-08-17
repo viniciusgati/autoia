@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { api } from "./api";
 import { useAuth } from "./auth";
-import { DashboardIcon, PipelinesIcon, ProjectsIcon, ProposalIcon, RobotsIcon, SettingsIcon, TasksIcon, TerminalIcon } from "./components/Icons";
+import { DashboardIcon, MenuIcon, PipelinesIcon, ProjectsIcon, ProposalIcon, RobotsIcon, SettingsIcon, TasksIcon, TerminalIcon, XIcon } from "./components/Icons";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import Repositories from "./pages/Repositories";
@@ -20,6 +20,7 @@ import Execution from "./pages/Execution";
 import Chamados from "./pages/Chamados";
 import ChamadoDetail from "./pages/ChamadoDetail";
 import Projects from "./pages/Projects";
+import Users from "./pages/Users";
 import Notifications from "./components/Notifications";
 import { usePolling } from "./lib/polling";
 import type { Repository } from "./types";
@@ -49,6 +50,12 @@ export default function App() {
   const [repos, setRepos] = useState<Repository[]>([]);
   const [workerAlive, setWorkerAlive] = useState<boolean | null>(null);
   const [repoPendingCount, setRepoPendingCount] = useState(0);
+  const [menuOpen, setMenuOpen] = useState(false);
+
+  // Fecha o menu lateral ao navegar (mobile).
+  useEffect(() => {
+    setMenuOpen(false);
+  }, [location.pathname]);
 
   // App renderizado (não é splash nem Login): auth OFF (legado) ou usuário logado.
   const showApp = !authEnabled || user != null;
@@ -114,7 +121,17 @@ export default function App() {
   return (
     <div className="layout">
       <header className="topbar">
-        <span className="topbar-brand">autoia</span>
+        <div className="topbar-left">
+          <button
+            className="menu-toggle"
+            onClick={() => setMenuOpen((v) => !v)}
+            aria-label={menuOpen ? "Fechar menu" : "Abrir menu"}
+            aria-expanded={menuOpen}
+          >
+            {menuOpen ? <XIcon size={20} /> : <MenuIcon size={20} />}
+          </button>
+          <span className="topbar-brand">autoia</span>
+        </div>
         <div className="topbar-right">
           <Notifications />
           {user && (
@@ -144,7 +161,14 @@ export default function App() {
         </div>
       </header>
       <div className="layout-body">
-      <nav className="sidebar">
+      {menuOpen && <div className="sidebar-backdrop" onClick={() => setMenuOpen(false)} />}
+      <nav className={`sidebar${menuOpen ? " sidebar-open" : ""}`}>
+        <div className="sidebar-mobile-header">
+          <span className="topbar-brand">autoia</span>
+          <button className="menu-toggle" onClick={() => setMenuOpen(false)} aria-label="Fechar menu">
+            <XIcon size={20} />
+          </button>
+        </div>
         <div className="sidebar-section">
           <div className="sidebar-label">Projetos</div>
           <NavLink to="/" end className={({ isActive }) => (isActive ? "active" : "")}>
@@ -242,9 +266,15 @@ export default function App() {
           <NavLink to="/config" className={({ isActive }) => (isActive ? "active" : "")}>
             <SettingsIcon size={16} /> Configuração geral
           </NavLink>
+          {user?.role === "admin" && (
+            <NavLink to="/users" className={({ isActive }) => (isActive ? "active" : "")}>
+              <RobotsIcon size={16} /> Usuários
+            </NavLink>
+          )}
+
         </div>
       </nav>
-      <main className="content">
+      <main className={`content${location.pathname.includes("/workspace") ? " content-flush" : ""}`}>
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/execucao" element={<Execution />} />
@@ -252,6 +282,7 @@ export default function App() {
           <Route path="/pipelines" element={<Pipelines />} />
           <Route path="/config" element={<SystemConfig />} />
           <Route path="/repositories" element={<Repositories />} />
+          <Route path="/users" element={<Users />} />
           <Route path="/:repoId" element={<RepoDashboard />} />
           <Route path="/:repoId/config" element={<RepoConfig />} />
           <Route path="/:repoId/tasks" element={<RepoTasks />} />

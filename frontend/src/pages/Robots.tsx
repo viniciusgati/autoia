@@ -266,12 +266,20 @@ export default function Robots({ repoId }: Props) {
               </div>
               <div className="form-inline" style={{ gap: 12, alignItems: "flex-end" }}>
                 <div className="form-field" style={{ flex: 1 }}>
-                  <label className="form-label">Modelo (opcional)</label>
-                  <input
+                  <label className="form-label">Modelo</label>
+                  <select
                     value={editModel}
                     onChange={(e) => setEditModel(e.target.value)}
-                    placeholder="ex.: claude-sonnet-4"
-                  />
+                  >
+                    <option value="">Padrão do sistema (deepseek-v4-flash)</option>
+                    <option value="deepseek/deepseek-v4-flash">deepseek-v4-flash (barato/rápido)</option>
+                    <option value="deepseek/deepseek-v4-pro">deepseek-v4-pro (mais capaz)</option>
+                    <option value="deepseek/deepseek-chat">deepseek-chat</option>
+                    <option value="deepseek/deepseek-reasoner">deepseek-reasoner</option>
+                    {editModel && !["", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "deepseek/deepseek-chat", "deepseek/deepseek-reasoner"].includes(editModel) && (
+                      <option value={editModel}>{editModel} (custom)</option>
+                    )}
+                  </select>
                 </div>
                 <label className="post-merge-label" style={{ paddingBottom: 8 }}>
                   <input
