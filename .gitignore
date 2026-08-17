@@ -26,6 +26,11 @@ frontend/dist/
 console_error.log
 *.log
 
+# Perfis de Chrome do smoke test (nunca versionar)
+.chrome-smoke/
+.chrome-qa*/
+.smoke-chrome-extra/
+
 # arquivos de controle do autoia (worker) — nunca versionar
 autoia_*.json
 autoia_*.md
