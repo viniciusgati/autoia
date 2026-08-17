@@ -574,16 +574,71 @@ def _resume_prompt(step: TaskStep, task: Task) -> str:
     )
 
 
+def _compact_phase_line(
+    position: int,
+    robot_name: str,
+    status: str,
+    verdict: str | None,
+    summary: str,
+    max_chars: int = 200,
+) -> str:
+    """Uma linha determinística de uma fase ANTIGA no contexto do prompt (sem LLM).
+
+    Formato: `Fase {pos} ({robô}) [{status}] — veredicto: {v} — {trecho}`. O trecho
+    é a 1ª linha não vazia do resumo com whitespace colapsado, truncado
+    DINAMICAMENTE para a linha total respeitar `max_chars` (trecho ≤ 160 chars no
+    máximo — prefixos de robôs do seed chegam a ~57 chars, então 160 fixos
+    estourariam o total). Resumo vazio → `(sem resumo)`; veredicto ausente → `—`.
+    Puro: não toca no banco (`TaskStep.summary` permanece integral).
+    """
+    prefix = f"Fase {position} ({robot_name}) [{status}] — veredicto: {verdict or '—'} — "
+    excerpt = ""
+    for line in summary.splitlines():
+        collapsed = " ".join(line.split())
+        if collapsed:
+            excerpt = collapsed
+            break
+    if not excerpt:
+        excerpt = "(sem resumo)"
+    excerpt_limit = max(0, min(160, max_chars - len(prefix)))
+    if len(excerpt) > excerpt_limit:
+        excerpt = excerpt[:excerpt_limit]
+    return prefix + excerpt
+
+
 def _build_step_context(
-    s: Session, task: Task, current_step: TaskStep, checkout: str, base: str, branch: str
+    s: Session,
+    task: Task,
+    current_step: TaskStep,
+    checkout: str,
+    base: str,
+    branch: str,
+    recent_phases: int = 1,
 ) -> str:
     parts = []
+    prev_positions = sorted(
+        (st.position for st in _active_steps(task) if st.position < current_step.position),
+        reverse=True,
+    )
+    # Janela recente: as N posições anteriores mais próximas (em ordem de pipeline).
+    recent_positions = set(prev_positions[:recent_phases]) if recent_phases > 0 else set()
     for st in _active_steps(task):
         if st.position == current_step.position:
             continue
         robot_name = st.robot.name if st.robot else "?"
-        if st.position < current_step.position and st.summary:
-            parts.append(f"Fase {st.position} ({robot_name}): {st.summary[:500]}")
+        if st.position < current_step.position:
+            if st.position in recent_positions:
+                if st.summary:
+                    # janela recente: resumo INTEGRAL (o robô precisa do contexto imediato)
+                    parts.append(f"Fase {st.position} ({robot_name}): {st.summary}")
+            else:
+                # fases antigas: 1 linha determinística (compactação de leitura;
+                # o banco continua com o resumo completo)
+                parts.append(
+                    _compact_phase_line(
+                        st.position, robot_name, st.status, st.verdict, st.summary or ""
+                    )
+                )
         elif (
             st.position > current_step.position
             and st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)
@@ -981,7 +1036,10 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             s.commit()
             return None
 
-        step_context = _build_step_context(s, task, step, checkout, base, branch)
+        step_context = _build_step_context(
+            s, task, step, checkout, base, branch,
+            recent_phases=settings.step_context_recent_phases,
+        )
         project_info = project.detect_project(checkout)
         repo_context = _repo_context(repo)
         try:
