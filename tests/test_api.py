@@ -434,6 +434,81 @@ def test_worker_opencode_executor_runs_pipeline(settings, bare_repo, fake_kimi):
         assert t.cost_spent > 0
 
 
+def test_worker_opencode_resume_session_on_reexecution(settings, bare_repo, tmp_path):
+    """Fase opencode interrompida (stall/timeout) → retry manual re-executa a MESMA
+    fase retomando a sessão anterior: 1ª execução SEM a flag `--session`; re-execução
+    com `--session <id_anterior>` no comando; `TaskStep.session_id` atualizado para o
+    id da nova sessão (espelha o resume `-S` do kimi)."""
+    argv_runs = tmp_path / "argv_runs.txt"
+    runs_file = tmp_path / "runs.txt"
+    fake = tmp_path / "fake_opencode_sess"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, os, sys\n"
+        f"runs_file = {str(runs_file)!r}\n"
+        f"argv_file = {str(argv_runs)!r}\n"
+        "runs = 1\n"
+        "if os.path.exists(runs_file):\n"
+        "    runs = int(open(runs_file).read()) + 1\n"
+        "open(runs_file, 'w').write(str(runs))\n"
+        "with open(argv_file, 'a') as f:\n"
+        "    f.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "# fase interrompida: evento de erro + sessionID da sessão criada\n"
+        "print(json.dumps({'type': 'error', 'part': {'type': 'error', 'message': 'stall simulado'}, 'sessionID': 'ses_%d' % runs}))\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    settings.opencode_bin = str(fake)
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "t-resume",
+            "description": "d",
+            "kind": "feature",
+            "executor": "opencode",
+        },
+    ).json()
+    client.post(f"/api/tasks/{task['id']}/start")
+
+    # 1ª execução: fase 0 interrompida (erro) → falha; sessão ses_1 capturada
+    step0 = runner.claim_next(session_factory)
+    assert step0 is not None
+    runner.execute_step(settings, session_factory, step0)
+    with session_factory() as s:
+        st = s.get(TaskStep, step0)
+        assert st.status == "failed"
+        assert st.session_id == "ses_1"
+    runs = [json.loads(l) for l in argv_runs.read_text().splitlines()]
+    assert "--session" not in runs[0]
+
+    # retry manual da MESMA fase (volta a pending; task volta a queued)
+    resp = client.post(f"/api/tasks/{task['id']}/steps/0/retry")
+    assert resp.status_code == 200, resp.text
+
+    # re-execução: comando contém --session <id anterior>; session_id atualizado
+    step0b = runner.claim_next(session_factory)
+    assert step0b == step0
+    runner.execute_step(settings, session_factory, step0b)
+    with session_factory() as s:
+        st = s.get(TaskStep, step0)
+        assert st.session_id == "ses_2"
+    runs = [json.loads(l) for l in argv_runs.read_text().splitlines()]
+    assert len(runs) == 2
+    argv = runs[1]
+    assert "--session" in argv
+    assert argv[argv.index("--session") + 1] == "ses_1"
+
+
 # ---------- Alteração de executor via PATCH ----------
 
 

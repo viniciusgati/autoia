@@ -3,6 +3,8 @@
 O worker consome o stdout do `opencode run <prompt> --format json --dir <cwd>` linha
 a linha. Cada linha é um evento JSON: `step_start`, `tool_use` (tool + state.input /
 state.output), `text`, `step_finish` (com custo REAL do provedor em `cost`) e `error`.
+Todo evento carrega `sessionID` no topo do objeto — capturado para retomar a MESMA
+sessão numa re-execução da fase (`--session <id>`, espelhando o `-S` do kimi).
 
 O guardrail de comandos arriscados foi REMOVIDO: a `tool_use` chega DEPOIS da
 execução (mesma limitação do kimi) — matar o processo não impedia o comando e gerava
@@ -84,6 +86,7 @@ def run_opencode(
     whitelisted_hosts: list[str] = (),
     model: str | None = None,
     no_progress_timeout: int = 0,
+    resume_session_id: str | None = None,
     repo_id: int | None = None,
     stop_file: str | None = None,
     task_stop_file: str | None = None,
@@ -103,8 +106,15 @@ def run_opencode(
     `sandbox` (opcional): configuração de isolamento — com modo ligado, o comando
     roda dentro de um contêiner (mesma árvore do checkout); `workspace_dir` é a raiz
     de workspaces (mount rw) e `extra_env` injeta variáveis no ambiente da execução.
+
+    `resume_session_id` (opcional): id da sessão anterior da MESMA fase (timeout/
+    stall → re-execução) — o comando ganha `--session <id>` para continuar a mesma
+    conversa (contexto/cache preservados), espelhando o `-S <id>` do kimi.
     """
     cmd = [opencode_bin, "run", prompt, "--format", "json", "--dir", cwd]
+    if resume_session_id:
+        # Retoma a MESMA sessão da execução anterior (contexto/cache preservados).
+        cmd += ["--session", resume_session_id]
     if model:
         cmd += ["-m", model]
     outcome = ExecOutcome()
@@ -195,6 +205,13 @@ def run_opencode(
                     with log_lock:
                         logf.write(line + "\n")
                     continue
+
+                # O id da sessão aparece no topo de TODOS os eventos JSONL (campo
+                # `sessionID`) — capturado para retomar a MESMA sessão numa
+                # re-execução da fase (timeout/stall), espelhando o
+                # `session.resume_hint` do kimi.
+                if obj.get("sessionID"):
+                    outcome.session_id = str(obj["sessionID"])
 
                 event_type = obj.get("type")
                 part = obj.get("part") or {}
