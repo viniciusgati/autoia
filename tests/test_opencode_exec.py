@@ -161,3 +161,45 @@ def test_model_passed_as_flag(tmp_path):
     argv = (cwd / "argv.txt").read_text()
     assert "-m" in argv
     assert "provider/modelo-x" in argv
+
+
+def test_captures_session_id_and_resumes(tmp_path):
+    """O `sessionID` (topo de todo evento JSONL) é capturado no outcome; com
+    `resume_session_id` o opencode é chamado com `--session <id>` (retomada da
+    MESMA sessão — espelha o `-S` do kimi)."""
+    lines = [
+        {"type": "step_start", "part": {"type": "step-start"}, "sessionID": "ses_abc"},
+        _text("ok"),
+        _finish(0.001),
+    ]
+    fake = _make_fake(tmp_path, lines)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    events: list[str] = []
+
+    def on_event(kind, payload, cost):
+        events.append(kind)
+        return None
+
+    # 1ª execução: captura o session_id e NÃO leva a flag de continuação
+    o1 = opencode_exec.run_opencode(
+        "prompt1", cwd=str(cwd), opencode_bin=fake, log_path=str(tmp_path / "a.log"),
+        timeout=30, max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        on_event=on_event,
+    )
+    assert o1.session_id == "ses_abc"
+    argv = (cwd / "argv.txt").read_text().split()
+    assert "--session" not in argv
+
+    # 2ª execução: retoma a MESMA sessão com --session <id>
+    (cwd / "argv.txt").unlink()
+    o2 = opencode_exec.run_opencode(
+        "continuar", cwd=str(cwd), opencode_bin=fake, log_path=str(tmp_path / "b.log"),
+        timeout=30, max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        resume_session_id="ses_abc", on_event=on_event,
+    )
+    argv = (cwd / "argv.txt").read_text().split()
+    assert "--session" in argv
+    assert argv[argv.index("--session") + 1] == "ses_abc"
+    # a sequência de eventos emitida não muda com o resume
+    assert len(events) == 4  # 2 runs × (assistant_text + system)

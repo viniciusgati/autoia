@@ -535,8 +535,9 @@ def _step_prior_activity(s: Session, step: TaskStep, limit: int = 40) -> str:
 
 
 def _should_resume(s: Session, step: TaskStep) -> str | None:
-    """Session_id do kimi a retomar se a fase foi INTERROMPIDA (timeout/stall) sem
-    concluir — para continuar a MESMA conversa (contexto preservado).
+    """Session_id (kimi/opencode) a retomar se a fase foi INTERROMPIDA
+    (timeout/stall) sem concluir — para continuar a MESMA conversa (contexto
+    preservado).
 
     Se a última execução concluiu (`phase_done`/`merged`), retorna None: re-execução
     manual após conclusão recomeça do zero.
@@ -872,6 +873,7 @@ def _run_executor(
                 whitelisted_hosts=eff.whitelisted_hosts,
                 model=model or eff.opencode_model,
                 no_progress_timeout=eff.no_progress_timeout,
+                resume_session_id=resume_session_id,
                 repo_id=repo_id,
                 stop_file=stop_file,
                 task_stop_file=task_stop_file,
@@ -1010,8 +1012,8 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             )
         resume_session_id = _should_resume(s, step)
         if resume_session_id:
-            # Retoma a MESMA conversa do kimi (contexto preservado) — sem o prompt
-            # original inteiro de novo (já está na sessão).
+            # Retoma a MESMA conversa (kimi/opencode; contexto preservado) — sem
+            # o prompt original inteiro de novo (já está na sessão).
             prompt = _resume_prompt(step, task)
         else:
             prompt = prompts.build_prompt(
@@ -1107,8 +1109,9 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         step = s.get(TaskStep, step_id)
         if step is None:
             return None
-        # Captura a sessão do kimi p/ retomar a mesma conversa se a fase for
-        # re-executada após interrupção (timeout/stall).
+        # Captura a sessão (kimi: `session.resume_hint`; opencode: `sessionID`
+        # do JSONL) p/ retomar a MESMA conversa se a fase for re-executada após
+        # interrupção (timeout/stall).
         if outcome.session_id:
             step.session_id = outcome.session_id
         # Observabilidade do sandbox desta execução (modo, contêiner, overhead de
