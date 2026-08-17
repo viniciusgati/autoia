@@ -370,6 +370,8 @@ export interface WorkspaceOccurrence {
   finished_at: string | null;
   /** Duração total desta execução em ms (dos timestamps dos eventos; null se incompleta). */
   duration_ms: number | null;
+  /** Custo acumulado desta execução (USD; kimi estimado, opencode real). */
+  cost: number;
   last_activity: string | null;
   delivered_text: string | null;
   delivered: StepSummary | null;

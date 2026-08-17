@@ -199,6 +199,7 @@ def _event_base(event: RunEvent, payload: dict, ev_type: str, name: str, summary
         "duration_ms": None,
         "input": None,
         "output": None,
+        "cost": float(event.cost or 0.0),
         "raw": {"kind": event.kind, "payload": payload},
         "step_id": event.step_id,
         "step_position": step.position if step else None,
@@ -603,6 +604,7 @@ def _new_occurrence(step: TaskStep, attempt: int, index: int = 1) -> dict:
         "started_at": None,
         "finished_at": None,
         "duration_ms": None,
+        "cost": 0.0,
         "last_activity": None,
         "delivered_text": None,
         "stop": None,
@@ -614,6 +616,9 @@ def _new_occurrence(step: TaskStep, attempt: int, index: int = 1) -> dict:
 def _finalize_occurrence(occ: dict, step: TaskStep | None, is_last: bool) -> None:
     events = sorted(occ["events"], key=lambda e: (e["ts"], e["seq"]))
     occ["events"] = events
+    # Custo acumulado da execução: soma dos custos dos RunEvent (kimi estimado por
+    # interação; opencode custo real do step_finish). Determinístico, sem LLM.
+    occ["cost"] = round(sum(float(ev.get("cost") or 0.0) for ev in events), 6)
     if events:
         occ["started_at"] = events[0]["ts"]
         occ["finished_at"] = events[-1]["ts"]

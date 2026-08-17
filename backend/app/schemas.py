@@ -552,6 +552,9 @@ class WorkspaceOccurrenceOut(BaseModel):
     finished_at: datetime | None = None
     # Duração total desta execução em ms (dos timestamps dos eventos; None se incompleta).
     duration_ms: int | None = None
+    # Custo acumulado desta execução (soma dos custos dos RunEvent; kimi estimado,
+    # opencode custo real). Mesma moeda de `Task.cost_spent`.
+    cost: float = 0.0
     last_activity: str | None = None
     delivered_text: str | None = None
     delivered: StepSummaryOut | None = None

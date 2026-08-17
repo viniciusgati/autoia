@@ -4555,6 +4555,13 @@ strong {
   color: var(--run, var(--accent));
 }
 
+.ws-occ-cost {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
 .ws-occ-section {
   display: flex;
   flex-direction: column;

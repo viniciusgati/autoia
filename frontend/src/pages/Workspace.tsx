@@ -283,6 +283,11 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct, expanded,
             </span>
           )}
         </span>
+        {occ.cost > 0 && (
+          <span className="ws-occ-cost" title="Custo desta execução (kimi estimado / opencode real)">
+            {fmtCost(occ.cost)}
+          </span>
+        )}
       </header>
 
       {expanded && (

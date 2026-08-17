@@ -1359,6 +1359,7 @@ def task_workspace(
             started_at=occ["started_at"],
             finished_at=occ["finished_at"],
             duration_ms=occ.get("duration_ms"),
+            cost=occ.get("cost", 0.0),
             last_activity=occ["last_activity"],
             delivered_text=occ["delivered_text"],
             delivered=delivered,
