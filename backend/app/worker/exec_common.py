@@ -60,11 +60,18 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
 
 
 def kill_all_procs() -> None:
-    """SIGTERM no grupo de todos os subprocessos ativos (não bloqueia esperando)."""
+    """SIGTERM no grupo de todos os subprocessos ativos + limpeza do sandbox.
+
+    Além de matar os executores, remove o contêiner e o cidfile de cada processo
+    ativo (`_rm_docker_container`) — sem isso, um shutdown do worker via
+    `os._exit(0)` pula o `finally` dos executores e deixa o `.sandbox-cid-*`
+    órfão; o `docker run` seguinte falha com exit 125 ("container ID file found").
+    """
     with _ACTIVE_LOCK:
         procs = list(_ACTIVE_PROCS)
     for proc in procs:
         _signal_group(proc, signal.SIGTERM)
+        _rm_docker_container(proc)
 
 
 def kill_repo_procs(repo_id: int) -> None:

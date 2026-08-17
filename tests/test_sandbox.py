@@ -557,6 +557,30 @@ def _make_kimi_fake(dir_path, name="fake_kimi") -> str:
     return _fake_script(dir_path, name, body)
 
 
+def test_cleanup_container_remove_cidfile_e_container(tmp_path, monkeypatch):
+    """`cleanup_container` remove o contêiner E apaga o cidfile.
+
+    Sem apagar o arquivo, o `docker run --cidfile` da próxima execução falha com
+    exit 125 ("container ID file found") — regressão do acúmulo de órfãos no
+    shutdown do worker (a thread principal nunca chega ao `finally`).
+    """
+    cidfile = tmp_path / ".sandbox-cid-test"
+    cidfile.write_text("abc123\n")
+    calls = tmp_path / "docker_calls.txt"
+    fake = _fake_script(
+        tmp_path,
+        "fake_docker",
+        "#!/bin/sh\necho \"$@\" >> \"$DOCKER_LOG\"\n",
+    )
+    monkeypatch.setenv("DOCKER_LOG", str(calls))
+    monkeypatch.setattr(sb, "resolve_docker_bin", lambda: fake)
+
+    sb.cleanup_container(str(cidfile))
+
+    assert not cidfile.exists()
+    assert "rm -f abc123" in calls.read_text()
+
+
 def test_docker_sandbox_roda_fake_kimi_e_escreve_no_checkout(tmp_path):
     _require_docker()
     checkout = tmp_path / "checkout"

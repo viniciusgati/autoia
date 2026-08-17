@@ -207,11 +207,16 @@ def docker_image_available(image: str) -> bool:
 
 
 def cleanup_container(cidfile: str | None) -> None:
-    """Remove o contêiner do sandbox pelo cidfile (`docker rm -f`), best-effort.
+    """Remove o contêiner do sandbox pelo cidfile (`docker rm -f`) e apaga o cidfile.
 
-    Chamado pelo `kill_group` (watchdog) E pela thread principal do executor ao
-    final do run — garante que o contêiner não fica órfão mesmo com a corrida
-    entre a limpeza do watchdog e o unregister da thread principal.
+    Best-effort (falha de limpeza não propaga). Chamado pelo `kill_group` (watchdog)
+    E pela thread principal do executor ao final do run — garante que o contêiner não
+    fica órfão mesmo com a corrida entre a limpeza do watchdog e o unregister.
+
+    Apagar o cidfile aqui (além do `rm -f`) é o que impede o erro do docker
+    "container ID file found" (exit 125) na próxima execução: se a thread principal
+    não chegar ao `finally` (ex.: `os._exit(0)` no shutdown do worker), o arquivo
+    ficaria órfão e o `--cidfile` do próximo `docker run` recusaria iniciar.
     """
     if not cidfile:
         return
@@ -221,6 +226,10 @@ def cleanup_container(cidfile: str | None) -> None:
             subprocess.run(
                 [resolve_docker_bin(), "rm", "-f", cid], capture_output=True, timeout=20
             )
+    except OSError:
+        pass
+    try:
+        os.remove(cidfile)
     except OSError:
         pass
 
