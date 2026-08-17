@@ -171,6 +171,12 @@ class Settings:
     no_progress_timeout: int = field(
         default_factory=lambda: _int("AUTOIA_NO_PROGRESS_TIMEOUT", 300)
     )
+    # Rotação de logs (configuração geral): arquivos `.log` com mtime mais antigo
+    # que `log_retention_days` dias são elegíveis à limpeza de órfãos
+    # (tela `/config`). 0 desliga a limpeza de logs.
+    log_retention_days: int = field(
+        default_factory=lambda: _int("AUTOIA_LOG_RETENTION_DAYS", 30)
+    )
     # ── Sandbox de execução ────────────────────────────────────────────────────────
     # Modo de isolamento das execuções dos robôs (ver docs/plano-sandbox-execucao.md):
     #   "off"  -> spawn direto (comportamento atual; default até o sandbox ser validado)

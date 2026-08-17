@@ -5519,3 +5519,16 @@ button.danger-link:hover {
 .skill-confirm-modal {
   max-width: 420px;
 }
+
+/* ── Configuração geral do sistema (/config) ── */
+.storage-total {
+  margin-top: 14px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.storage-total strong {
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 650;
+}

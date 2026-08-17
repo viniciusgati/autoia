@@ -2,12 +2,13 @@ import { useEffect, useState } from "react";
 import { NavLink, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { api } from "./api";
 import { useAuth } from "./auth";
-import { DashboardIcon, MenuIcon, PipelinesIcon, ProjectsIcon, ProposalIcon, RobotsIcon, TasksIcon, TerminalIcon, XIcon } from "./components/Icons";
+import { DashboardIcon, MenuIcon, PipelinesIcon, ProjectsIcon, ProposalIcon, RobotsIcon, SettingsIcon, TasksIcon, TerminalIcon, XIcon } from "./components/Icons";
 import Home from "./pages/Home";
 import Login from "./pages/Login";
 import Repositories from "./pages/Repositories";
 import Robots from "./pages/Robots";
 import Pipelines from "./pages/Pipelines";
+import SystemConfig from "./pages/SystemConfig";
 import RepoDashboard from "./pages/RepoDashboard";
 import RepoConfig from "./pages/RepoConfig";
 import RepoProposals from "./pages/RepoProposals";
@@ -262,11 +263,15 @@ export default function App() {
           <NavLink to="/pipelines" className={({ isActive }) => (isActive ? "active" : "")}>
             <PipelinesIcon size={16} /> Pipelines
           </NavLink>
+          <NavLink to="/config" className={({ isActive }) => (isActive ? "active" : "")}>
+            <SettingsIcon size={16} /> Configuração geral
+          </NavLink>
           {user?.role === "admin" && (
             <NavLink to="/users" className={({ isActive }) => (isActive ? "active" : "")}>
               <RobotsIcon size={16} /> Usuários
             </NavLink>
           )}
+
         </div>
       </nav>
       <main className={`content${location.pathname.includes("/workspace") ? " content-flush" : ""}`}>
@@ -275,6 +280,7 @@ export default function App() {
           <Route path="/execucao" element={<Execution />} />
           <Route path="/robots" element={<Robots />} />
           <Route path="/pipelines" element={<Pipelines />} />
+          <Route path="/config" element={<SystemConfig />} />
           <Route path="/repositories" element={<Repositories />} />
           <Route path="/users" element={<Users />} />
           <Route path="/:repoId" element={<RepoDashboard />} />

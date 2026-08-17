@@ -4,6 +4,8 @@ import type {
   ChamadoMessage,
   ChamadoStageType,
   ChamadoWorkspace,
+  CleanResult,
+  CleanTarget,
   Dashboard,
   Epic,
   EpicDetail,
@@ -20,6 +22,7 @@ import type {
   Robot,
   RunEvent,
   StepDiff,
+  StorageReport,
   SubTask,
   Task,
   TaskListItem,
@@ -442,4 +445,13 @@ export const api = {
 
   // tratador global de 401 (sessão expirada)
   setOnUnauthorized,
+
+  // ── Sistema (configuração geral: medição + limpeza de órfãos) ────────────
+  getStorageReport: (signal?: AbortSignal) =>
+    request<StorageReport>("/api/system/storage", { signal }),
+  cleanStorage: (targets: CleanTarget[]) =>
+    request<CleanResult>("/api/system/storage/clean", {
+      method: "POST",
+      body: JSON.stringify({ targets }),
+    }),
 };

@@ -511,3 +511,38 @@ export interface ChamadoWorkspace {
   tools: ToolInfo[];
   close_options: string[];
 }
+
+// ---------- Sistema (configuração geral) ----------
+
+/** Alvos de limpeza aceitos no payload (id desconhecido → 400). */
+export type CleanTarget = "logs" | "pytest_tmp" | "smoke" | "chrome_profiles";
+
+/** Uma categoria do relatório de armazenamento (espelha `StorageCategory`). */
+export interface StorageCategory {
+  id: string;
+  label: string;
+  size_bytes: number;
+  item_count: number;
+  /** false = apenas medida (database/workspaces/skills); true = alvo de limpeza. */
+  cleanable: boolean;
+}
+
+/** Relatório completo do armazenamento (5 categorias + total). */
+export interface StorageReport {
+  categories: StorageCategory[];
+  total_bytes: number;
+}
+
+/** Resultado da limpeza de um alvo (itens removidos e bytes liberados). */
+export interface CleanTargetResult {
+  target: string;
+  item_count: number;
+  bytes_freed: number;
+}
+
+/** Resposta da limpeza: detalhe por alvo + total + relatório atualizado. */
+export interface CleanResult {
+  targets: CleanTargetResult[];
+  total_bytes_freed: number;
+  report: StorageReport;
+}
