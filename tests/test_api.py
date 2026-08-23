@@ -434,6 +434,65 @@ def test_worker_opencode_executor_runs_pipeline(settings, bare_repo, fake_kimi):
         assert t.cost_spent > 0
 
 
+CMD_LINES = [
+    {"type": "event", "event": {"type": "tool_running", "toolName": "bash", "description": "roda ls"}},
+    {"type": "event", "event": {"type": "tool_running", "toolName": "read", "description": "le arquivo"}},
+    {
+        "type": "result",
+        "subtype": "success",
+        "sessionId": "ses_cmd_1",
+        "stopReason": "end_turn",
+        "usage": {"input_tokens": 20, "output_tokens": 10},
+        "finalText": "tarefa concluída com sucesso",
+    },
+]
+
+
+def test_worker_cmd_executor_runs_pipeline(settings, bare_repo, fake_kimi):
+    """Task com executor=cmd (Command Code) roda todo o pipeline via cmd CLI fake,
+    com tool_running (nome+descrição) e frame result final com sessionId/texto."""
+    settings.cmd_bin = fake_kimi(CMD_LINES, verdict="ready_pass")
+    settings.task_budget = 100.0
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "t-cmd",
+            "description": "d",
+            "kind": "feature",
+            "executor": "cmd",
+        },
+    ).json()
+    assert task["executor"] == "cmd"
+
+    client.post(f"/api/tasks/{task['id']}/start")
+
+    for _ in range(PIPELINE_STEPS + 2):
+        claimed = runner.claim_next(session_factory)
+        if claimed is None:
+            break
+        runner.execute_step(settings, session_factory, claimed)
+
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "done"
+        assert all(st.status == "done" for st in t.steps)
+        # eventos do cmd registrados (tool_call resumido + system com o result)
+        kinds = {e.kind for st in t.steps for e in st.events}
+        assert "tool_call" in kinds
+        assert "system" in kinds
+        assert t.cost_spent > 0
+
+
 def test_worker_opencode_resume_session_on_reexecution(settings, bare_repo, tmp_path):
     """Fase opencode interrompida (stall/timeout) → retry manual re-executa a MESMA
     fase retomando a sessão anterior: 1ª execução SEM a flag `--session`; re-execução

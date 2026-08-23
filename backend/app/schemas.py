@@ -300,7 +300,7 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
     kind: Literal["issue", "bug", "feature", "chore"] = "issue"
-    executor: Literal["kimi", "opencode"] = "kimi"
+    executor: Literal["kimi", "opencode", "cmd"] = "kimi"
     budget_limit: float | None = Field(default=None, gt=0)
     subtasks: list[SubTaskIn] = []
     # Associação organizacional Projeto > Épico (0..1, opcional). O épico deriva o
@@ -707,7 +707,7 @@ class TaskUpdateRequest(BaseModel):
     details: str | None = None
     project_id: int | None = None
     epic_id: int | None = None
-    executor: str | None = Field(default=None, pattern="^(kimi|opencode)$")
+    executor: str | None = Field(default=None, pattern="^(kimi|opencode|cmd)$")
     # Modo de execução (auto | manual): alternável em runtime, em qualquer status.
     mode: str | None = Field(default=None, pattern="^(auto|manual)$")
 
@@ -915,7 +915,7 @@ class ChamadoCreate(BaseModel):
     epic_id: int | None = None
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
-    executor: str = Field(default="kimi", pattern="^(kimi|opencode)$")
+    executor: str = Field(default="kimi", pattern="^(kimi|opencode|cmd)$")
     budget_limit: float | None = None
     initial_stage_type_id: int | None = None
 
@@ -925,7 +925,7 @@ class ChamadoUpdate(BaseModel):
     description: str | None = None
     project_id: int | None = None
     epic_id: int | None = None
-    executor: str | None = Field(default=None, pattern="^(kimi|opencode)$")
+    executor: str | None = Field(default=None, pattern="^(kimi|opencode|cmd)$")
 
 
 class ToolInfoOut(BaseModel):

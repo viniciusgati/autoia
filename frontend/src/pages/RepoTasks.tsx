@@ -166,6 +166,7 @@ export default function RepoTasks() {
             <select value={executor} onChange={(e) => setExecutor(e.target.value)}>
               <option value="kimi">kimi code</option>
               <option value="opencode">opencode</option>
+              <option value="cmd">cmd (command-code)</option>
             </select>
           </div>
         </div>

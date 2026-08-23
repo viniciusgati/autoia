@@ -19,6 +19,9 @@ frontend/dist/
 .vscode/
 .DS_Store
 
+# Config local de outro executor (Command Code) — não versionar
+.commandcode/
+
 # Env / segredos
 .env
 

@@ -918,3 +918,62 @@ class TestPostDeployFix:
         # Feedback ainda está salvo e visível
         task_json = client.get(f"/api/tasks/{task_id}").json()
         assert task_json["feedback"] and "DATABASE_URL" in task_json["feedback"]
+
+
+# ---------------------------------------------------------------------------
+# Dispatch do executor da task no ciclo de subtarefas (regressão: o ciclo
+# hardcodava kimi e ignorava executor=opencode/cmd nas subtarefas).
+# ---------------------------------------------------------------------------
+
+
+def test_subtask_executor_dispatch(monkeypatch):
+    """`_run_subtask_executor` roteia a execução de UMA subtarefa para o executor
+    da task (kimi/opencode/cmd) — não força kimi como antes."""
+    import app.worker.subtask as st
+
+    class FakeSettings:
+        run_timeout = 30
+        max_identical_calls = 3
+        risky_patterns = []
+        whitelisted_hosts = []
+        kimi_bin = "kimi"
+        opencode_bin = "opencode"
+        opencode_model = "opencode-model"
+        cmd_bin = "cmd"
+        cmd_model = "cmd-model"
+        cost_per_interaction = 0.01
+        no_progress_timeout = 0
+        workspace_dir = None
+        sandbox = None
+
+    calls = {}
+
+    def fake_kimi(prompt, **kwargs):
+        calls["kimi"] = kwargs
+        return "kimi-ok"
+
+    def fake_opencode(prompt, **kwargs):
+        calls["opencode"] = kwargs
+        return "opencode-ok"
+
+    def fake_cmd(prompt, **kwargs):
+        calls["cmd"] = kwargs
+        return "cmd-ok"
+
+    monkeypatch.setattr(st.kimi_exec, "run_kimi", fake_kimi)
+    monkeypatch.setattr(st.opencode_exec, "run_opencode", fake_opencode)
+    monkeypatch.setattr(st.cmd_exec, "run_cmd", fake_cmd)
+
+    s = FakeSettings()
+    base = dict(
+        cwd=".", log_path="l", checkout_path=".", repo_id=None,
+        stop_file=None, task_stop_file=None, sandbox=None, on_event=None,
+    )
+
+    assert st._run_subtask_executor(s, "kimi", "p", **base) == "kimi-ok"
+    assert st._run_subtask_executor(s, "opencode", "p", **base) == "opencode-ok"
+    assert st._run_subtask_executor(s, "cmd", "p", **base) == "cmd-ok"
+    assert set(calls) == {"kimi", "opencode", "cmd"}
+    # Parâmetros específicos de cada executor são repassados corretamente.
+    assert calls["opencode"]["model"] == "opencode-model"
+    assert calls["cmd"]["model"] == "cmd-model"

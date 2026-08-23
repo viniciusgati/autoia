@@ -38,7 +38,7 @@ from ..models import (
     Task,
     TaskStep,
 )
-from . import exec_common, gitops, kimi_exec
+from . import cmd_exec, exec_common, gitops, kimi_exec, opencode_exec
 from .sandbox import SandboxConfig
 
 log = logging.getLogger("autoia.worker.subtask")
@@ -56,6 +56,88 @@ def _sub_extra_env(settings) -> dict[str, str]:
     base = sb.host_services_base if sb else "http://127.0.0.1"
     mode = sb.mode if sb else "off"
     return {"AUTOIA_HOST_SERVICES_BASE": base, "AUTOIA_SANDBOX": mode}
+
+
+def _run_subtask_executor(
+    settings,
+    executor: str,
+    prompt: str,
+    *,
+    cwd: str,
+    log_path: str,
+    checkout_path: str,
+    repo_id: int | None,
+    stop_file: str | None,
+    task_stop_file: str | None,
+    sandbox: SandboxConfig | None,
+    on_event,
+):
+    """Dispatch do executor da task (kimi/opencode/cmd) para UMA execução de
+    subtarefa — espelha o `_run_executor` do runner, mas o ciclo de subtarefas
+    gerencia o próprio lock_push/sandbox (por isso não reusa o runner)."""
+    workspace_dir = getattr(settings, "workspace_dir", None)
+    extra_env = _sub_extra_env(settings)
+    if executor == "opencode":
+        return opencode_exec.run_opencode(
+            prompt,
+            cwd=cwd,
+            opencode_bin=settings.opencode_bin,
+            log_path=log_path,
+            timeout=settings.run_timeout,
+            max_identical_calls=settings.max_identical_calls,
+            risky_patterns=settings.risky_patterns,
+            checkout_path=checkout_path,
+            whitelisted_hosts=settings.whitelisted_hosts,
+            model=settings.opencode_model,
+            no_progress_timeout=settings.no_progress_timeout,
+            repo_id=repo_id,
+            stop_file=stop_file,
+            task_stop_file=task_stop_file,
+            sandbox=sandbox,
+            workspace_dir=workspace_dir,
+            extra_env=extra_env,
+            on_event=on_event,
+        )
+    if executor == "cmd":
+        return cmd_exec.run_cmd(
+            prompt,
+            cwd=cwd,
+            cmd_bin=settings.cmd_bin,
+            log_path=log_path,
+            timeout=settings.run_timeout,
+            max_identical_calls=settings.max_identical_calls,
+            risky_patterns=settings.risky_patterns,
+            checkout_path=checkout_path,
+            whitelisted_hosts=settings.whitelisted_hosts,
+            cost_per_interaction=settings.cost_per_interaction,
+            no_progress_timeout=settings.no_progress_timeout,
+            model=settings.cmd_model,
+            repo_id=repo_id,
+            stop_file=stop_file,
+            task_stop_file=task_stop_file,
+            sandbox=sandbox,
+            workspace_dir=workspace_dir,
+            extra_env=extra_env,
+            on_event=on_event,
+        )
+    return kimi_exec.run_kimi(
+        prompt,
+        cwd=cwd,
+        kimi_bin=settings.kimi_bin,
+        log_path=log_path,
+        timeout=settings.run_timeout,
+        max_identical_calls=settings.max_identical_calls,
+        risky_patterns=settings.risky_patterns,
+        checkout_path=checkout_path,
+        cost_per_interaction=settings.cost_per_interaction,
+        repo_id=repo_id,
+        stop_file=stop_file,
+        task_stop_file=task_stop_file,
+        sandbox=sandbox,
+        workspace_dir=workspace_dir,
+        extra_env=extra_env,
+        on_event=on_event,
+    )
 
 # Arquivos de controle do autoia (não versionados) que NÃO contam como "mudança
 # de código" no guard de re-declaração de subtarefa já implementada.
@@ -497,22 +579,15 @@ def _run_free_implement(
             "subtask: não foi possível bloquear push em %s", checkout, exc_info=True
         )
     try:
-        outcome = kimi_exec.run_kimi(
-            prompt,
+        outcome = _run_subtask_executor(
+            settings, executor, prompt,
             cwd=checkout,
-            kimi_bin=settings.kimi_bin,
             log_path=log_path,
-            timeout=settings.run_timeout,
-            max_identical_calls=settings.max_identical_calls,
-            risky_patterns=settings.risky_patterns,
             checkout_path=checkout,
-            cost_per_interaction=settings.cost_per_interaction,
             repo_id=repo_id,
             stop_file=stop_file,
             task_stop_file=task_stop_file,
             sandbox=sandbox,
-            workspace_dir=getattr(settings, "workspace_dir", None),
-            extra_env=_sub_extra_env(settings),
             on_event=on_event,
         )
     finally:
@@ -526,7 +601,7 @@ def _run_free_implement(
     if outcome.aborted:
         return outcome.abort_reason or "abortado", outcome.final_text or ""
     if outcome.exit_code != 0:
-        return f"kimi saiu com código {outcome.exit_code}", outcome.final_text or ""
+        return f"{executor} saiu com código {outcome.exit_code}", outcome.final_text or ""
 
     message = (
         gitops.advpl_commit_message(executor, "ajustes da re-execução da fase")
@@ -753,22 +828,15 @@ def _run_one_implement(
     except gitops.GitError:
         log.warning("subtask: não foi possível bloquear push em %s", checkout, exc_info=True)
     try:
-        outcome = kimi_exec.run_kimi(
-            prompt,
+        outcome = _run_subtask_executor(
+            settings, executor, prompt,
             cwd=checkout,
-            kimi_bin=settings.kimi_bin,
             log_path=log_path,
-            timeout=settings.run_timeout,
-            max_identical_calls=settings.max_identical_calls,
-            risky_patterns=settings.risky_patterns,
             checkout_path=checkout,
-            cost_per_interaction=settings.cost_per_interaction,
             repo_id=repo_id,
             stop_file=stop_file,
             task_stop_file=task_stop_file,
             sandbox=sandbox,
-            workspace_dir=getattr(settings, "workspace_dir", None),
-            extra_env=_sub_extra_env(settings),
             on_event=on_event,
         )
     finally:
@@ -793,7 +861,7 @@ def _run_one_implement(
             return reason
 
         if outcome.exit_code != 0:
-            reason = f"kimi saiu com código {outcome.exit_code}"
+            reason = f"{executor} saiu com código {outcome.exit_code}"
             st.status = SUB_PENDING
             st.error = reason
             st.finished_at = func.now()
@@ -974,6 +1042,7 @@ def _run_one_verify(
         # Parada cooperativa: se o projeto for excluído durante a execução da
         # subtarefa, o watchdog do executor mata o processo.
         repo_id = task.repository_id
+        executor = task.executor
         stop_file = (
             exec_common.repo_stop_path(settings.workspace_dir, repo_id)
             if repo_id is not None
@@ -1008,22 +1077,15 @@ def _run_one_verify(
     except gitops.GitError:
         log.warning("subtask: não foi possível bloquear push em %s", checkout, exc_info=True)
     try:
-        outcome = kimi_exec.run_kimi(
-            prompt,
+        outcome = _run_subtask_executor(
+            settings, executor, prompt,
             cwd=checkout,
-            kimi_bin=settings.kimi_bin,
             log_path=log_path,
-            timeout=settings.run_timeout,
-            max_identical_calls=settings.max_identical_calls,
-            risky_patterns=settings.risky_patterns,
             checkout_path=checkout,
-            cost_per_interaction=settings.cost_per_interaction,
             repo_id=repo_id,
             stop_file=stop_file,
             task_stop_file=task_stop_file,
             sandbox=sandbox,
-            workspace_dir=getattr(settings, "workspace_dir", None),
-            extra_env=_sub_extra_env(settings),
             on_event=on_event,
         )
     finally:
@@ -1048,7 +1110,7 @@ def _run_one_verify(
             return reason
 
         if outcome.exit_code != 0:
-            reason = f"kimi saiu com código {outcome.exit_code}"
+            reason = f"{executor} saiu com código {outcome.exit_code}"
             st.status = SUB_PENDING
             st.error = reason
             st.finished_at = func.now()

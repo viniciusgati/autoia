@@ -130,9 +130,16 @@ class Settings:
     skills_dir: str = field(default_factory=lambda: _env("AUTOIA_SKILLS_DIR", "data/skills"))
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
+    cmd_bin: str = field(default_factory=lambda: _env("AUTOIA_CMD_BIN", "cmd"))
     # Modelo default do executor opencode (usado quando o robô não define `Robot.model`).
     opencode_model: str = field(
         default_factory=lambda: _env("AUTOIA_OPENCODE_MODEL", "deepseek/deepseek-v4-flash")
+    )
+    # Modelo default do executor cmd (Command Code); usado quando o robô não define
+    # `Robot.model` (que é a fonte primária, como no opencode). Mesmo modelo do
+    # executor opencode — disponível nos planos Go+ (o claude-sonnet-4-6 exige Pro).
+    cmd_model: str = field(
+        default_factory=lambda: _env("AUTOIA_CMD_MODEL", "deepseek/deepseek-v4-flash")
     )
     run_timeout: int = field(default_factory=lambda: _int("AUTOIA_RUN_TIMEOUT", 1800))
     max_identical_calls: int = field(default_factory=lambda: _int("AUTOIA_MAX_IDENTICAL_CALLS", 6))

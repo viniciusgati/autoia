@@ -170,6 +170,7 @@ export default function Chamados() {
                 <select value={form.executor} onChange={(e) => setForm((f) => ({ ...f, executor: e.target.value }))}>
                   <option value="kimi">kimi</option>
                   <option value="opencode">opencode</option>
+                  <option value="cmd">cmd</option>
                 </select>
               </div>
             </div>

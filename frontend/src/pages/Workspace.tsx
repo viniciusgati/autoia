@@ -834,12 +834,13 @@ export default function Workspace() {
                   disabled={executorDisabled}
                   onChange={(e) =>
                     act(() =>
-                      api.updateTaskStory(taskId, { executor: e.target.value as "kimi" | "opencode" }),
+                      api.updateTaskStory(taskId, { executor: e.target.value as "kimi" | "opencode" | "cmd" }),
                     )
                   }
                 >
                   <option value="kimi">kimi code</option>
                   <option value="opencode">opencode</option>
+                  <option value="cmd">cmd (command-code)</option>
                 </select>
               </label>
               <label className="ws-executor" title={modeTitle}>

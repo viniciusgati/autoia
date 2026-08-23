@@ -32,11 +32,12 @@ from .config import Settings
 # Tokens de linha de comando que identificam os serviços do autoia.
 SERVICE_TOKENS = {"autoia-api", "autoia-worker", "autoia-chamado-worker", "autoia-chat-worker"}
 
-# Executores LLM do autoia (kimi/opencode). SÓ contam como órfão quando o cwd do
-# processo está DENTRO do workspace (o executor roda no checkout). O `opencode`
+# Executores LLM do autoia (kimi/opencode/cmd). SÓ contam como órfão quando o cwd
+# do processo está DENTRO do workspace (o executor roda no checkout). O `opencode`
 # interativo do usuário (cwd fora do workspace) NÃO pode ser morto — senão o
-# autoia-stop mataria a própria sessão do humano.
-EXECUTOR_TOKENS = {"opencode", "kimi", "kimi-code"}
+# autoia-stop mataria a própria sessão do humano. O mesmo vale para o `cmd`
+# interativo do usuário.
+EXECUTOR_TOKENS = {"opencode", "kimi", "kimi-code", "cmd"}
 
 # Processos dos robôs/ecossistemas que podem sobreviver fora do grupo do executor
 # (daemons de SDK/emulador — nunca são a sessão interativa do usuário).

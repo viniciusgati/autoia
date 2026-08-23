@@ -64,6 +64,7 @@ from ..models import (
 )
 from . import (
     arch_metric,
+    cmd_exec,
     exec_common,
     gitops,
     handoff,
@@ -106,6 +107,8 @@ class EffectiveSettings:
     kimi_bin: str
     opencode_bin: str
     opencode_model: str
+    cmd_bin: str
+    cmd_model: str
     log_dir: str
     workspace_dir: str
     branch_prefix: str
@@ -163,6 +166,8 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         kimi_bin=settings.kimi_bin,
         opencode_bin=settings.opencode_bin,
         opencode_model=settings.opencode_model,
+        cmd_bin=settings.cmd_bin,
+        cmd_model=settings.cmd_model,
         log_dir=settings.log_dir,
         branch_prefix=settings.branch_prefix,
         workspace_dir=settings.workspace_dir,
@@ -850,7 +855,7 @@ def _run_executor(
     task_id: int | None = None,
     skills_dir: str | None = None,
 ):
-    """Executa a fase com o executor da task: `kimi` (kimi-code) ou `opencode`.
+    """Executa a fase com o executor da task: `kimi` (kimi-code), `opencode` ou `cmd`.
 
     `repo_id` identifica o projeto no registro de subprocessos ativos e alimenta o
     watchdog de parada cooperativa (`stop_file`): se a API excluir o projeto
@@ -919,7 +924,10 @@ def _run_executor(
             # Varredura de segredos dos mounts EFETIVOS (chaves SSH, credenciais…):
             # avisa sempre; com fail_closed, aborta a execução se algo sensível
             # entrou como mount (regressão do builder é pega na hora).
-            scan_cli = eff.opencode_bin if executor == "opencode" else eff.kimi_bin
+            scan_cli = {
+                "opencode": eff.opencode_bin,
+                "cmd": eff.cmd_bin,
+            }.get(executor, eff.kimi_bin)
             sandbox_scan = sandbox_mod.scan_secret_mounts(sandbox, cwd, eff.workspace_dir, scan_cli)
             if sandbox_scan:
                 log.warning(
@@ -954,6 +962,33 @@ def _run_executor(
                 model=model or eff.opencode_model,
                 no_progress_timeout=eff.no_progress_timeout,
                 resume_session_id=resume_session_id,
+                repo_id=repo_id,
+                stop_file=stop_file,
+                task_stop_file=task_stop_file,
+                sandbox=sandbox,
+                workspace_dir=eff.workspace_dir,
+                extra_env=extra_env,
+                on_event=on_event,
+            )
+        elif executor == "cmd":
+            outcome = cmd_exec.run_cmd(
+                prompt,
+                cwd=cwd,
+                cmd_bin=eff.cmd_bin,
+                log_path=log_path,
+                timeout=eff.run_timeout,
+                max_identical_calls=eff.max_identical_calls,
+                risky_patterns=eff.risky_patterns,
+                checkout_path=cwd,
+                whitelisted_hosts=eff.whitelisted_hosts,
+                cost_per_interaction=(
+                    kimi_cost_per_interaction
+                    if kimi_cost_per_interaction is not None
+                    else eff.cost_per_interaction
+                ),
+                no_progress_timeout=eff.no_progress_timeout,
+                resume_session_id=resume_session_id,
+                model=model or eff.cmd_model,
                 repo_id=repo_id,
                 stop_file=stop_file,
                 task_stop_file=task_stop_file,
@@ -1208,7 +1243,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         # Captura a sessão (kimi: `session.resume_hint`; opencode: `sessionID`
         # do JSONL) p/ retomar a MESMA conversa se a fase for re-executada após
         # interrupção (timeout/stall).
-        if outcome.session_id:
+        if outcome.session_id and task.executor != "cmd":
             step.session_id = outcome.session_id
         # Observabilidade do sandbox desta execução (modo, contêiner, overhead de
         # startup medido como tempo até a primeira linha de saída quando possível).
