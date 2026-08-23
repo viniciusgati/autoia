@@ -45,8 +45,16 @@ class TestMatchers:
         assert not stopall.is_service("bash")
 
     def test_is_robot_leftover(self):
-        assert stopall.is_robot_leftover("/usr/local/bin/kimi-code\0-p\0x")
-        assert stopall.is_robot_leftover("opencode\0run")
+        ws = "/data/workspaces"
+        # Executores do autoia rodam DENTRO do workspace (cwd no checkout) → órfão.
+        assert stopall.is_robot_leftover("/usr/local/bin/kimi-code\0-p\0x", "/data/workspaces/5/task_44", ws)
+        assert stopall.is_robot_leftover("opencode\0run", "/data/workspaces/5/task_44", ws)
+        # opencode/kimi interativo do usuário (cwd FORA do workspace) NÃO é órfão —
+        # senão o autoia-stop mataria a própria sessão do humano.
+        assert not stopall.is_robot_leftover("opencode\0run", "/home/u/code/pessoal/autoia", ws)
+        assert not stopall.is_robot_leftover("/usr/local/bin/kimi\0chat", "/home/u", ws)
+        assert not stopall.is_robot_leftover("opencode\0run", "", ws)
+        # Emuladores/SDK seguem token-only (nunca são a sessão interativa).
         assert stopall.is_robot_leftover("/sdk/emulator/qemu/linux-x86_64/qemu-system-x86_64-headless\0-avd")
         assert stopall.is_robot_leftover("/sdk/emulator/netsimd")
         assert stopall.is_robot_leftover("/home/u/Android/Sdk/emulator/emulator\0-avd\0Pixel")

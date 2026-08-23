@@ -446,6 +446,17 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             ))
             continue
 
+        if kind == "subtask_free_run":
+            summary = (
+                "re-execução da fase para corrigir o trabalho entregue"
+                f" — {str(payload.get('reason') or '')[:200]}"
+            )
+            timeline.append(_event_base(
+                ev, payload, EV_TASK_EVENT, "correção do trabalho entregue", summary,
+                step=step, status="completed",
+            ))
+            continue
+
         if kind == "pm_decision":
             timeline.append(_event_base(
                 ev, payload, EV_SYSTEM, "decisão do PM",

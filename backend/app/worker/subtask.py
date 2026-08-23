@@ -23,6 +23,7 @@ from ..config import Settings
 from ..models import (
     STEP_DONE,
     STEP_FAILED,
+    STEP_GUARDRAIL_BLOCKED,
     STEP_PENDING,
     SUB_DONE,
     SUB_FAILED,
@@ -172,6 +173,15 @@ def _build_subtask_implement_prompt(
     if task.acceptance_criteria:
         parts.append(f"### Critérios gerais da história (referência)\n{task.acceptance_criteria}")
 
+    # Intervenção do usuário (retomada): entra direto no prompt — a subtarefa é
+    # parte da re-execução e a instrução não pode depender só do handoff.
+    if task.resume_instruction:
+        parts.append(
+            f"## Intervenção do usuário (retomada)\n{task.resume_instruction}\n\n"
+            "_A execução foi bloqueada e o usuário forneceu esta instrução para continuar "
+            "exatamente de onde parou. Atenda a instrução nesta execução._"
+        )
+
     # Progresso das subtarefas anteriores
     done = [s for s in sorted(task.subtasks, key=lambda x: x.position) if s.status == SUB_DONE]
     if done:
@@ -283,47 +293,291 @@ def run_implement_subtasks(
     branch: str,
     project_info: str,
     log_path: str,
-) -> str | None:
+) -> tuple[str | None, str | None]:
     """Executa a fase implement para cada subtarefa pendente.
 
-    Retorna string de erro (orçamento, guardrail fatal) ou None se concluiu.
+    Retorna `(abort_reason, free_summary)`:
+    - `abort_reason`: erro fatal (orçamento, guardrail, commit) ou None se concluiu;
+    - `free_summary`: texto final da execução livre (re-execução sem subtarefa
+      pendente, motivada por instrução do usuário ou falha de fase posterior) —
+      vira o resumo da fase. None quando não houve execução livre.
     """
     on_event = _make_on_event(session_factory, step.id, log_path)
 
     with session_factory() as s:
         # Re-execução da fase implement (retry manual, instrução do usuário ou
-        # decisão do PM): subtarefas com tentativas esgotadas (`failed`) voltam a
-        # `pending` para serem REALMENTE re-trabalhadas pelo developer. Sem isso,
-        # reabrir o developer com só subtarefas `failed`/`done` terminava a fase
-        # imediatamente (`phase_done` sem executar nada) — a instrução do usuário
-        # era ignorada em silêncio.
+        # decisão do PM): subtarefas com tentativas esgotadas (`failed`) ou presas
+        # em `implementing` (worker morto no meio de uma execução anterior) voltam
+        # a `pending` para serem REALMENTE re-trabalhadas pelo developer. Sem
+        # isso, reabrir o developer terminava a fase imediatamente (`phase_done`
+        # sem executar nada) — a instrução do usuário era ignorada em silêncio.
         for st in (
             s.query(SubTask)
-            .filter(SubTask.task_id == task_id, SubTask.status == SUB_FAILED)
+            .filter(
+                SubTask.task_id == task_id,
+                SubTask.status.in_([SUB_FAILED, SUB_IMPLEMENTING]),
+            )
             .all()
         ):
             st.status = SUB_PENDING
             st.error = None
         if s.dirty:
             s.commit()
+        task = s.get(Task, task_id)
         pending = (
             s.query(SubTask)
             .filter(SubTask.task_id == task_id, SubTask.status.in_([SUB_PENDING]))
             .order_by(SubTask.position)
             .all()
         )
-        if not pending:
-            return None
+        free_reason = None if (pending or task is None) else _free_run_reason(s, step, task)
 
-    for subtask in pending:
-        abort_reason = _run_one_implement(
-            settings, session_factory, step, task_id, subtask,
-            checkout, base, branch, project_info, log_path, on_event,
+    if pending:
+        for subtask in pending:
+            abort_reason = _run_one_implement(
+                settings, session_factory, step, task_id, subtask,
+                checkout, base, branch, project_info, log_path, on_event,
+            )
+            if abort_reason:
+                return abort_reason, None
+        free_summary = None
+    elif free_reason is not None:
+        # Re-execução sem subtarefa pendente motivada externamente (instrução do
+        # usuário / fase posterior falhou): roda UMA execução livre do developer
+        # para corrigir o trabalho já entregue — nunca termina a fase em silêncio.
+        abort_reason, free_summary = _run_free_implement(
+            settings, session_factory, step, task_id,
+            checkout, base, branch, project_info, log_path, on_event, free_reason,
         )
         if abort_reason:
-            return abort_reason
+            return abort_reason, None
+    else:
+        # Nada pendente e nenhum motivo externo: fase concluída sem trabalho novo.
+        free_summary = None
 
-    return None
+    # Bookkeeping do SISTEMA: normaliza `autoia_subtasks_done.json` (lista
+    # acumulada) e commita se mudou — o conteúdo nunca fica a cargo do robô
+    # (a task-86 morreu porque o developer gravou `[4]` em vez de `[1, 2, 3, 4]`).
+    try:
+        _normalize_and_commit_subtasks_done(session_factory, task_id, checkout)
+    except gitops.GitError as exc:
+        return f"bookkeeping: {exc}", None
+
+    return None, free_summary
+
+
+def _free_run_reason(s: Session, step: TaskStep, task: Task) -> str | None:
+    """Motivo para rodar UMA execução livre do developer quando não há subtarefa
+    pendente (re-execução motivada externamente). None = nada a fazer — a fase
+    conclui legitimamente (ex.: primeira execução sem subtarefas a fazer)."""
+    parts: list[str] = []
+    if task.resume_instruction:
+        parts.append(
+            "o usuário forneceu uma instrução de retomada:\n"
+            f"{task.resume_instruction}"
+        )
+    for st in sorted(
+        (x for x in task.steps if not x.archived), key=lambda x: x.position
+    ):
+        if st.position > step.position and st.status in (
+            STEP_FAILED,
+            STEP_GUARDRAIL_BLOCKED,
+        ):
+            detail = (
+                "\n".join(p for p in (st.error, st.summary) if p).strip()
+                or "(sem detalhes)"
+            )
+            parts.append(
+                f"a fase {st.position} ({st.robot.name if st.robot else '?'}) "
+                f"falhou e o trabalho voltou para esta fase corrigir:\n{detail}"
+            )
+    return "\n\n".join(parts) if parts else None
+
+
+def _build_free_implement_prompt(
+    task: Task,
+    reason: str,
+    project_info: str,
+    base: str,
+    branch: str,
+    checkout: str,
+) -> str:
+    """Prompt da execução livre do developer: re-execução da fase sem subtarefa
+    pendente, para corrigir/ajustar o trabalho já entregue."""
+    parts: list[str] = []
+    robot = next(
+        (st.robot for st in task.steps if st.robot and st.robot.role == "implement"),
+        None,
+    )
+    if robot:
+        mission = (robot.mission or "").strip()
+        parts.append(
+            mission.replace("{task_title}", task.title or "")
+            .replace("{task_description}", task.description or "")
+            .replace(
+                "{step_context}",
+                "Re-execução da fase de implementação (correção do trabalho entregue)",
+            )
+            .replace("{default_branch}", base or "main")
+        )
+
+    parts.append(prompts.GIT_WORKFLOW)
+    if project_info:
+        parts.append(project_info)
+
+    parts.append(
+        "## Correção do trabalho já entregue (re-execução da fase)\n"
+        "Todas as subtarefas desta fase já estão implementadas na branch. Esta "
+        f"execução existe porque {reason}.\n\n"
+        "Corrija exatamente o que foi apontado (faça os commits necessários) e "
+        "documente no texto final o que foi feito e a evidência. Se nada precisar "
+        "de mudança no código, documente isso claramente no texto final."
+    )
+    parts.append(prompts.HANDOFF_READ)
+    parts.append(prompts.HANDOFF_DOCUMENT)
+    parts.append(prompts.EVIDENCE)
+    parts.append(prompts.GUARDRAIL_INSTRUCTIONS)
+
+    return "\n\n".join(p for p in parts if p)
+
+
+def _run_free_implement(
+    settings: Settings,
+    session_factory,
+    step: TaskStep,
+    task_id: int,
+    checkout: str,
+    base: str,
+    branch: str,
+    project_info: str,
+    log_path: str,
+    on_event,
+    reason: str,
+) -> tuple[str | None, str]:
+    """Uma execução livre do developer (sem subtarefa pendente): o robô corrige o
+    trabalho já entregue conforme instrução do usuário / falha de fase posterior.
+    Retorna `(abort_reason, final_text)`. Não há veredicto nem bounce interno —
+    o fluxo normal da fase decide o próximo passo."""
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        if task is None:
+            return "task não encontrada", ""
+        step_obj = s.get(TaskStep, step.id)
+        executor = task.executor
+        advpl = gitops.is_advpl_robot(step_obj.robot.name if step_obj.robot else None)
+        repo_id = task.repository_id
+        stop_file = (
+            exec_common.repo_stop_path(settings.workspace_dir, repo_id)
+            if repo_id is not None
+            else None
+        )
+        task_stop_file = (
+            exec_common.task_stop_path(settings.workspace_dir, task_id)
+            if getattr(settings, "workspace_dir", None)
+            else None
+        )
+        prompt = _build_free_implement_prompt(
+            task, reason, project_info, base, branch, checkout
+        )
+        _system_event(
+            s, step, "subtask_prompt",
+            {"position": None, "title": "re-execução livre da fase", "prompt": prompt},
+        )
+        _system_event(
+            s, step, "subtask_free_run",
+            {"position": None, "title": "re-execução livre da fase", "reason": reason},
+        )
+        s.commit()
+
+    sandbox = _sub_sandbox(settings)
+    try:
+        gitops.lock_push(checkout)
+    except gitops.GitError:
+        log.warning(
+            "subtask: não foi possível bloquear push em %s", checkout, exc_info=True
+        )
+    try:
+        outcome = kimi_exec.run_kimi(
+            prompt,
+            cwd=checkout,
+            kimi_bin=settings.kimi_bin,
+            log_path=log_path,
+            timeout=settings.run_timeout,
+            max_identical_calls=settings.max_identical_calls,
+            risky_patterns=settings.risky_patterns,
+            checkout_path=checkout,
+            cost_per_interaction=settings.cost_per_interaction,
+            repo_id=repo_id,
+            stop_file=stop_file,
+            task_stop_file=task_stop_file,
+            sandbox=sandbox,
+            workspace_dir=getattr(settings, "workspace_dir", None),
+            extra_env=_sub_extra_env(settings),
+            on_event=on_event,
+        )
+    finally:
+        try:
+            gitops.unlock_push(checkout)
+        except gitops.GitError:
+            log.warning(
+                "subtask: não foi possível liberar push em %s", checkout, exc_info=True
+            )
+
+    if outcome.aborted:
+        return outcome.abort_reason or "abortado", outcome.final_text or ""
+    if outcome.exit_code != 0:
+        return f"kimi saiu com código {outcome.exit_code}", outcome.final_text or ""
+
+    message = (
+        gitops.advpl_commit_message(executor, "ajustes da re-execução da fase")
+        if advpl
+        else "autoia: ajustes da re-execução da fase implement"
+    )
+    try:
+        committed = gitops.commit_all(checkout, message)
+        if advpl and committed:
+            gitops.push_branch(checkout, branch)
+    except gitops.GitError as exc:
+        return f"commit: {exc}", outcome.final_text or ""
+
+    return None, outcome.final_text or ""
+
+
+def _normalize_and_commit_subtasks_done(
+    session_factory, task_id: int, checkout: str
+) -> None:
+    """Bookkeeping do SISTEMA: reescreve `autoia_subtasks_done.json` com a lista
+    ACUMULADA (posições 1-based) das subtarefas implementadas/verificadas da task
+    e commita o arquivo se o conteúdo mudou.
+
+    O conteúdo nunca fica a cargo do robô: o developer pode gravar apenas a
+    posição atual (regressão) — aqui o estado final é sempre cumulativo e
+    commitado, como a convenção do repo exige (caso da task-86)."""
+    with session_factory() as s:
+        positions = sorted(
+            int(p) + 1
+            for (p,) in s.query(SubTask.position).filter(
+                SubTask.task_id == task_id,
+                SubTask.status.in_([SUB_IMPLEMENTED, SUB_DONE]),
+            )
+        )
+    content = json.dumps(positions) + "\n"
+    path = os.path.join(checkout, "autoia_subtasks_done.json")
+    try:
+        with open(path, encoding="utf-8") as f:
+            current = f.read()
+    except OSError:
+        current = None
+    if current == content:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(content)
+    gitops.run_git(checkout, "add", "--", "autoia_subtasks_done.json")
+    if gitops.run_git(checkout, "diff", "--cached", "--quiet", check=False).returncode != 0:
+        gitops.run_git(
+            checkout, "commit", "-m",
+            "autoia: registra subtarefas implementadas (bookkeeping)",
+        )
 
 
 def _subtask_marked_done(checkout: str, position_1based: int) -> bool:
@@ -458,6 +712,10 @@ def _run_one_implement(
         st = s.get(SubTask, subtask.id)
         if st is None:
             return "subtarefa não encontrada"
+        # Fluxo ADVPL: commit com prefixo do executor + push da branch por subtarefa.
+        step_obj = s.get(TaskStep, step.id)
+        executor = task.executor
+        advpl = gitops.is_advpl_robot(step_obj.robot.name if step_obj.robot else None)
         # Parada cooperativa: se o projeto for excluído durante a execução da
         # subtarefa, o watchdog do executor mata o processo.
         repo_id = task.repository_id
@@ -604,7 +862,15 @@ def _run_one_implement(
 
         # Sucesso: commit local e avança status
         try:
-            gitops.commit_all(checkout, f"autoia: subtask {st.position + 1} - {st.title}")
+            if advpl:
+                message = gitops.advpl_commit_message(
+                    executor, st.title or f"subtarefa {st.position + 1}"
+                )
+            else:
+                message = f"autoia: subtask {st.position + 1} - {st.title}"
+            gitops.commit_all(checkout, message)
+            if advpl:
+                gitops.push_branch(checkout, branch)
         except gitops.GitError as exc:
             st.status = SUB_PENDING
             st.error = f"commit: {exc}"

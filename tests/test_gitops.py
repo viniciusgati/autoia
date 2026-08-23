@@ -91,3 +91,39 @@ def test_merge_conflict_detected(bare_repo, tmp_path):
     result = gitops.merge_and_push(dest, "autoia/task-1", "main")
     assert result.ok is False
     assert result.conflict is True
+
+
+def test_push_and_pull_branch(bare_repo, tmp_path):
+    """Workflow ADVPL: push da branch do desenvolvedor + pull num re-clone."""
+    dest = str(tmp_path / "clone")
+    gitops.clone(bare_repo, dest)
+    gitops.ensure_task_branch(dest, "autoia/task-1", "main")
+    (tmp_path / "clone" / "hello.py").write_text("print('oi')\n")
+    gitops.commit_all(dest, "[kimi] - cria hello.py")
+    gitops.push_branch(dest, "autoia/task-1")
+
+    # segundo clone: a branch foi criada do origin/main (sem o commit); o pull traz
+    # o que foi publicado no remoto.
+    dest2 = str(tmp_path / "clone2")
+    gitops.clone(bare_repo, dest2)
+    gitops.ensure_task_branch(dest2, "autoia/task-1", "main")
+    assert not (tmp_path / "clone2" / "hello.py").exists()
+    gitops.pull_branch(dest2, "autoia/task-1")
+    assert (tmp_path / "clone2" / "hello.py").exists()
+
+
+def test_pull_branch_noop_when_not_published(bare_repo, tmp_path):
+    """Pull numa branch que ainda não existe no remoto não quebra (best-effort)."""
+    dest = str(tmp_path / "clone")
+    gitops.clone(bare_repo, dest)
+    gitops.ensure_task_branch(dest, "autoia/task-1", "main")
+    gitops.pull_branch(dest, "autoia/task-1")  # não deve lançar
+    assert gitops.current_branch(dest) == "autoia/task-1"
+
+
+def test_advpl_helpers():
+    assert gitops.is_advpl_robot("developer-advpl") is True
+    assert gitops.is_advpl_robot("developer") is False
+    assert gitops.is_advpl_robot(None) is False
+    assert gitops.advpl_commit_message("kimi", "cria função X") == "[kimi] - cria função X"
+    assert gitops.advpl_commit_message("opencode", "ajusta Y") == "[opencode] - ajusta Y"

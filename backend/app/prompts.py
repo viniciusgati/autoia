@@ -86,11 +86,17 @@ perdido por um restart do worker) — NÃO reimplemente do zero. Em vez disso, e
 arquivo `autoia_subtasks_done.json` na raiz do projeto e o sistema marcará a subtarefa
 como implementada automaticamente ao final desta fase.
 
-Formato (JSON array com a posição 1-based da subtarefa):
+Formato (JSON array com as posições 1-based):
 ```json
 [1, 2, 4]
 ```
 
+- O conteúdo do arquivo é o estado FINAL da task: ele lista TODAS as subtarefas desta
+  task que já estão implementadas na branch — as anteriores e a atual. Se outras
+  subtarefas desta MESMA task já foram implementadas em execuções anteriores,
+  PRESERVE os índices delas e ACRESCENTE o da subtarefa atual.
+- NUNCA sobrescreva o conteúdo com apenas a posição da subtarefa atual: isso apaga o
+  histórico e regride o bookkeeping no merge (o sistema valida o conteúdo final).
 - Use APENAS quando o código da subtarefa JÁ está commitado na branch e atende os critérios.
 - Ainda assim, documente no texto final o que você constatou (arquivos já presentes etc.).
 - Se a subtarefa ainda precisa de trabalho, implemente normalmente e NÃO escreva o arquivo.
@@ -286,6 +292,14 @@ SUMMARY: o que foi testado, comandos rodados e resultados
 FAIL
 SUMMARY: relatório estruturado das falhas (abaixo)
 
+- Veredicto SEMPRE rastreável ao código avaliado: rode `git rev-parse --short HEAD`
+  antes de escrever o veredicto e inclua no SUMMARY a linha `HEAD: <hash curto>`
+  (ex.: `HEAD: 3e75ec8`). O sistema usa esse hash para detectar veredictos obsoletos.
+- Se o histórico (handoff) mostrar que uma tentativa ANTERIOR desta fase escreveu um
+  veredicto, ele JÁ FOI CONSUMIDO pelo sistema e perdeu a validade: verifique o estado
+  ATUAL do checkout (git log, git diff) e emita um veredicto NOVO baseado no código
+  atual — NUNCA republique o veredicto anterior sem re-verificar.
+
 Se houver QUALQUER critério não atendido ou teste falhando, o veredicto é FAIL.
 No FAIL, use EXATAMENTE este formato no SUMMARY (é o que o developer usará para corrigir):
 
@@ -322,6 +336,14 @@ SUMMARY: o que foi avaliado, decisões e justificativas
 FAIL
 SUMMARY: relatório estruturado das falhas (abaixo)
 
+- Veredicto SEMPRE rastreável ao código avaliado: rode `git rev-parse --short HEAD`
+  antes de escrever o veredicto e inclua no SUMMARY a linha `HEAD: <hash curto>`
+  (ex.: `HEAD: 3e75ec8`). O sistema usa esse hash para detectar veredictos obsoletos.
+- Se o histórico (handoff) mostrar que uma tentativa ANTERIOR desta fase escreveu um
+  veredicto, ele JÁ FOI CONSUMIDO pelo sistema e perdeu a validade: verifique o estado
+  ATUAL do checkout (git log, git diff) e emita um veredicto NOVO baseado no código
+  atual — NUNCA republique o veredicto anterior sem re-avaliar.
+
 Se QUALQUER critério não atendido, escopo estourado ou problema de qualidade, o
 veredicto é FAIL. No FAIL, use EXATAMENTE este formato no SUMMARY (é o que o developer
 usará para corrigir):
@@ -336,6 +358,33 @@ PASS
 SUMMARY: validei os critérios 1–4 no código e no diff; escopo respeitado, sem lixo.
 
 NÃO faça commit do arquivo de veredicto."""
+
+# Contrato do dispatcher (human-in-the-loop): interpreta a intenção do usuário e
+# escolhe qual agente rodar (ou responder/perguntar). Escreve autoia_dispatch.json.
+CONTRACT_DISPATCH = """## Formato de saída OBRIGATÓRIO (decisão de dispatcher)
+Você é o DISPATCHER: interpreta a intenção do usuário numa pipeline aberta
+(human-in-the-loop) e decide o próximo passo. Escreva o arquivo `autoia_dispatch.json`
+na raiz do checkout com EXATAMENTE esta estrutura:
+
+{
+  "action": "run_agent" | "merge" | "chat" | "ask",
+  "agent": "nome ou role do agente",   (obrigatório em run_agent)
+  "instruction": "instrução específica e acionável ao agente", (obrigatório em run_agent/merge)
+  "reply": "resposta curta ao usuário",   (obrigatório em chat; recomendado nas demais)
+  "question": "pergunta direta ao usuário", (obrigatório em ask)
+  "reason": "por que esta decisão (1 frase)"
+}
+
+### Regras
+- `run_agent`: escolha UM agente da lista fornecida e escreva uma instrução específica,
+  acionável e autocontida (o agente não tem o histórico da conversa). O agente roda
+  livre no papel dele com esta instrução e commita por fase — o merge NÃO é feito aqui.
+- `merge`: só quando o usuário pedir para integrar/mergear a branch.
+- `chat`: se for só uma pergunta ou conversa, responda diretamente sem rodar agente.
+- `ask`: se faltar informação essencial para escolher o agente/ação, pergunte.
+- NÃO invente um agente que não esteja na lista. Mapeie pedidos vagos ao agente mais
+  adequado pelo papel.
+- Responda em português."""
 
 CONTRACT_PM = """## Formato de saída OBRIGATÓRIO (decisão)
 Você controla o projeto. Analise o contexto da tarefa (status, falhas, orçamento gasto,

@@ -30,10 +30,12 @@ from .. import budget, prompts, verdicts
 from ..config import Settings
 from ..db import Base, make_engine, make_session_factory, migrate_schema, utcnow
 from ..models import (
+    CHAT_STATUS_IDLE,
     STEP_BLOCKED,
     STEP_DONE,
     STEP_FAILED,
     STEP_GUARDRAIL_BLOCKED,
+    STEP_MODE_MANUAL,
     STEP_PENDING,
     STEP_RUNNING,
     TASK_BLOCKED,
@@ -41,7 +43,9 @@ from ..models import (
     TASK_DONE,
     TASK_FAILED,
     TASK_IN_PROGRESS,
+    TASK_MODE_MANUAL,
     TASK_NEEDS_REVIEW,
+    TASK_OPEN,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
     Pipeline,
@@ -166,6 +170,14 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         no_progress_timeout=settings.no_progress_timeout,
         sandbox=_sandbox_config(settings, repo),
     )
+
+
+def _effective_step_mode(step: TaskStep, task: Task) -> str:
+    """Modo efetivo de execução de uma fase: o modo manual da task prevalece;
+    senão, o da própria fase (None = herda = auto)."""
+    if task.mode == TASK_MODE_MANUAL:
+        return STEP_MODE_MANUAL
+    return step.execution_mode or "auto"
 
 
 def _step_goal(step: TaskStep, task: Task) -> str:
@@ -413,6 +425,11 @@ def claim_next(session_factory) -> int | None:
                 TaskStep.archived.is_(False),
                 Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
                 TaskStep.task_id.not_in(running_task_ids),
+                # Modo human-in-the-loop: o auto-worker não reclama fases de tasks
+                # em modo manual, nem fases marcadas como manuais (o chat-worker
+                # dirige via dispatcher).
+                Task.mode != TASK_MODE_MANUAL,
+                (TaskStep.execution_mode.is_(None)) | (TaskStep.execution_mode != STEP_MODE_MANUAL),
             )
             .order_by(TaskStep.id)
             .first()
@@ -538,8 +555,10 @@ def _should_resume(s: Session, step: TaskStep) -> str | None:
     """Session_id do kimi a retomar se a fase foi INTERROMPIDA (timeout/stall) sem
     concluir — para continuar a MESMA conversa (contexto preservado).
 
-    Se a última execução concluiu (`phase_done`/`merged`), retorna None: re-execução
-    manual após conclusão recomeça do zero.
+    Se a última execução concluiu (`phase_done`/`merged`) ou encerrou com um
+    VEREDICTO (`verdict`, inclusive FAIL), retorna None: re-execução recomeça do
+    zero — retomar uma conversa que já concluiu um veredicto só reproduz a
+    conclusão antiga (stale verdict), nunca uma reavaliação.
     """
     if not step.session_id:
         return None
@@ -554,7 +573,7 @@ def _should_resume(s: Session, step: TaskStep) -> str | None:
         if ev.kind == "attempt_started":
             in_run = True
             completed = False
-        elif in_run and ev.kind in ("phase_done", "merged"):
+        elif in_run and ev.kind in ("phase_done", "merged", "verdict"):
             completed = True
     return None if completed else step.session_id
 
@@ -570,7 +589,13 @@ def _resume_prompt(step: TaskStep, task: Task) -> str:
         f"(git status/diff) e continue o trabalho desta fase ('{task.title}') até concluir.\n"
         "3. Ao terminar, produza o texto final/documentação da fase como instruído no "
         "prompt original (O que foi feito / Arquivos alterados / Evidência / Pendências / "
-        "Para a próxima fase)."
+        "Para a próxima fase).\n\n"
+        "IMPORTANTE: o código/checkout PODE ter mudado desde a interrupção (outras fases "
+        "ou tentativas podem ter agido no meio). Reconcilie com o estado ATUAL (git log, "
+        "git status, diff) antes de continuar. Se esta fase já havia escrito um veredicto "
+        "(autoia_verdict.txt), ele foi CONSUMIDO pelo sistema e perdeu a validade: "
+        "reavalie/reverifique o estado atual ANTES de escrever um novo — nunca republicar "
+        "o veredicto anterior sem re-verificar o código atual."
     )
 
 
@@ -1036,6 +1061,19 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             s.commit()
             return None
 
+        # Workflow ADVPL: antes de cada execução do DESENVOLVEDOR, atualiza a branch do
+        # remoto (pull) — o robô vê o estado mais recente e entende o que mudou (ex.:
+        # push de uma execução anterior da mesma fase após re-clone/reset do checkout).
+        if (
+            not step.post_merge
+            and (step.robot.role if step.robot else "") == "implement"
+            and gitops.is_advpl_robot(step.robot.name if step.robot else None)
+        ):
+            try:
+                gitops.pull_branch(checkout, branch)
+            except gitops.GitError as exc:
+                log.warning("não foi possível fazer pull da branch %s: %s", branch, exc)
+
         step_context = _build_step_context(
             s, task, step, checkout, base, branch,
             recent_phases=settings.step_context_recent_phases,
@@ -1205,6 +1243,24 @@ def _consume_verdict(s: Session, step: TaskStep, checkout: str) -> str | None:
     else:
         label = verdicts.parse_pass_fail(raw)
     step.verdict = label or (raw or "")[:30] or "AUSENTE"
+    cited = verdicts.parse_head_hash(raw)
+    if cited:
+        try:
+            current = gitops.head_short(checkout)
+        except gitops.GitError:
+            current = None
+        if current and not current.startswith(cited) and not cited.startswith(current):
+            # Veredicto escrito contra uma árvore ANTIGA (o código mudou depois que o
+            # robô avaliou) — diagnóstico na timeline; a decisão continua sendo do
+            # fluxo normal (não falha a fase sozinho).
+            _system_event(
+                s, step, "stale_verdict_warning",
+                {
+                    "verdict_head": cited,
+                    "checkout_head": current,
+                    "verdict": label,
+                },
+            )
     if label != expected and raw:
         # Veredicto de correção (NEEDS_WORK/FAIL): preserva o conteúdo COMPLETO
         # no summary — é o que a fase anterior precisa para corrigir (bounce-back)
@@ -1403,14 +1459,26 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         # Sucesso: commit local apenas em fases pré-merge.
         if not step.post_merge:
             try:
-                committed = gitops.commit_all(checkout, f"autoia: {task.title} (fase {step.position})")
+                advpl = gitops.is_advpl_robot(step.robot.name if step.robot else None)
+                if advpl:
+                    message = gitops.advpl_commit_message(
+                        task.executor,
+                        step.goal or task.title or f"fase {step.position}",
+                    )
+                else:
+                    message = f"autoia: {task.title} (fase {step.position})"
+                committed = gitops.commit_all(checkout, message)
                 if committed:
                     try:
                         step.diff_stat = gitops.diff_last_commit(checkout) or ""
                     except gitops.GitError:
                         pass
+                # Workflow ADVPL: publica a branch no remoto a cada fase de
+                # desenvolvimento (o robô pode retomar/continuar o trabalho).
+                if advpl:
+                    gitops.push_branch(checkout, task.branch)
             except gitops.GitError as exc:
-                trigger = _handle_failure(eff, s, step, task, f"commit: {exc}", "git_error", STEP_FAILED)
+                trigger = _handle_failure(eff, s, step, task, f"commit/push: {exc}", "git_error", STEP_FAILED)
                 s.commit()
                 return trigger
 
@@ -1463,6 +1531,24 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
 
         steps = _active_steps(task)
         nxt = next((st for st in steps if st.position > step.position), None)
+
+        # Modo human-in-the-loop: se a PRÓXIMA fase é manual (ou a task está em modo
+        # manual no fim da pipeline), o auto-worker entrega o controle ao humano em
+        # vez de avançar/integrar sozinho. O merge também deixa de ser automático
+        # (fica sob demanda via dispatcher).
+        nxt_manual = nxt is not None and _effective_step_mode(nxt, task) == STEP_MODE_MANUAL
+        end_manual = nxt is None and task.mode == TASK_MODE_MANUAL
+        if nxt_manual or end_manual:
+            step.status = STEP_DONE
+            task.current_step = step.position
+            task.status = TASK_OPEN
+            task.chat_status = CHAT_STATUS_IDLE
+            task.pending_action = None
+            _system_event(s, step, "pipeline_opened", {"next": nxt.position if nxt else None})
+            _finish(step)
+            s.commit()
+            _spawn_tasks(session_factory, step_id, checkout)
+            return None
 
         if step.post_merge:
             # fase pós-merge: nunca faz merge nem commit; só avança (ou conclui)
@@ -1552,6 +1638,11 @@ def _handle_failure(eff: EffectiveSettings, s: Session, step: TaskStep, task: Ta
     _system_event(s, step, kind, payload)
     step.status = step_status
     step.error = reason
+    if kind == "verdict":
+        # A fase CONCLUIU (escreveu um veredicto): a próxima re-execução deve
+        # começar do zero — retomar a sessão antiga só repete o veredicto antigo
+        # sem reavaliar (stale verdict). Complementa a checagem em _should_resume.
+        step.session_id = None
     _finish(step)
 
     if step.post_merge:
@@ -1611,7 +1702,7 @@ def _decide_subtask_implement(
         task_id = step.task_id
         log_path = step.log_path or os.path.join(eff.log_dir, f"step_{step_id}.log")
 
-    abort_reason = subtask.run_implement_subtasks(
+    abort_reason, free_summary = subtask.run_implement_subtasks(
         eff, session_factory, step,
         task_id, checkout, base, branch, project_info, log_path,
     )
@@ -1672,7 +1763,9 @@ def _decide_subtask_implement(
             return trigger
 
         # Todas as subtarefas implementadas → avança para verify
-        step.summary = _subtask_progress_summary(task)
+        # Execução livre (correção sem subtarefa pendente): o texto final do robô
+        # vira o resumo da fase — o avaliador precisa ver o que foi corrigido.
+        step.summary = free_summary or _subtask_progress_summary(task)
         try:
             step.diff_stat = gitops.diff_stat(checkout, base, branch) or ""
         except gitops.GitError:

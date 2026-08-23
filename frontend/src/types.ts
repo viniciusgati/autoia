@@ -134,6 +134,8 @@ export interface TaskStep {
   started_at: string | null;
   finished_at: string | null;
   artifacts?: Artifact[];
+  /** Modo de execução desta fase: null (herda a task) | "auto" | "manual". */
+  execution_mode?: string | null;
 }
 
 export interface Artifact {
@@ -236,6 +238,12 @@ export interface Task {
   updated_at: string;
   responsible_id: number | null;
   responsible: User | null;
+  /** Modo de execução: "auto" (pipeline) | "manual" (human-in-the-loop). */
+  mode: string;
+  /** Ação de chat pendente no modo manual (null = aguardando o humano). */
+  pending_action: string | null;
+  /** Estado da ação de chat: "idle" | "queued" | "running". */
+  chat_status: string;
   /** Associação organizacional Projeto > Épico (0..1 cada; null = sem associação). */
   project_id: number | null;
   epic_id: number | null;
@@ -397,6 +405,40 @@ export interface Workspace {
   summary: TaskSummary | null;
   occurrences: WorkspaceOccurrence[];
   decisions: WorkspaceDecision[];
+  /** Chat human-in-the-loop (modo manual): transcript da task. */
+  messages: TaskMessage[];
+  /** Histórico de rodadas de agente no modo manual. */
+  runs: TaskRun[];
+  /** Agentes disponíveis para o dispatcher/menu (robôs do repo + globais). */
+  agents: Robot[];
+}
+
+/** Uma interação do chat human-in-the-loop de uma task. */
+export interface TaskMessage {
+  id: number;
+  task_id: number;
+  seq: number;
+  ts: string;
+  kind: string;
+  payload: Record<string, unknown>;
+  cost: number;
+}
+
+/** Uma rodada de agente no modo human-in-the-loop. */
+export interface TaskRun {
+  id: number;
+  task_id: number;
+  robot_id: number | null;
+  robot_name: string;
+  robot_role: string;
+  instruction: string;
+  status: string;
+  final_text: string | null;
+  verdict: string | null;
+  diff_stat: string | null;
+  cost: number;
+  started_at: string | null;
+  finished_at: string | null;
 }
 
 /** Diff real (git) do commit de uma fase. */

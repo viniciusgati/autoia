@@ -97,14 +97,29 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 
 - **Task** = lista ordenada de **TaskSteps** (fases). Cada fase tem um **Robot** com um
   `role`: `refine` (po), `review` (qa), `implement` (developer), `verify` (tester),
-  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 13 robôs e **4 pipelines**:
+  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 15 robôs e **5 pipelines**:
   `po-qa-dev-tester-avaliador-deploytest` (po, qa, developer, tester, avaliador, merger
   + deploy-tester pós-merge), `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
   para projetos sem deploy), `po-qa-dev-tester-avaliador-deploytest-browser` (com
-  browser-tester pós-merge) e `iniciador-analista-ux-propositor` (brainstorm/análise:
+  browser-tester pós-merge), `iniciador-analista-ux-propositor` (brainstorm/análise:
   inicia o projeto, define tarefas/lacunas, audita usabilidade e o propositor escreve
   `autoia_tasks.json` → propostas PENDENTES de decisão humana, sem merge automático de
-  tasks filhas).
+  tasks filhas) e `advpl-po-qa-dev-tester-avaliador-merge` (fluxo ADVPL/Protheus:
+  usa o `developer-advpl` em vez do developer).
+- **Fluxo ADVPL (Protheus/TOTVS)** — regras específicas do desenvolvedor ADVPL
+  (`developer-advpl`, role `implement`; detecção por `gitops.is_advpl_robot`, nome
+  contendo "advpl"):
+  1. **Commit por run com prefixo do executor**: mensagem `[<executor>] - <goal da
+     fase>` (`gitops.advpl_commit_message`, usando `Task.executor` — kimi/opencode);
+     nas subtarefas, o prefixo usa o título da subtarefa.
+  2. **Push a cada fase de desenvolvimento**: o worker publica a branch
+     `autoia/task-<id>` no remoto (`gitops.push_branch`) após cada fase pré-merge do
+     desenvolvedor (e por subtarefa), em vez de só no merge final.
+  3. **Pull antes de cada execução do desenvolvedor**: `gitops.pull_branch`
+     (fast-forward only, best-effort) atualiza a branch do remoto antes do robô rodar,
+     para ele ver o que mudou (ex.: push de execução anterior após re-clone/reset).
+  Robôs não-ADVPL seguem o comportamento original (`autoia: <título> (fase N)`, sem
+  push por fase).
 - **Associação Projeto > Épico na Task** (`Task.project_id`/`epic_id`, 0..1
   opcional — colunas aditivas em `db.ADDITIVE_COLUMNS["tasks"]`): metadados
   organizacionais, espelhando o fluxo de chamados — NÃO entram no handoff/prompt,
@@ -144,10 +159,24 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   completo no contexto, até `max_attempts`. Falha **pós-merge** → **nunca** bounce
   (código já integrado): task `needs_review` + evento `post_merge_failed` + PM decide.
 - **Subtarefas**: fases `implement`/`verify` iteram sobre subtarefas (cada uma com seu
-  bounce-back). Subtarefa com tentativas esgotadas (`failed`) volta a `pending` **toda
-  vez que a fase implement é re-executada** (retry manual, instrução do usuário, decisão
-  do PM) — reabrir o developer com só subtarefas `failed`/`done` terminaria a fase em
-  `phase_done` sem executar nada (ignorando a instrução em silêncio).
+  bounce-back). Re-execução da fase implement: subtarefas com tentativas esgotadas
+  (`failed`) ou presas em `implementing` (worker morto no meio) voltam a `pending` —
+  sem isso, reabrir o developer com só subtarefas `failed`/`done` terminaria a fase em
+  `phase_done` sem executar nada (ignorando a instrução em silêncio). Se ainda assim
+  NÃO há subtarefa pendente mas existe motivo externo (`resume_instruction` do usuário
+  ou fase posterior `failed`/`guardrail_blocked` — ex.: FAIL do avaliador), o worker
+  roda UMA **execução livre** do developer (`subtask.py:_run_free_implement`,
+  evento `subtask_free_run`): o robô corrige o trabalho já entregue com a instrução/
+  relatório no prompt e o texto final vira o `TaskStep.summary`. Sem motivo externo, a
+  fase conclui sem rodar (nada a fazer). A instrução de retomada também entra DIRETA
+  no prompt de subtarefa pendente (`_build_subtask_implement_prompt`), sem depender só
+  do handoff.
+- **Bookkeeping `autoia_subtasks_done.json` é do SISTEMA**: após cada execução da fase
+  implement, o worker normaliza o arquivo como lista **acumulada** (posições 1-based
+  de todas as subtarefas `implemented`/`done`) e commita se mudou
+  (`_normalize_and_commit_subtasks_done`) — o robô não pode gravar só a posição atual
+  (a task-86 morreu porque o dev gravou `[4]` em vez de `[1, 2, 3, 4]`). O prompt da
+  ferramenta (`SUB_TASK_DONE_TOOL`) deixa explícito o conteúdo cumulativo.
 - **PM** (`pm`): decide `retry <pos>` / `continuar` (top-up de orçamento) / `escalar`
   (default seguro). Limite por task: `AUTOIA_MAX_PM_DECISIONS` (default 2). Decisão
   inválida/ausente → **escalar**.
@@ -250,6 +279,36 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   do usuário que motivou a execução > parada/reprovação da tentativa anterior da mesma
   fase > bounce-back de fase posterior > missão por papel. Gate `AUTOIA_STEP_MISSION`.
 
+## Modo human-in-the-loop (pipeline aberta via chat)
+
+- **Modo por tarefa, alternável em runtime** (`Task.mode`: `auto` | `manual`;
+  `TaskStep.execution_mode`: `auto` | `manual`, null = herda a task). Em `manual`, o
+  auto-worker **não** reclama as fases (`claim_next` filtra `Task.mode != manual` e
+  `execution_mode != manual`); quando uma fase `auto` chega numa fase `manual` (ou no
+  fim da pipeline em modo manual), `_decide` transiciona para `TASK_OPEN` (evento
+  `pipeline_opened`) em vez de avançar/integrar — o merge deixa de ser automático.
+- **Chat + dispatcher**: o humano manda mensagem em linguagem natural
+  (`POST /api/tasks/{id}/chat` → `TaskMessage(kind=user)` + `pending_action=dispatch`).
+  O **`autoia-chat-worker`** (processo separado, lock `chat-worker.lock`, heartbeat
+  `chat-worker.heartbeat`, endpoint `/api/tasks/chat-worker/status`) roda o robô
+  `dispatcher` (role `dispatcher`, novo no seed) contra o checkout read-only, que
+  escreve `autoia_dispatch.json` (`action: run_agent | merge | chat | ask`). O worker
+  valida, resolve o agente (qualquer robô do repo — global + local, por nome OU role)
+  e encaminha `run_agent:<run_id>` | `merge` | resposta direta.
+- **Rodada de agente** (`TaskRun`): roda o agente no papel dele (`_run_executor` +
+  `build_prompt` + handoff da sessão) na branch da task, **commita por fase** e devolve
+  o resultado ao humano (`TaskRun.status`: `concluida`/`falhou`/`bloqueada`). **Sem
+  bounce-back**: reprovação de veredicto (review/verify/assess), timeout ou erro viram
+  resultado no chat e a task volta a `open` (o humano decide o próximo passo).
+  `autoia_blocked.json`/`autoia_decision.json` do agente viram prompt no chat.
+- **Merge sob demanda**: só quando o humano chama (`POST /api/tasks/{id}/merge` ou o
+  dispatcher decide `merge`) — roda o robô `merger` (se existir) e depois
+  `gitops.merge_and_push`; sucesso → task `done`.
+- Tabelas novas: `task_messages` (transcript da task, payload sempre completo, espelho
+  do `ChamadoMessage`) e `task_runs` (histórico de rodadas de agente). O `WorkspaceOut`
+  ganha `messages`/`runs`/`agents`. Testes em `tests/test_chat.py` usam `fake_kimi`
+  escrevendo `autoia_dispatch.json`.
+
 ## Padrões de desenvolvimento (backend)
 
 - Python tipado: `from __future__ import annotations`; SQLAlchemy com
@@ -324,6 +383,7 @@ pytest                      # suíte (52 testes; exige git no PATH)
 autoia-api                  # API :9000 (serve frontend/dist; AUTOIA_API_HOST=0.0.0.0 p/ LAN)
 autoia-worker               # worker (processo separado)
 autoia-chamado-worker       # worker dos CHAMADOS (processo separado; pip install -e após mudar)
+autoia-chat-worker          # worker do human-in-the-loop de tasks (processo separado)
 autoia-stop                 # para TUDO: serviços + órfãos dos robôs (emuladores/daemons) + limpeza
 cd frontend && npm install && npm run dev   # frontend dev :5173
 cd frontend && npm run build                # atualiza dist (servido pela API)

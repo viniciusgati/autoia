@@ -27,8 +27,12 @@ def test_seed_roles_and_pipeline(settings):
         assert roles["analista"] == "plan"
         assert roles["auditor-ux"] == "usability"
         assert roles["propositor"] == "propose"
+        # fluxo ADVPL: desenvolvedor específico de Protheus/TOTVS
+        assert roles["developer-advpl"] == "implement"
+        # dispatcher (human-in-the-loop): roteia a intenção do usuário
+        assert roles["dispatcher"] == "dispatcher"
 
-        assert s.query(Pipeline).count() == 4
+        assert s.query(Pipeline).count() == 5
 
         # com deploy: avaliador pré-merge + deploy-tester pós-merge (7 fases)
         deploy = (
@@ -73,11 +77,21 @@ def test_seed_roles_and_pipeline(settings):
         assert order == ["iniciador", "analista", "auditor-ux", "propositor"]
         assert all(not st.post_merge for st in brainstorm.steps)
 
+        # ADVPL: usa developer-advpl no lugar do developer (6 fases, todas pré-merge)
+        advpl = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "advpl-po-qa-dev-tester-avaliador-merge")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(advpl.steps, key=lambda x: x.position)]
+        assert order == ["po", "qa", "developer-advpl", "tester", "avaliador", "merger"]
+        assert all(not st.post_merge for st in advpl.steps)
+
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
-        assert s.query(Robot).count() == 13
-        assert s.query(Pipeline).count() == 4
+        assert s.query(Robot).count() == 15
+        assert s.query(Pipeline).count() == 5
 
 
 def test_migrate_schema_creates_auth_tables_and_new_columns(settings):

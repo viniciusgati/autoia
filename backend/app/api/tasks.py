@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Request, Response, UploadFile
@@ -12,9 +13,14 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload, selectinload
 
 from ..models import (
+    CHAT_DISPATCH,
+    CHAT_MERGE,
+    CHAT_STATUS_IDLE,
+    CHAT_STATUS_QUEUED,
     STEP_BLOCKED,
     STEP_FAILED,
     STEP_GUARDRAIL_BLOCKED,
+    STEP_MODE_MANUAL,
     STEP_PENDING,
     STEP_RUNNING,
     TASK_BLOCKED,
@@ -22,7 +28,10 @@ from ..models import (
     TASK_DONE,
     TASK_FAILED,
     TASK_IN_PROGRESS,
+    TASK_MODE_AUTO,
+    TASK_MODE_MANUAL,
     TASK_NEEDS_REVIEW,
+    TASK_OPEN,
     TASK_PAUSED,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
@@ -31,12 +40,15 @@ from ..models import (
     Project,
     Repository,
     RepositoryUser,
+    Robot,
     RunEvent,
     StepMission,
     StepSummary,
     SubTask,
     Task,
+    TaskMessage,
     TaskProposal,
+    TaskRun,
     TaskStep,
     User,
 )
@@ -44,6 +56,8 @@ from ..schemas import (
     ApproveStepRequest,
     BlockedContinueRequest,
     BouncebackRequest,
+    ChatMessageResponse,
+    ChatSendRequest,
     DescriptionFromFileOut,
     FeedbackCreate,
     InstructionRequest,
@@ -53,8 +67,10 @@ from ..schemas import (
     StepDiffOut,
     TaskCreate,
     TaskListItem,
+    TaskMessageOut,
     TaskOut,
     TaskProposalOut,
+    TaskRunOut,
     TaskStepListOut,
     TaskSummaryOut,
     TaskUpdateRequest,
@@ -66,7 +82,14 @@ from ..schemas import (
 )
 from ..timeline import derive_task_occurrences, derive_task_timeline, fallback_mission
 from ..worker import gitops, exec_common
-from ..worker.runner import _effective, _pm_decide, _system_event, _task_workspace, create_child_task
+from ..worker.runner import (
+    _effective,
+    _effective_step_mode,
+    _pm_decide,
+    _system_event,
+    _task_workspace,
+    create_child_task,
+)
 from ..worker.summarizer import summarize_task
 from .deps import get_repository_or_404, get_session, get_settings, is_repo_admin, require_auth
 from .etag import conditional
@@ -128,6 +151,7 @@ def _task_list_item(task: Task) -> TaskListItem:
         responsible=task.responsible,
         project_id=task.project_id,
         epic_id=task.epic_id,
+        mode=task.mode,
         steps=[
             TaskStepListOut(
                 id=st.id,
@@ -143,6 +167,7 @@ def _task_list_item(task: Task) -> TaskListItem:
                 error=st.error,
                 started_at=st.started_at,
                 finished_at=st.finished_at,
+                execution_mode=st.execution_mode,
             )
             for st in sorted((s for s in task.steps if not s.archived), key=lambda x: x.position)
         ],
@@ -375,6 +400,22 @@ def list_tasks(
     return [_task_list_item(t) for t in tasks]
 
 
+@router.get("/chat-worker/status")
+def chat_worker_status(
+    settings=Depends(get_settings),
+    _user: User | None = Depends(require_auth),
+):
+    from ..worker.chat_runner import CHAT_HEARTBEAT_FILE
+
+    hb = os.path.join(settings.workspace_dir, CHAT_HEARTBEAT_FILE)
+    try:
+        mtime = os.path.getmtime(hb)
+        age = time.time() - mtime
+    except OSError:
+        return {"alive": False, "last_heartbeat_sec": None}
+    return {"alive": age < 15, "last_heartbeat_sec": round(age, 1)}
+
+
 @router.get("/{task_id}", response_model=TaskOut)
 def get_task(task_id: int, session: Session = Depends(get_session)):
     return _get_task_or_404(session, task_id)
@@ -542,8 +583,15 @@ def start_task(
     if task.status != TASK_CREATED:
         raise HTTPException(400, f"tarefa não está em 'created' (status atual: {task.status})")
     task.branch = f"{settings.branch_prefix}/task-{task.id}"
-    task.status = TASK_QUEUED
-    min(_active_steps(task), key=lambda st: st.position).status = STEP_PENDING
+    first = min(_active_steps(task), key=lambda st: st.position)
+    # Modo manual (ou primeira fase manual): abre o chat em vez de enfileirar.
+    if task.mode == TASK_MODE_MANUAL or _effective_step_mode(first, task) == STEP_MODE_MANUAL:
+        task.status = TASK_OPEN
+        task.chat_status = CHAT_STATUS_IDLE
+        task.pending_action = None
+    else:
+        task.status = TASK_QUEUED
+        first.status = STEP_PENDING
     session.commit()
     return _get_task_or_404(session, task_id)
 
@@ -722,6 +770,40 @@ def _force_stop_running(session: Session, task: Task, settings) -> TaskStep | No
         },
     )
     return running
+
+
+def _apply_task_mode(session: Session, task: Task, mode: str, settings) -> None:
+    """Alterna o modo de execução da task (auto | manual) em runtime.
+
+    - Para `manual`: interrompe a fase em execução (se houver) e abre o chat
+      (status `open`); fases `pending` não são mais reclamadas pelo auto-worker.
+    - Para `auto`: reenfileira as fases auto pendentes (volta a `queued`) ou,
+      sem fase pendente, conclui.
+    """
+    if mode == TASK_MODE_MANUAL:
+        if task.mode != TASK_MODE_MANUAL:
+            task.mode = TASK_MODE_MANUAL
+            if task.status in (TASK_QUEUED, TASK_IN_PROGRESS):
+                _force_stop_running(session, task, settings)
+                task.status = TASK_OPEN
+                task.chat_status = CHAT_STATUS_IDLE
+                task.pending_action = None
+    else:  # auto
+        if task.chat_status != CHAT_STATUS_IDLE:
+            # Uma ação de chat em voo não pode coexistir com o auto-worker na mesma
+            # task (concorrência real); espera concluir.
+            raise HTTPException(
+                400, "ação de chat em andamento — aguarde concluir para voltar ao modo pipeline"
+            )
+        if task.mode != TASK_MODE_AUTO:
+            task.mode = TASK_MODE_AUTO
+            task.chat_status = CHAT_STATUS_IDLE
+            task.pending_action = None
+            if task.status == TASK_OPEN:
+                pending = next(
+                    (st for st in _active_steps(task) if st.status == STEP_PENDING), None
+                )
+                task.status = TASK_QUEUED if pending is not None else TASK_DONE
 
 
 @router.post("/{task_id}/review", response_model=TaskOut)
@@ -948,6 +1030,7 @@ def update_task(
     task_id: int,
     data: TaskUpdateRequest,
     session: Session = Depends(get_session),
+    settings=Depends(get_settings),
     user: User | None = Depends(require_auth),
 ):
     """Edição humana da história (descrição + critérios de aceite).
@@ -980,6 +1063,13 @@ def update_task(
         if data.executor is not None:
             task.executor = data.executor
             session.commit()
+        return _get_task_or_404(session, task_id)
+    # Modo de execução (auto | manual): alternável em runtime, em qualquer status.
+    if "mode" in data.model_fields_set and data.mode is not None:
+        task = _get_task_or_404(session, task_id)
+        _ensure_can_act(session, task, user)
+        _apply_task_mode(session, task, data.mode, settings)
+        session.commit()
         return _get_task_or_404(session, task_id)
     if data.details is not None:
         task = _get_task_or_404(session, task_id)
@@ -1381,11 +1471,29 @@ def task_workspace(
             "context": task.block_question or "",
         })
 
+    # Chat human-in-the-loop (modo manual): mensagens + rodadas de agente + agentes.
+    messages = (
+        session.query(TaskMessage)
+        .filter(TaskMessage.task_id == task_id)
+        .order_by(TaskMessage.seq)
+        .all()
+    )
+    runs = (
+        session.query(TaskRun)
+        .filter(TaskRun.task_id == task_id)
+        .order_by(TaskRun.id)
+        .all()
+    )
+    agents = _available_agents(session, task.repository_id)
+
     return WorkspaceOut(
         task=task,
         summary=task.summary,
         occurrences=out_occurrences,
         decisions=decisions,
+        messages=messages,
+        runs=runs,
+        agents=agents,
     )
 
 
@@ -1546,3 +1654,89 @@ def _pick_anchor(task: Task) -> TaskStep | None:
         None,
     )
     return pending_failed or active[-1]
+
+
+# ---------- Chat human-in-the-loop (modo manual) ----------
+
+
+def _available_agents(session: Session, repo_id: int) -> list[Robot]:
+    """Agentes (robôs) disponíveis para o dispatcher/menu no modo manual: os globais
+    (seed) + os do repositório, ativos e não arquivados."""
+    from sqlalchemy import or_
+
+    return (
+        session.query(Robot)
+        .filter(
+            or_(Robot.repository_id.is_(None), Robot.repository_id == repo_id),
+            Robot.active.is_(True),
+            Robot.archived.is_(False),
+        )
+        .order_by(Robot.name)
+        .all()
+    )
+
+
+@router.post("/{task_id}/chat", response_model=ChatMessageResponse)
+def send_chat(
+    task_id: int,
+    data: ChatSendRequest,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Envia uma mensagem no chat human-in-the-loop (modo manual).
+
+    A mensagem vira `pending_action=dispatch`: o chat-worker roda o dispatcher,
+    que decide o próximo agente/ação. Requer a task em `open` (modo manual)."""
+    task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
+    if task.status != TASK_OPEN:
+        raise HTTPException(
+            400, f"chat disponível apenas em tarefas abertas (status atual: {task.status})"
+        )
+    if task.chat_status != CHAT_STATUS_IDLE:
+        raise HTTPException(400, "uma ação já está em andamento nesta tarefa")
+    text = (data.text or "").strip()
+    if not text:
+        raise HTTPException(400, "mensagem vazia")
+    max_seq = (
+        session.query(func.max(TaskMessage.seq)).filter(TaskMessage.task_id == task.id).scalar()
+        or 0
+    )
+    session.add(TaskMessage(task_id=task.id, seq=max_seq + 1, kind="user", payload={"text": text}))
+    task.pending_action = CHAT_DISPATCH
+    task.chat_status = CHAT_STATUS_QUEUED
+    session.commit()
+    return ChatMessageResponse(ok=True, message="mensagem encaminhada ao dispatcher")
+
+
+@router.get("/{task_id}/chat", response_model=list[TaskMessageOut])
+def list_chat(task_id: int, session: Session = Depends(get_session)):
+    """Transcript do chat human-in-the-loop da task (mensagens em ordem)."""
+    task = _get_task_or_404(session, task_id)
+    return (
+        session.query(TaskMessage)
+        .filter(TaskMessage.task_id == task.id)
+        .order_by(TaskMessage.seq)
+        .all()
+    )
+
+
+@router.post("/{task_id}/merge", response_model=ChatMessageResponse)
+def request_merge(
+    task_id: int,
+    session: Session = Depends(get_session),
+    user: User | None = Depends(require_auth),
+):
+    """Atalho determinístico: dispara a integração (merge+push) via chat-worker.
+
+    Equivalente ao dispatcher decidir `merge`. Só em modo manual (task `open`)."""
+    task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
+    if task.status != TASK_OPEN:
+        raise HTTPException(400, f"merge manual só em tarefas abertas (status atual: {task.status})")
+    if task.chat_status != CHAT_STATUS_IDLE:
+        raise HTTPException(400, "uma ação já está em andamento nesta tarefa")
+    task.pending_action = CHAT_MERGE
+    task.chat_status = CHAT_STATUS_QUEUED
+    session.commit()
+    return ChatMessageResponse(ok=True, message="integração encaminhada ao chat-worker")

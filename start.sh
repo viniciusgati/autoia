@@ -38,7 +38,7 @@ start_api() {
     echo "API já está rodando (PID $(cat "$PID_API"))"
   else
     echo "Iniciando API (:9000)..."
-    nohup autoia-api > "$LOGS/api.log" 2>&1 &
+    AUTOIA_API_HOST="${AUTOIA_API_HOST:-0.0.0.0}" nohup autoia-api > "$LOGS/api.log" 2>&1 &
     echo $! > "$PID_API"
   fi
 }

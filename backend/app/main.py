@@ -14,7 +14,7 @@ from fastapi.responses import FileResponse
 from .api import auth, chamados, dashboard, execution, pipelines, repositories, robots, steps, subtasks, system, tasks, users
 from .api.deps import require_auth
 from .config import Settings
-from .db import Base, make_engine, make_session_factory, migrate_schema
+from .db import Base, ensure_schema, make_engine, make_session_factory
 from .models import ChamadoStageType, Pipeline, PipelineStep, Robot, User
 from .worker.chamado_runner import chamado_worker_loop, recover_stale_chamados
 from .worker.runner import acquire_worker_lock, recover_stale_steps, worker_loop
@@ -70,6 +70,27 @@ suíte de testes. Ao concluir, faça commit local das mudanças.
 ### Regras de escopo e qualidade
 - NÃO modifique arquivos fora do escopo da tarefa (sem refactors oportunistas).
 - Rode a suíte de testes ANTES do commit; se algo quebrar, corrija antes de entregar.
+- Se encontrar algo quebrado que NÃO pertence à sua tarefa, REPORTE no resumo em vez de
+  corrigir em silêncio.""",
+    ),
+    (
+        "developer-advpl",
+        "implement",
+        """Você é o robô DESENVOLVEDOR ADVPL de um pipeline automatizado (Protheus/TOTVS).
+
+Título: {task_title}
+Descrição: {task_description}
+
+Implemente a solução em ADVPL seguindo as convenções do projeto Protheus:
+- Fontes em `.prw` (cada função num arquivo `NomeDaFuncao.prw`) e includes/chaves de
+  funções em `.ch`. Respeite a estrutura existente (seções, nomenclatura, padrões de
+  comentário) sem introduzir outra linguagem ou framework.
+- Atenda a TODOS os critérios de aceite. Ao concluir, faça commit local das mudanças.
+
+### Regras de escopo e qualidade
+- NÃO modifique arquivos fora do escopo da tarefa (sem refactors oportunistas).
+- Se o projeto tiver procedimento de build/compilação (ex.: TDS/appserver), verifique a
+  compilação antes do commit; se algo quebrar, corrija antes de entregar.
 - Se encontrar algo quebrado que NÃO pertence à sua tarefa, REPORTE no resumo em vez de
   corrigir em silêncio.""",
     ),
@@ -169,6 +190,14 @@ NÃO modifique nem commite arquivos: aqui só se valida. Emita o veredicto obrig
         """Você é o robô PM (gerente de projeto) — o controle do pipeline. Sua missão é
 decidir o próximo passo de uma tarefa travada, analisando o contexto (status, falhas,
 orçamento, tentativas) e emitindo a decisão no formato obrigatório.""",
+    ),
+    (
+        "dispatcher",
+        "dispatcher",
+        """Você é o robô DISPATCHER de uma pipeline aberta (human-in-the-loop). Sua missão
+é interpretar a intenção do usuário e decidir o próximo passo: qual agente rodar, com
+qual instrução, ou responder/perguntar diretamente. Você NÃO desenvolve — apenas
+roteia o trabalho e escreve a decisão no formato obrigatório.""",
     ),
     (
         "iniciador",
@@ -299,6 +328,12 @@ SEED_PIPELINES = [
     (
         "po-qa-dev-tester-avaliador-merge",
         ["po", "qa", "developer", "tester", "avaliador", "merger"],
+    ),
+    (
+        # Fluxo ADVPL (Protheus/TOTVS): usa o desenvolvedor específico de ADVPL e o
+        # fluxo padrão de revisão/teste/avaliação/integração (sem fase pós-merge).
+        "advpl-po-qa-dev-tester-avaliador-merge",
+        ["po", "qa", "developer-advpl", "tester", "avaliador", "merger"],
     ),
     (
         "po-qa-dev-tester-avaliador-deploytest-browser",
@@ -439,8 +474,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or Settings()
     settings.ensure_dirs()
     engine = make_engine(settings.database_url)
-    Base.metadata.create_all(engine)
-    migrate_schema(engine)
+    ensure_schema(engine)
     session_factory = make_session_factory(engine)
 
     app = FastAPI(title="autoia", version="0.1.0")
@@ -524,8 +558,7 @@ def _worker_setup(settings: Settings, *, recover: bool, logger) -> object:
     roda 2× em paralelo (bug real observado com `--workers 3`).
     """
     engine = make_engine(settings.database_url)
-    Base.metadata.create_all(engine)  # não depende da API ter subido antes
-    migrate_schema(engine)
+    ensure_schema(engine)  # não depende da API ter subido antes
     session_factory = make_session_factory(engine)
     if recover:
         recovered = recover_stale_steps(session_factory)
@@ -610,13 +643,41 @@ def run_chamado_worker() -> None:
 
     _install_worker_shutdown_handler(logger)
     engine = make_engine(settings.database_url)
-    Base.metadata.create_all(engine)
-    migrate_schema(engine)
+    ensure_schema(engine)
     session_factory = make_session_factory(engine)
     recovered = recover_stale_chamados(session_factory)
     if recovered:
         logger.info("chamado-worker recuperou %s etapa(s) órfã(s)", recovered)
     chamado_worker_loop(settings, session_factory, settings.workspace_dir)
+
+
+def run_chat_worker() -> None:
+    """Worker do modo human-in-the-loop de tasks (processo separado, lock próprio)."""
+    from .worker.chat_runner import chat_worker_loop, recover_stale_chats
+
+    logger = logging.getLogger("autoia.chat")
+    settings = Settings()
+    settings.ensure_dirs()
+    lock = acquire_worker_lock(os.path.join(settings.workspace_dir, "chat-worker.lock"))
+    if lock is None:
+        try:
+            pid = open(os.path.join(settings.workspace_dir, "chat-worker.lock"), encoding="utf-8").read().strip()
+        except OSError:
+            pid = "?"
+        print(
+            f"chat-worker já está rodando (PID {pid}); não é possível iniciar outro.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    _install_worker_shutdown_handler(logger)
+    engine = make_engine(settings.database_url)
+    ensure_schema(engine)
+    session_factory = make_session_factory(engine)
+    recovered = recover_stale_chats(session_factory)
+    if recovered:
+        logger.info("chat-worker recuperou %s ação(ões) órfã(s)", recovered)
+    chat_worker_loop(settings, session_factory, settings.workspace_dir)
 
 
 def run_worker() -> None:

@@ -8,7 +8,7 @@ import { usePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
 import { fmtCost } from "../lib/money";
-import type { Epic, Project, RepositoryMember, StepDiff, Task, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
+import type { Epic, Project, RepositoryMember, StepDiff, Task, TaskMessage, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
 function statusMeta(status: string): { label: string; cls: string } {
@@ -125,6 +125,81 @@ function fmtDur(ms: number | null | undefined): string {
   if (h > 0) return `${h}h ${m}m`;
   if (m > 0) return `${m}m ${s}s`;
   return `${s}s`;
+}
+
+/** Uma linha do chat human-in-the-loop (modo manual). */
+function ChatRow({ m }: { m: TaskMessage }) {
+  if (m.kind === "user") {
+    const text = String(m.payload.text ?? "");
+    return (
+      <div className="chat-msg">
+        <div className="chat-avatar">você</div>
+        <div className="chat-body">
+          <div className="chat-meta">Usuário</div>
+          <div className="chat-bubble">{text}</div>
+        </div>
+      </div>
+    );
+  }
+  if (m.kind === "assistant_text") {
+    const content = String(m.payload.content ?? "");
+    return (
+      <div className="chat-msg">
+        <div className="chat-avatar chat-avatar-kimi">robô</div>
+        <div className="chat-body">
+          <div className="chat-meta">Assistente</div>
+          <div className="chat-bubble chat-bubble-kimi prewrap">{content}</div>
+        </div>
+      </div>
+    );
+  }
+  if (m.kind === "tool_call") {
+    return (
+      <div className="chat-msg">
+        <div className="chat-avatar chat-avatar-tool">tool</div>
+        <div className="chat-body">
+          <div className="chat-meta">ferramenta</div>
+          <div className="mono prewrap" style={{ fontSize: 12 }}>
+            {String(m.payload.tool ?? m.payload.name ?? "tool")}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (m.kind === "tool_result") {
+    return (
+      <div className="chat-msg">
+        <div className="chat-avatar chat-avatar-tool">ret</div>
+        <div className="chat-body">
+          <div className="chat-meta">resultado da ferramenta</div>
+          <div className="prewrap mono" style={{ fontSize: 12, opacity: 0.8 }}>
+            {String(m.payload.output ?? m.payload.content ?? "—").slice(0, 600)}
+          </div>
+        </div>
+      </div>
+    );
+  }
+  if (m.kind === "dispatch") {
+    const d = (m.payload.decision ?? {}) as Record<string, unknown>;
+    const action =
+      d.action === "run_agent" ? `rodar agente ${String(d.agent ?? "")}` : String(d.action ?? "?");
+    return (
+      <div className="chat-marker" style={{ marginBottom: 4 }}>
+        <b>⚙ dispatcher</b> → {action}
+        {d.reason ? <div className="muted">{String(d.reason)}</div> : null}
+      </div>
+    );
+  }
+  const event = String(m.payload.event ?? "system");
+  const detail = String(
+    m.payload.error ?? m.payload.detail ?? m.payload.verdict ?? m.payload.reason ?? "",
+  );
+  return (
+    <div className="chat-marker" style={{ marginBottom: 4 }}>
+      <b>⚙ {event}</b>
+      {detail ? <div className="muted">{detail}</div> : null}
+    </div>
+  );
 }
 
 /** Seletor de "continuar a partir de" (fases já executadas ou todas). */
@@ -471,6 +546,8 @@ export default function Workspace() {
   const [busy, setBusy] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
   const [diffPos, setDiffPos] = useState<number | null>(null);
+  const [chatText, setChatText] = useState("");
+  const [chatBusy, setChatBusy] = useState(false);
   // Projetos/épicos do repositório: nomes da associação da tarefa no header.
   const [projects, setProjects] = useState<Project[]>([]);
   const [epics, setEpics] = useState<Epic[]>([]);
@@ -607,6 +684,10 @@ export default function Workspace() {
       ? MSG_SEM_PERMISSAO
       : "CLI das próximas fases e decisões de PM (kimi code ou opencode)";
 
+  const modeTitle = !canAct
+    ? MSG_SEM_PERMISSAO
+    : "Modo de execução: 'pipeline' roda as fases sozinhas; 'chat' entrega o controle a você (human-in-the-loop) via dispatcher.";
+
   const act = async (action: () => Promise<unknown>) => {
     setBusy(true);
     try {
@@ -616,6 +697,32 @@ export default function Workspace() {
       setError(String(e));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const sendChat = async () => {
+    if (!chatText.trim() || chatBusy) return;
+    setChatBusy(true);
+    try {
+      await api.sendChat(taskId, chatText.trim());
+      setChatText("");
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setChatBusy(false);
+    }
+  };
+
+  const mergeNow = async () => {
+    setChatBusy(true);
+    try {
+      await api.requestMerge(taskId);
+      refresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setChatBusy(false);
     }
   };
 
@@ -733,6 +840,21 @@ export default function Workspace() {
                 >
                   <option value="kimi">kimi code</option>
                   <option value="opencode">opencode</option>
+                </select>
+              </label>
+              <label className="ws-executor" title={modeTitle}>
+                modo:
+                <select
+                  value={task.mode ?? "auto"}
+                  disabled={busy || summaryBusy || !canAct}
+                  onChange={(e) =>
+                    act(() =>
+                      api.updateTaskStory(taskId, { mode: e.target.value as "auto" | "manual" }),
+                    )
+                  }
+                >
+                  <option value="auto">pipeline</option>
+                  <option value="manual">chat (human-in-the-loop)</option>
                 </select>
               </label>
               {runningOcc ? (
@@ -872,47 +994,101 @@ export default function Workspace() {
             />
           );
         })}
+
+        {task?.mode === "manual" && (
+          <section className="ws-chat">
+            <h3 className="resumo-section">Conversa (human-in-the-loop)</h3>
+            <div className="chat" style={{ marginTop: 8 }}>
+              {(!ws?.messages || ws.messages.length === 0) && (
+                <p className="muted">
+                  Envie uma mensagem para começar — o dispatcher interpreta e decide qual agente rodar.
+                </p>
+              )}
+              {ws?.messages.map((m) => (
+                <ChatRow key={m.id} m={m} />
+              ))}
+            </div>
+          </section>
+        )}
       </main>
 
-      <footer className="ws-input">
-        <div className="ws-input-row">
-          <textarea
-            ref={inputRef}
-            value={instruction}
-            onChange={(e) => setInstruction(e.target.value)}
-            placeholder="Escreva uma instrução para o agente… (corrigir decisão, mudar abordagem, destravar etapa, nova execução…)"
-            rows={2}
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                void send();
-              }
-            }}
-          />
-          <button
-            className="ws-send"
-            disabled={busy || !instruction.trim() || !canAct}
-            title={actTitle}
-            onClick={() => void send()}
-          >
-            Enviar
-          </button>
-        </div>
-        <div className="ws-input-foot">
-          <label className="ws-resume-label">
-            Continuar a partir de:
-            <select value={resumePos} onChange={(e) => setResumePos(e.target.value)}>
-              <option value="">Etapa atual</option>
-              {positions.map((p) => (
-                <option key={p.position} value={p.position}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <span className="muted small">Escolher uma etapa anterior cria uma nova execução dela — o histórico permanece intacto.</span>
-        </div>
-      </footer>
+      {task?.mode === "manual" ? (
+        <footer className="ws-input">
+          <div className="ws-input-row">
+            <textarea
+              value={chatText}
+              onChange={(e) => setChatText(e.target.value)}
+              placeholder="Fale com o agente em linguagem natural… (ex.: 'rode o developer para implementar a rota de login', 'testa a feature', 'faz o merge')"
+              rows={2}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void sendChat();
+                }
+              }}
+            />
+            <button
+              className="ws-send"
+              disabled={chatBusy || !chatText.trim() || !canAct}
+              title={actTitle}
+              onClick={() => void sendChat()}
+            >
+              Enviar
+            </button>
+          </div>
+          <div className="ws-input-foot">
+            <button
+              className="warn-btn"
+              disabled={chatBusy || !canAct}
+              title={actTitle}
+              onClick={() => void mergeNow()}
+            >
+              Integrar (merge + push)
+            </button>
+            <span className="muted small">Cada agente commita por fase; o merge só acontece quando você pede.</span>
+          </div>
+        </footer>
+      ) : (
+        <footer className="ws-input">
+          <div className="ws-input-row">
+            <textarea
+              ref={inputRef}
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+              placeholder="Escreva uma instrução para o agente… (corrigir decisão, mudar abordagem, destravar etapa, nova execução…)"
+              rows={2}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  void send();
+                }
+              }}
+            />
+            <button
+              className="ws-send"
+              disabled={busy || !instruction.trim() || !canAct}
+              title={actTitle}
+              onClick={() => void send()}
+            >
+              Enviar
+            </button>
+          </div>
+          <div className="ws-input-foot">
+            <label className="ws-resume-label">
+              Continuar a partir de:
+              <select value={resumePos} onChange={(e) => setResumePos(e.target.value)}>
+                <option value="">Etapa atual</option>
+                {positions.map((p) => (
+                  <option key={p.position} value={p.position}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <span className="muted small">Escolher uma etapa anterior cria uma nova execução dela — o histórico permanece intacto.</span>
+          </div>
+        </footer>
+      )}
 
       {diffPos != null && (
         <DiffModal taskId={taskId} position={diffPos} onClose={() => setDiffPos(null)} />

@@ -134,8 +134,34 @@ def checkout_default(path: str, base: str) -> None:
     run_git(path, "checkout", base)
 
 
+def pull_branch(path: str, branch: str) -> None:
+    """Atualiza a branch de trabalho a partir do `origin` antes da execução do robô.
+
+    Workflow ADVPL: a branch pode ter sido publicada (push) numa execução anterior —
+    em especial após re-clone/reset do checkout. Traz as mudanças do remoto (fast-forward
+    apenas) para o robô ver o estado mais recente. Best-effort: se a branch ainda não
+    foi publicada ou o pull divergir, segue sem derrubar a fase.
+    """
+    run_git(path, "fetch", "origin")
+    if not branch_exists(path, f"origin/{branch}"):
+        return
+    run_git(path, "checkout", branch)
+    run_git(path, "pull", "--ff-only", "origin", branch, check=False)
+
+
+def push_branch(path: str, branch: str) -> None:
+    """Publica a branch de trabalho no `origin` (workflow ADVPL: cada fase de
+    desenvolvimento faz push da branch para o remoto)."""
+    run_git(path, "push", "-u", "origin", branch)
+
+
 def current_branch(path: str) -> str:
     return run_git(path, "branch", "--show-current").stdout.strip()
+
+
+def head_short(path: str) -> str:
+    """Hash curto do HEAD do checkout (para detecção de veredicto obsoleto)."""
+    return run_git(path, "rev-parse", "--short", "HEAD").stdout.strip()
 
 
 def lock_push(path: str) -> None:
@@ -196,6 +222,16 @@ def commit_all(path: str, message: str) -> bool:
         return False
     run_git(path, "commit", "-m", message[:200])
     return True
+
+
+def is_advpl_robot(name: str | None) -> bool:
+    """True se o robô pertence ao fluxo ADVPL (nome contém 'advpl')."""
+    return bool(name and "advpl" in name.lower())
+
+
+def advpl_commit_message(executor: str, goal: str) -> str:
+    """Mensagem de commit do fluxo ADVPL: `[<executor>] - <o que foi feito>`."""
+    return f"[{executor}] - {goal}"
 
 
 def diff_stat(path: str, base: str, branch: str) -> str:

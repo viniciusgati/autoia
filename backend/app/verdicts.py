@@ -34,6 +34,11 @@ DECISION_FILENAME = "autoia_decision.json"
 # checkout; o chamado-worker lê, remove e aplica a transição de estágio).
 CHAMADO_DECISION_FILENAME = "chamado_decision.json"
 
+# Decisão do dispatcher (human-in-the-loop de uma task): o robô dispatcher escreve
+# este arquivo no checkout; o chat-worker lê, remove e dispara a ação (agente/merge/
+# chat/ask).
+DISPATCH_FILENAME = "autoia_dispatch.json"
+
 # Veredictos esperados por papel
 V_READY = "READY"
 V_NEEDS_WORK = "NEEDS_WORK"
@@ -269,6 +274,43 @@ def remove_chamado_decision(checkout: str) -> None:
         pass
 
 
+def read_dispatch(checkout: str) -> dict | None:
+    """Lê a decisão do dispatcher (autoia_dispatch.json), tolerante.
+
+    `action` ∈ {run_agent, merge, chat, ask}; `agent` (nome/role) é obrigatório em
+    `run_agent`; `instruction` em `run_agent`/`merge`; `reply` em `chat`;
+    `question` em `ask`. Inválido/ausente → None (o chat-worker trata como erro).
+    """
+    path = os.path.join(checkout, DISPATCH_FILENAME)
+    if not os.path.isfile(path):
+        return None
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    action = str(data.get("action") or "").strip().lower()
+    if action not in ("run_agent", "merge", "chat", "ask"):
+        return None
+    return {
+        "action": action,
+        "agent": str(data.get("agent") or "").strip()[:100] or None,
+        "instruction": str(data.get("instruction") or "").strip()[:8000] or None,
+        "reply": str(data.get("reply") or "").strip()[:8000] or None,
+        "question": str(data.get("question") or "").strip()[:2000] or None,
+        "reason": str(data.get("reason") or "").strip()[:2000] or None,
+    }
+
+
+def remove_dispatch(checkout: str) -> None:
+    try:
+        os.remove(os.path.join(checkout, DISPATCH_FILENAME))
+    except FileNotFoundError:
+        pass
+
+
 def _find_marker(raw: str | None, *markers: str) -> str | None:
     """Procura um marcador como palavra isolada em QUALQUER linha (tolerante a preâmbulo)."""
     if not raw:
@@ -290,6 +332,21 @@ def parse_pass_fail(raw: str | None) -> str | None:
 
 def parse_ready_work(raw: str | None) -> str | None:
     return _find_marker(raw, V_READY, V_NEEDS_WORK)
+
+
+def parse_head_hash(raw: str | None) -> str | None:
+    """Hash curto do commit avaliado, citado no veredicto como `HEAD: <hash>`.
+
+    Contrato novo dos veredictos (assess/verify/review): permite detectar veredicto
+    OBSCELETO (escrito contra uma árvore antiga). Tolerante a formatação (``HEAD:``,
+    ``HEAD =``, ``HEAD`` seguido do hash) e ausente → None.
+    """
+    if not raw:
+        return None
+    match = re.search(r"\bHEAD\b\s*[:=]?\s*([0-9a-f]{7,40})", raw, re.IGNORECASE)
+    if match is None:
+        return None
+    return match.group(1)[:12]
 
 
 def parse_pm_decision(raw: str | None) -> dict:

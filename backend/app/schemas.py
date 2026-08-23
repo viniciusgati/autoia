@@ -338,6 +338,7 @@ class TaskStepOut(BaseModel):
     responsible: UserOut | None = None
     finished_by: UserOut | None = None
     artifacts: list[ArtifactOut] = []
+    execution_mode: str | None = None
 
 
 class TaskProposalOut(BaseModel):
@@ -401,6 +402,7 @@ class TaskStepListOut(BaseModel):
     finished_by_id: int | None = None
     responsible: UserOut | None = None
     finished_by: UserOut | None = None
+    execution_mode: str | None = None
 
 
 class TaskListItem(BaseModel):
@@ -428,6 +430,7 @@ class TaskListItem(BaseModel):
     responsible: UserOut | None = None
     project_id: int | None = None
     epic_id: int | None = None
+    mode: str = "auto"
     steps: list[TaskStepListOut] = []
 
 
@@ -455,6 +458,9 @@ class TaskOut(BaseModel):
     block_reason_type: str | None = None
     block_reason: str | None = None
     block_question: str | None = None
+    mode: str = "auto"
+    pending_action: str | None = None
+    chat_status: str = "idle"
     summary: "TaskSummaryOut | None" = None
     created_at: datetime
     updated_at: datetime
@@ -568,12 +574,63 @@ class WorkspaceOccurrenceOut(BaseModel):
 
 
 class WorkspaceOut(BaseModel):
-    """Payload da tela de trabalho (workspace): task + timeline de execuções."""
+    """Payload da tela de trabalho (workspace): task + timeline de execuções.
+
+    Em modo manual, inclui o chat (mensagens), as rodadas de agente e a lista de
+    agentes disponíveis para o dispatcher/menu."""
 
     task: TaskOut
     summary: TaskSummaryOut | None = None
     occurrences: list[WorkspaceOccurrenceOut] = []
     decisions: list[dict] = []
+    messages: list["TaskMessageOut"] = []
+    runs: list["TaskRunOut"] = []
+    agents: list[RobotOut] = []
+
+
+class TaskMessageOut(BaseModel):
+    """Uma interação do chat human-in-the-loop de uma task (transcript)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    seq: int
+    ts: datetime
+    kind: str
+    payload: dict = {}
+    cost: float = 0.0
+
+
+class TaskRunOut(BaseModel):
+    """Uma rodada de agente no modo human-in-the-loop (histórico)."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    task_id: int
+    robot_id: int | None = None
+    robot_name: str = ""
+    robot_role: str = "implement"
+    instruction: str = ""
+    status: str
+    final_text: str | None = None
+    verdict: str | None = None
+    diff_stat: str | None = None
+    cost: float = 0.0
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ChatSendRequest(BaseModel):
+    """Mensagem do usuário no chat human-in-the-loop (modo manual)."""
+
+    text: str = Field(min_length=1, max_length=10000)
+
+
+class ChatMessageResponse(BaseModel):
+    ok: bool
+    message: str
 
 
 class StepDiffOut(BaseModel):
@@ -651,6 +708,8 @@ class TaskUpdateRequest(BaseModel):
     project_id: int | None = None
     epic_id: int | None = None
     executor: str | None = Field(default=None, pattern="^(kimi|opencode)$")
+    # Modo de execução (auto | manual): alternável em runtime, em qualquer status.
+    mode: str | None = Field(default=None, pattern="^(auto|manual)$")
 
 
 # ---------- Eventos ----------

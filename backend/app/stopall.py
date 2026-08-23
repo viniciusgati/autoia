@@ -30,10 +30,17 @@ from typing import Iterator
 from .config import Settings
 
 # Tokens de linha de comando que identificam os serviços do autoia.
-SERVICE_TOKENS = {"autoia-api", "autoia-worker", "autoia-chamado-worker"}
+SERVICE_TOKENS = {"autoia-api", "autoia-worker", "autoia-chamado-worker", "autoia-chat-worker"}
 
-# Processos dos robôs/executores que podem sobreviver fora do grupo do executor.
-ROBOT_TOKENS = {"kimi", "kimi-code", "opencode", "netsimd"}
+# Executores LLM do autoia (kimi/opencode). SÓ contam como órfão quando o cwd do
+# processo está DENTRO do workspace (o executor roda no checkout). O `opencode`
+# interativo do usuário (cwd fora do workspace) NÃO pode ser morto — senão o
+# autoia-stop mataria a própria sessão do humano.
+EXECUTOR_TOKENS = {"opencode", "kimi", "kimi-code"}
+
+# Processos dos robôs/ecossistemas que podem sobreviver fora do grupo do executor
+# (daemons de SDK/emulador — nunca são a sessão interativa do usuário).
+ROBOT_TOKENS = {"netsimd"}
 ROBOT_PREFIXES = ("qemu-system",)
 
 _GRACE_SECONDS = 5.0
@@ -53,12 +60,23 @@ def is_service(cmdline: str) -> bool:
     return any(_basename(tok) in SERVICE_TOKENS for tok in tokenize(cmdline))
 
 
-def is_robot_leftover(cmdline: str) -> bool:
+def is_robot_leftover(cmdline: str, cwd: str = "", workspace_dir: str = "") -> bool:
     """True se o processo é um órfão conhecido dos robôs (kimi, opencode,
     emulador Android etc.). `crashpad_handler`/`emulator` só contam quando são
-    do SDK Android — não mata crashpads de outros apps do usuário."""
+    do SDK Android — não mata crashpads de outros apps do usuário.
+
+    Executores LLM (`opencode`/`kimi`) SÓ contam com o cwd dentro do workspace:
+    é onde o executor roda de fato. O mesmo binário aberto interativamente pelo
+    usuário fora do workspace (ex.: a sessão do opencode que dá o comando
+    `autoia-stop`) não pode ser morto — evitar falso positivo que derrubaria o
+    próprio humano operando o sistema."""
     for tok in tokenize(cmdline):
         base = _basename(tok)
+        if base in EXECUTOR_TOKENS:
+            if is_under_workspace(cwd, workspace_dir):
+                return True
+            # Fora do workspace: pode ser o opencode/kimi interativo do usuário.
+            continue
         if base in ROBOT_TOKENS or base.startswith(ROBOT_PREFIXES):
             return True
         if base == "emulator" and ("Android/Sdk" in cmdline or "/emulator/" in cmdline):
@@ -107,7 +125,7 @@ def find_targets(workspace_dir: str, exclude_pids: set[int] | None = None) -> di
         if is_service(cmdline):
             services.append(pid)
             continue
-        if is_robot_leftover(cmdline) or is_under_workspace(cwd, workspace_dir):
+        if is_robot_leftover(cmdline, cwd, workspace_dir) or is_under_workspace(cwd, workspace_dir):
             leftovers.append(pid)
     return {"services": sorted(set(services)), "leftovers": sorted(set(leftovers))}
 
@@ -189,7 +207,7 @@ def cleanup_markers(workspace_dir: str) -> list[str]:
     a PRIMEIRA execução após o restart (o watchdog de parada cooperativa veria o
     arquivo e derrubaria o robô recém-iniciado)."""
     removed: list[str] = []
-    for pattern in (".stop-*", ".stop-task-*", "worker.heartbeat", "chamado-worker.heartbeat"):
+    for pattern in (".stop-*", ".stop-task-*", "worker.heartbeat", "chamado-worker.heartbeat", "chat-worker.heartbeat"):
         for path in glob.glob(os.path.join(workspace_dir, pattern)):
             try:
                 os.remove(path)

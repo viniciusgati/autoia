@@ -78,6 +78,9 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("responsible_id", "INTEGER REFERENCES users(id)"),
         ("project_id", "INTEGER REFERENCES projects(id)"),
         ("epic_id", "INTEGER REFERENCES epics(id)"),
+        ("mode", "VARCHAR(20) DEFAULT 'auto' NOT NULL"),
+        ("pending_action", "VARCHAR(50)"),
+        ("chat_status", "VARCHAR(20) DEFAULT 'idle' NOT NULL"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
@@ -89,6 +92,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("finished_by_id", "INTEGER REFERENCES users(id)"),
         ("session_id", "VARCHAR(200)"),
         ("archived", "BOOLEAN DEFAULT 0 NOT NULL"),
+        ("execution_mode", "VARCHAR(20)"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
@@ -111,3 +115,23 @@ def migrate_schema(engine) -> None:
             for name, ddl in columns:
                 if name not in existing:
                     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
+
+
+def ensure_schema(engine) -> None:
+    """`create_all` + `migrate_schema` tolerantes à corrida de startup.
+
+    API e workers (processos separados) chamam isto no boot ao mesmo tempo. O
+    `create_all` com `checkfirst` consulta o sqlite_master e depois emite o DDL —
+    dois processos podem ver "não existe" e tentar criar a MESMA tabela nova;
+    o segundo recebe `OperationalError: table X already exists`. Como o outro
+    processo concluiu a criação, o retry após o erro é seguro e idempotente.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    try:
+        Base.metadata.create_all(engine)
+    except OperationalError as exc:
+        if "already exists" not in str(exc):
+            raise
+        Base.metadata.create_all(engine)
+    migrate_schema(engine)

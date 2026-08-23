@@ -19,6 +19,38 @@ TASK_NEEDS_REVIEW = "needs_review"
 TASK_WAITING_APPROVAL = "waiting_approval"
 TASK_PAUSED = "paused"
 TASK_CANCELLED = "cancelled"
+# Pipeline aberto (human-in-the-loop): a task fica parada aguardando o humano
+# dirigir os agentes via chat (dispatcher). Não é terminal nem erro.
+TASK_OPEN = "open"
+
+# Modos de execução da task (alternáveis em runtime, nunca fixos).
+TASK_MODE_AUTO = "auto"       # pipeline clássico: fases avançam sozinhas
+TASK_MODE_MANUAL = "manual"   # tudo dirigido pelo humano via chat (dispatcher)
+
+# Modo de execução de UMA fase (None = herda o modo da task).
+STEP_MODE_AUTO = "auto"
+STEP_MODE_MANUAL = "manual"
+
+# Estado da ação de chat de uma task (análogo a ChamadoStage: ativa/aguardando/executando).
+CHAT_STATUS_IDLE = "idle"           # aguardando o humano
+CHAT_STATUS_QUEUED = "queued"       # ação encaminhada, aguardando o chat-worker
+CHAT_STATUS_RUNNING = "running"     # ação em execução no chat-worker
+
+# Ações de chat pendentes (Task.pending_action).
+CHAT_DISPATCH = "dispatch"
+CHAT_MERGE = "merge"
+
+# Ações decididas pelo dispatcher (autoia_dispatch.json).
+DISPATCH_RUN_AGENT = "run_agent"
+DISPATCH_MERGE = "merge"
+DISPATCH_CHAT = "chat"
+DISPATCH_ASK = "ask"
+
+# Status de UMA rodada de agente (TaskRun) no modo human-in-the-loop.
+TASKRUN_RUNNING = "executando"
+TASKRUN_DONE = "concluida"
+TASKRUN_FAILED = "falhou"
+TASKRUN_BLOCKED = "bloqueada"
 
 STEP_PENDING = "pending"
 STEP_RUNNING = "running"
@@ -257,6 +289,13 @@ class Task(Base):
     description: Mapped[str] = mapped_column(Text, default="")
     kind: Mapped[str] = mapped_column(String(50), default="issue")
     status: Mapped[str] = mapped_column(String(30), default="created")
+    # Modo de execução da task: "auto" (pipeline clássico) | "manual"
+    # (human-in-the-loop: o humano dirige os agentes via chat). Alternável.
+    mode: Mapped[str] = mapped_column(String(20), default=TASK_MODE_AUTO)
+    # Ação de chat pendente (modo manual): "dispatch" | "merge" | "run_agent:<id>".
+    pending_action: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    # Estado da ação de chat: idle | queued | running (espelho do ChamadoStage).
+    chat_status: Mapped[str] = mapped_column(String(20), default=CHAT_STATUS_IDLE)
     # Executor das fases: "kimi" (kimi-code CLI) ou "opencode" (opencode CLI).
     executor: Mapped[str] = mapped_column(String(20), default="kimi")
     current_step: Mapped[int] = mapped_column(Integer, default=0)
@@ -330,6 +369,18 @@ class Task(Base):
     step_missions: Mapped[list["StepMission"]] = relationship(
         back_populates="task",
         order_by="StepMission.run",
+        cascade="all, delete-orphan",
+    )
+    # Chat human-in-the-loop (TaskMessage) — transcript da task em modo manual.
+    messages: Mapped[list["TaskMessage"]] = relationship(
+        back_populates="task",
+        order_by="TaskMessage.seq",
+        cascade="all, delete-orphan",
+    )
+    # Histórico de rodadas de agente no modo manual (TaskRun).
+    runs: Mapped[list["TaskRun"]] = relationship(
+        back_populates="task",
+        order_by="TaskRun.id",
         cascade="all, delete-orphan",
     )
 
@@ -470,6 +521,8 @@ class TaskStep(Base):
     verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)
     post_merge: Mapped[bool] = mapped_column(default=False)
     pause_before: Mapped[bool] = mapped_column(default=False)
+    # Modo de execução desta fase: None = herda o modo da task; "auto" | "manual".
+    execution_mode: Mapped[str | None] = mapped_column(String(20), nullable=True)
     log_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Objetivo legível da fase ("O que será feito") derivado deterministicamente
@@ -530,6 +583,55 @@ class RunEvent(Base):
     cost: Mapped[float] = mapped_column(Float, default=0.0)
 
     step: Mapped[TaskStep] = relationship(back_populates="events")
+
+
+class TaskMessage(Base):
+    """Uma interação do chat human-in-the-loop de uma task (transcript da task).
+
+    Espelho do `ChamadoMessage`, porém atrelado à Task (modo `manual`): `user`
+    (mensagem do humano), `assistant_text` (resposta do dispatcher/texto do agente),
+    `tool_call`/`tool_result` (atividade do executor), `dispatch` (decisão do
+    dispatcher) e `system` (eventos do chat-worker). Payload SEMPRE completo."""
+
+    __tablename__ = "task_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    seq: Mapped[int] = mapped_column(Integer)
+    ts: Mapped[datetime] = mapped_column(default=utcnow)
+    kind: Mapped[str] = mapped_column(String(30))
+    payload: Mapped[dict] = mapped_column(JSON, default=dict)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+
+    task: Mapped[Task] = relationship(back_populates="messages")
+
+
+class TaskRun(Base):
+    """Uma rodada de agente no modo human-in-the-loop (histórico de invocações).
+
+    Registra qual agente (robô) o humano mandou rodar, com qual instrução, e o
+    resultado: texto final, veredicto, diff e custo. É a fonte do histórico que o
+    handoff e o chat mostram. `merge` também vira uma TaskRun (role `merge`)."""
+
+    __tablename__ = "task_runs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_id: Mapped[int] = mapped_column(ForeignKey("tasks.id"))
+    robot_id: Mapped[int | None] = mapped_column(ForeignKey("robots.id"), nullable=True)
+    # Snapshot do agente (nome/role) no momento da rodada.
+    robot_name: Mapped[str] = mapped_column(String(100), default="")
+    robot_role: Mapped[str] = mapped_column(String(30), default="implement")
+    instruction: Mapped[str] = mapped_column(Text, default="")
+    status: Mapped[str] = mapped_column(String(30), default=TASKRUN_RUNNING)
+    final_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    verdict: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    diff_stat: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cost: Mapped[float] = mapped_column(Float, default=0.0)
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+
+    task: Mapped[Task] = relationship(back_populates="runs")
+    robot: Mapped["Robot | None"] = relationship()
 
 
 class SubTask(Base):

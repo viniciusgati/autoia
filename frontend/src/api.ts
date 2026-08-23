@@ -294,11 +294,24 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ position, note }),
     }),
-  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null; executor?: "kimi" | "opencode" }) =>
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null; executor?: "kimi" | "opencode"; mode?: "auto" | "manual" }) =>
     request<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
     }),
+
+  // chat human-in-the-loop (modo manual)
+  sendChat: (taskId: number, text: string) =>
+    request<{ ok: boolean; message: string }>(`/api/tasks/${taskId}/chat`, {
+      method: "POST",
+      body: JSON.stringify({ text }),
+    }),
+  getChatMessages: (taskId: number, signal?: AbortSignal) =>
+    request<import("./types").TaskMessage[]>(`/api/tasks/${taskId}/chat`, { signal }),
+  requestMerge: (taskId: number) =>
+    request<{ ok: boolean; message: string }>(`/api/tasks/${taskId}/merge`, { method: "POST" }),
+  getChatWorkerStatus: (signal?: AbortSignal) =>
+    request<{ alive: boolean; last_heartbeat_sec: number | null }>("/api/tasks/chat-worker/status", { signal }),
 
   // resumo do desenvolvimento (LLM dedicada)
   getTaskSummary: (taskId: number) => request<TaskSummary | null>(`/api/tasks/${taskId}/summary`),

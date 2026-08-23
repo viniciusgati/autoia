@@ -26,6 +26,19 @@ def test_parse_ready_work():
     assert verdicts.parse_ready_work("PASS") is None
 
 
+def test_parse_head_hash():
+    assert verdicts.parse_head_hash("PASS\nSUMMARY: ok\nHEAD: 3e75ec8\n") == "3e75ec8"
+    assert verdicts.parse_head_hash("FAIL\nSUMMARY: x\nHEAD: abc1234def") == "abc1234def"
+    # tolerante a formatação (sem dois-pontos, hash completo, maiúsculo)
+    assert verdicts.parse_head_hash("PASS\nHEAD = 9ab261e\n") == "9ab261e"
+    assert verdicts.parse_head_hash("HEAD 6970629\nPASS") == "6970629"
+    full = "0123456789abcdef0123456789abcdef01234567"
+    assert verdicts.parse_head_hash(f"HEAD: {full}") == "0123456789ab"
+    # ausente ou sem hash → None (tolerante: contratos antigos não citam HEAD)
+    assert verdicts.parse_head_hash("PASS\nSUMMARY: ok") is None
+    assert verdicts.parse_head_hash(None) is None
+
+
 def test_parse_pm_decision():
     assert verdicts.parse_pm_decision("DECISÃO: retry 3\nMOTIVO: corrigível") == {
         "action": "retry",
