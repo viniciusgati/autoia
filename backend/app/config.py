@@ -191,6 +191,13 @@ class Settings:
     log_retention_days: int = field(
         default_factory=lambda: _int("AUTOIA_LOG_RETENTION_DAYS", 30)
     )
+    # Preserva o workspace (checkout git) da task no disco quando ela termina
+    # (`done`/`failed`). `0` faz o worker remover `workspaces/<repo>/task_<id>`
+    # ao concluir — libera disco às custas de perder o clone (a branch continua
+    # no remoto; um `autoia-cleanup` manual atinge o mesmo para tasks antigas).
+    keep_workspaces: bool = field(
+        default_factory=lambda: _env("AUTOIA_KEEP_WORKSPACES", "1") == "1"
+    )
     # ── Sandbox de execução ────────────────────────────────────────────────────────
     # Modo de isolamento das execuções dos robôs (ver docs/plano-sandbox-execucao.md):
     #   "off"  -> spawn direto (comportamento atual; default até o sandbox ser validado)

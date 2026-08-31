@@ -104,6 +104,7 @@ router = APIRouter(prefix="/api/tasks", tags=["tasks"])
 def _task_query(session: Session):
     return session.query(Task).options(
         joinedload(Task.steps).joinedload(TaskStep.robot),
+        joinedload(Task.steps).joinedload(TaskStep.artifacts),
         joinedload(Task.repository),
         joinedload(Task.subtasks),
         joinedload(Task.proposals),

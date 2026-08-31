@@ -59,19 +59,41 @@ def _signal_group(proc: subprocess.Popen, sig: int) -> None:
         pass
 
 
-def kill_all_procs() -> None:
+def kill_all_procs(grace: float = 1.0) -> None:
     """SIGTERM no grupo de todos os subprocessos ativos + limpeza do sandbox.
 
     Além de matar os executores, remove o contêiner e o cidfile de cada processo
     ativo (`_rm_docker_container`) — sem isso, um shutdown do worker via
     `os._exit(0)` pula o `finally` dos executores e deixa o `.sandbox-cid-*`
     órfão; o `docker run` seguinte falha com exit 125 ("container ID file found").
+
+    Após o SIGTERM, espera `grace` e aplica SIGKILL nos teimosos, e REAPA todos
+    (`poll`/`wait`) ANTES de retornar — sem o reap, um `os._exit(0)` imediato do
+    shutdown deixaria os filhos como ZUMBIS órfãos (quem não tem init reapando
+    os mantém vivos no /proc para sempre).
     """
     with _ACTIVE_LOCK:
         procs = list(_ACTIVE_PROCS)
+    if not procs:
+        return
     for proc in procs:
         _signal_group(proc, signal.SIGTERM)
         _rm_docker_container(proc)
+    deadline = time.monotonic() + grace
+    remaining = list(procs)
+    while remaining and time.monotonic() < deadline:
+        for proc in list(remaining):
+            if proc.poll() is not None:
+                remaining.remove(proc)
+        if remaining:
+            time.sleep(0.05)
+    for proc in remaining:
+        _signal_group(proc, signal.SIGKILL)
+    for proc in procs:
+        try:
+            proc.wait(timeout=2)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
 
 
 def kill_repo_procs(repo_id: int) -> None:

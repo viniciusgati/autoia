@@ -114,6 +114,7 @@ class EffectiveSettings:
     branch_prefix: str
     max_identical_calls: int
     no_progress_timeout: int
+    keep_workspaces: bool
     sandbox: sandbox_mod.SandboxConfig
 
 
@@ -173,6 +174,7 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         workspace_dir=settings.workspace_dir,
         max_identical_calls=settings.max_identical_calls,
         no_progress_timeout=settings.no_progress_timeout,
+        keep_workspaces=settings.keep_workspaces,
         sandbox=_sandbox_config(settings, repo),
     )
 
@@ -306,6 +308,35 @@ def _active_steps(task: Task) -> list:
 def _task_workspace(settings, repo_id: int, task_id: int) -> str:
     """Diretório de trabalho isolado por tarefa (clone dedicado)."""
     return os.path.join(settings.workspace_dir, str(repo_id), f"task_{task_id}")
+
+
+def _maybe_release_workspace(
+    eff: EffectiveSettings, session_factory, task_id: int, checkout: str
+) -> None:
+    """Libera o workspace da task do disco quando ela terminou.
+
+    Com `AUTOIA_KEEP_WORKSPACES=0`, uma task que atinge `done`/`failed` (após
+    gravar o último evento) tem o diretório `workspaces/<repo>/task_<id>`
+    removido — o clone não é mais necessário (a branch/merge já estão no remoto)
+    e liberar o disco é o objetivo da otimização. Best-effort: falha de remoção
+    nunca quebra o worker (só avisa no log).
+    """
+    if eff.keep_workspaces:
+        return
+    with session_factory() as s:
+        task = s.get(Task, task_id)
+        if task is None or task.status not in (TASK_DONE, TASK_FAILED):
+            return
+    if not checkout or not os.path.isdir(checkout):
+        return
+    try:
+        shutil.rmtree(checkout, ignore_errors=False)
+        log.info("workspace da task %s removido (AUTOIA_KEEP_WORKSPACES=0)", task_id)
+    except OSError:
+        log.warning(
+            "não foi possível remover o workspace da task %s (%s)",
+            task_id, checkout, exc_info=True,
+        )
 
 
 def acquire_worker_lock(lock_path: str, shared: bool = False) -> object | None:
@@ -1067,6 +1098,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             task.error = step.error
             _finish(step)
             s.commit()
+            _maybe_release_workspace(eff, session_factory, task.id, checkout)
             return None
 
         # Garante que o workspace existe e é um clone git
@@ -1081,7 +1113,18 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
                 task.error = step.error
                 _finish(step)
                 s.commit()
+                _maybe_release_workspace(eff, session_factory, task.id, checkout)
                 return None
+
+        # Identidade git LOCAL no checkout: o `git commit` das fases não pode
+        # depender da config global do usuário que roda o worker (em sandbox/CI
+        # ela costuma não existir) — sem isso o commit falha com "identity unknown".
+        try:
+            gitops.setup_identity(checkout, settings.git_user_name, settings.git_user_email)
+        except gitops.GitError:
+            log.warning(
+                "não foi possível configurar identidade git em %s", checkout, exc_info=True
+            )
 
         try:
             if step.post_merge:
@@ -1096,6 +1139,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             task.error = step.error
             _finish(step)
             s.commit()
+            _maybe_release_workspace(eff, session_factory, task.id, checkout)
             return None
 
         # Workflow ADVPL: antes de cada execução do DESENVOLVEDOR, atualiza a branch do
@@ -1186,13 +1230,17 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
 
     # ── Ramo de subtarefas: implement e verify iteram sobre subtarefas ──
     if has_subtasks and role == "implement":
-        return _decide_subtask_implement(
+        trigger = _decide_subtask_implement(
             eff, session_factory, step_id, checkout, base, branch, project_info
         )
+        _maybe_release_workspace(eff, session_factory, task.id, checkout)
+        return trigger
     if has_subtasks and role == "verify":
-        return _decide_subtask_verify(
+        trigger = _decide_subtask_verify(
             eff, session_factory, step_id, checkout, base, branch, project_info
         )
+        _maybe_release_workspace(eff, session_factory, task.id, checkout)
+        return trigger
 
     state = {"seq": _event_count(session_factory, step_id), "cost": 0.0}
 
@@ -1265,7 +1313,9 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             )
         verdict_label = _consume_verdict(s, step, checkout)
         s.commit()
-    return _decide(eff, session_factory, step_id, checkout, outcome, verdict_label)
+    trigger = _decide(eff, session_factory, step_id, checkout, outcome, verdict_label)
+    _maybe_release_workspace(eff, session_factory, task.id, checkout)
+    return trigger
 
 
 def _consume_verdict(s: Session, step: TaskStep, checkout: str) -> str | None:

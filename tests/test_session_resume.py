@@ -20,6 +20,8 @@ def _eff(tmp_path) -> runner.EffectiveSettings:
         log_dir=str(tmp_path / "logs"),
         workspace_dir=str(tmp_path / "ws"), branch_prefix="autoia",
         max_identical_calls=3, no_progress_timeout=0,
+
+        keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="off"),
     )
 

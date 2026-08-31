@@ -164,3 +164,18 @@ def bare_repo(tmp_path) -> str:
     _git(tmp_path, "clone", "--bare", str(src), str(bare))
     return str(bare)
 
+
+@pytest.fixture(autouse=True)
+def _git_identity_env(monkeypatch):
+    """Identidade git para TODOS os subprocessos git dos testes.
+
+    Em ambientes sem `git config --global user.name/email` (sandbox/CI), o
+    `git commit` falha com "Committer identity unknown". As env vars
+    `GIT_AUTHOR_*`/`GIT_COMMITTER_*` suprem a identidade sem tocar em
+    `~/.gitconfig` (restauradas automaticamente pelo monkeypatch).
+    """
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "autoia")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "autoia@local")
+    monkeypatch.setenv("GIT_COMMITTER_NAME", "autoia")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "autoia@local")
+

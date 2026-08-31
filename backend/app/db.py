@@ -105,6 +105,20 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+# Índices aditivos (criados com `CREATE INDEX IF NOT EXISTS` no startup — nunca
+# drop/rename). Cobrem as colunas mais consultadas das queries quentes:
+# - `run_events(step_id)`: join da timeline (RunEvent → TaskStep)
+# - `run_events(ts, seq)`: ordenação da derivação da timeline
+# - `task_steps(task_id)`: join tasks → fases
+# - `task_steps(task_id, position)`: ordenação das fases de uma task
+ADDITIVE_INDEXES: list[tuple[str, str, str]] = [
+    ("run_events", "ix_run_events_step_id", "step_id"),
+    ("run_events", "ix_run_events_ts_seq", "ts, seq"),
+    ("task_steps", "ix_task_steps_task_id", "task_id"),
+    ("task_steps", "ix_task_steps_task_position", "task_id, position"),
+]
+
+
 def migrate_schema(engine) -> None:
     """Adiciona colunas novas em tabelas já existentes (somente adições)."""
     with engine.begin() as conn:
@@ -117,8 +131,17 @@ def migrate_schema(engine) -> None:
                     conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
+def _ensure_indexes(engine) -> None:
+    """Cria os índices aditivos das queries quentes (idempotente)."""
+    with engine.begin() as conn:
+        for table, index_name, columns in ADDITIVE_INDEXES:
+            conn.exec_driver_sql(
+                f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"
+            )
+
+
 def ensure_schema(engine) -> None:
-    """`create_all` + `migrate_schema` tolerantes à corrida de startup.
+    """`create_all` + `migrate_schema` + índices, tolerantes à corrida de startup.
 
     API e workers (processos separados) chamam isto no boot ao mesmo tempo. O
     `create_all` com `checkfirst` consulta o sqlite_master e depois emite o DDL —
@@ -135,3 +158,4 @@ def ensure_schema(engine) -> None:
             raise
         Base.metadata.create_all(engine)
     migrate_schema(engine)
+    _ensure_indexes(engine)

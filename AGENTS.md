@@ -384,10 +384,20 @@ autoia-api                  # API :9000 (serve frontend/dist; AUTOIA_API_HOST=0.
 autoia-worker               # worker (processo separado)
 autoia-chamado-worker       # worker dos CHAMADOS (processo separado; pip install -e após mudar)
 autoia-chat-worker          # worker do human-in-the-loop de tasks (processo separado)
+autoia-cleanup              # remove workspaces de tasks concluídas há +N dias (--days N, --dry-run)
 autoia-stop                 # para TUDO: serviços + órfãos dos robôs (emuladores/daemons) + limpeza
 cd frontend && npm install && npm run dev   # frontend dev :5173
 cd frontend && npm run build                # atualiza dist (servido pela API)
+python -m app.perf_bench    # benchmark de performance (task sintética com 500 RunEvent; baseline/pós)
 ```
+
+**Liberação de disco de workspaces**: com `AUTOIA_KEEP_WORKSPACES=0`, o worker
+remove `workspaces/<repo>/task_<id>` do disco quando a task atinge `done`/`failed`
+(após gravar o último evento) — default `1` preserva. O comando `autoia-cleanup`
+faz o mesmo para tasks concluídas há +N dias (`--days N`, default 7; `--dry-run`
+apenas lista), reusando a detecção de `storage.py` e sem tocar tasks ativas ou
+concluídas recentes. A rotação de logs (`.log` antigos, `AUTOIA_LOG_RETENTION_DAYS`)
+é coberta por `clean_storage`/`scan_storage` (`storage.py`).
 
 **Parada total (`autoia-stop`)**: SIGTERM nos serviços (os workers matam os
 executores e saem sem gravar falha fake — o step fica `running` e o próximo start

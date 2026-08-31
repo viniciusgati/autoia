@@ -59,6 +59,17 @@ def clone(url: str, dest: str) -> None:
     run_git(os.path.dirname(dest_abs), "clone", url, dest_abs)
 
 
+def setup_identity(path: str, user_name: str, user_email: str) -> None:
+    """Configura a identidade git LOCAL (só neste checkout) para o commit funcionar.
+
+    O `git commit` sem `user.name`/`user.email` (locais ou globais) falha com
+    "Committer identity unknown" — a identidade é configurada por checkout para
+    o worker não depender da config global do usuário que roda o processo.
+    """
+    run_git(path, "config", "user.name", user_name)
+    run_git(path, "config", "user.email", user_email)
+
+
 def resolve_default_branch(path: str, fallback: str) -> str:
     """Descobre a branch default do remote origin (ou usa o fallback)."""
     result = run_git(path, "symbolic-ref", "refs/remotes/origin/HEAD", check=False)
@@ -90,8 +101,7 @@ def bootstrap_empty_repo(
     Usado quando o remote acabou de ser criado (ex.: GitHub) e ainda não tem branch.
     Configura identidade git local (só neste checkout) para o commit funcionar.
     """
-    run_git(path, "config", "user.name", user_name)
-    run_git(path, "config", "user.email", user_email)
+    setup_identity(path, user_name, user_email)
     (Path(path) / "README.md").write_text(
         f"# {repo_name}\n\nRepositório inicializado automaticamente pela autoia.\n",
         encoding="utf-8",
