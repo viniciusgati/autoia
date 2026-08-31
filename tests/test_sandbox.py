@@ -930,3 +930,75 @@ def test_docker_sandbox_fallback_direto_sem_fail_closed(tmp_path, monkeypatch):
     )
     assert outcome.exit_code == 0
     assert "direto" in outcome.final_text
+
+
+def test_subtask_executor_fallback_direto_sem_fail_closed(tmp_path, monkeypatch):
+    """Ciclo de SUBTAREFAS: sem fail_closed, docker indisponível → execução direta
+    com aviso (mesmo contrato do `_run_executor` do runner). Sem esse fallback, o
+    `_run_subtask_executor` tentava `docker run` e a fase abortava em ambientes
+    sem daemon docker (ex.: CI com `AUTOIA_SANDBOX=fs`)."""
+    from app.worker import runner, subtask
+
+    monkeypatch.setattr(subtask, "docker_available", lambda: False)
+    monkeypatch.setattr(subtask, "docker_image_available", lambda image: False)
+
+    eff = runner.EffectiveSettings(
+        max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
+        cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
+        whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="opencode",
+        opencode_model="deepseek/deepseek-v4-flash",
+        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
+        branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        keep_workspaces=True,
+        sandbox=sb.SandboxConfig(mode="fs", fail_closed=False, image="img"),
+    )
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    body = "#!/usr/bin/env python3\nimport json\nprint(json.dumps({'role':'assistant','content':'direto-subtask'}))\n"
+    eff.kimi_bin = _fake_script(tmp_path, "fake_direto_sub", body)
+
+    outcome = subtask._run_subtask_executor(
+        eff, "kimi", "prompt",
+        cwd=str(checkout), log_path=str(tmp_path / "sub.log"),
+        checkout_path=str(checkout), repo_id=None, stop_file=None, task_stop_file=None,
+        sandbox=subtask._sub_sandbox(eff),
+        on_event=lambda kind, payload, cost: None,
+    )
+    assert outcome.exit_code == 0
+    assert "direto-subtask" in outcome.final_text
+    assert outcome.sandbox_mode is None or outcome.sandbox_mode == "off"
+
+
+def test_subtask_executor_fail_closed_aborta_sem_docker(tmp_path, monkeypatch):
+    """Ciclo de SUBTAREFAS: com fail_closed e docker indisponível, a execução
+    aborta antes de rodar o executor (nunca roda sem isolamento)."""
+    from app.worker import runner, subtask
+
+    monkeypatch.setattr(subtask, "docker_available", lambda: False)
+    monkeypatch.setattr(subtask, "docker_image_available", lambda image: False)
+
+    eff = runner.EffectiveSettings(
+        max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
+        cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
+        whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="opencode",
+        opencode_model="deepseek/deepseek-v4-flash",
+        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
+        branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        keep_workspaces=True,
+        sandbox=sb.SandboxConfig(mode="fs", fail_closed=True, image="img"),
+    )
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+
+    outcome = subtask._run_subtask_executor(
+        eff, "kimi", "prompt",
+        cwd=str(checkout), log_path=str(tmp_path / "sub.log"),
+        checkout_path=str(checkout), repo_id=None, stop_file=None, task_stop_file=None,
+        sandbox=subtask._sub_sandbox(eff),
+        on_event=lambda kind, payload, cost: None,
+    )
+    assert outcome.aborted
+    assert "fail-closed" in (outcome.abort_reason or "")
+    assert outcome.sandbox_mode == "fs"

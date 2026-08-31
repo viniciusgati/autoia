@@ -1,4 +1,4 @@
-# Benchmark de performance — task-110 (não versionado)
+# Benchmark de performance — task-110
 
 Comparação da MESMA execução (`python -m app.perf_bench --events 500 --samples N`,
 task sintética com 500 RunEvent, SQLite em tmp, sem rede/kimi):

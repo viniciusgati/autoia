@@ -39,7 +39,12 @@ from ..models import (
     TaskStep,
 )
 from . import cmd_exec, exec_common, gitops, kimi_exec, opencode_exec
-from .sandbox import SandboxConfig
+from .sandbox import (
+    SANDBOX_OFF,
+    SandboxConfig,
+    docker_available,
+    docker_image_available,
+)
 
 log = logging.getLogger("autoia.worker.subtask")
 
@@ -77,6 +82,28 @@ def _run_subtask_executor(
     gerencia o próprio lock_push/sandbox (por isso não reusa o runner)."""
     workspace_dir = getattr(settings, "workspace_dir", None)
     extra_env = _sub_extra_env(settings)
+    # Fallback do sandbox (mesmo contrato do runner): sem docker/imagem e sem
+    # fail_closed, executa sem isolamento com aviso no log — sem isso, o ciclo
+    # de subtarefas falhava em cadeia em ambientes sem daemon docker (ex.: CI)
+    # mesmo com `AUTOIA_SANDBOX=fs`, porque este dispatch não tinha o fallback.
+    if sandbox is not None and sandbox.enabled:
+        if not (docker_available() and docker_image_available(sandbox.image)):
+            if sandbox.fail_closed:
+                outcome = exec_common.ExecOutcome()
+                outcome.aborted = True
+                outcome.abort_reason = (
+                    f"sandbox {sandbox.mode} obrigatório mas docker/imagem "
+                    f"{sandbox.image} indisponíveis (fail-closed)"
+                )
+                outcome.sandbox_mode = sandbox.mode
+                return outcome
+            log.warning(
+                "subtask: sandbox %s solicitado mas docker/imagem %s indisponível — "
+                "executando sem isolamento (fallback transitório; "
+                "AUTOIA_SANDBOX_FAIL_CLOSED=1 para falhar)",
+                sandbox.mode, sandbox.image,
+            )
+            sandbox = SandboxConfig(mode=SANDBOX_OFF)
     if executor == "opencode":
         return opencode_exec.run_opencode(
             prompt,
