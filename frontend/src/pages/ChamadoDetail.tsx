@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
-import { usePolling } from "../lib/polling";
+import { useAdaptivePolling, usePolling } from "../lib/polling";
 import type { ChamadoStage, ChamadoWorkspace, ToolInfo } from "../types";
 import { chamadoStatusClass, chamadoStatusLabel } from "./Chamados";
 
@@ -105,7 +105,18 @@ export default function ChamadoDetail() {
     }
   };
 
-  usePolling(load, 2000, [chamadoId]);
+  // Polling adaptativo: etapa do chamado em andamento (aguardando/executando)
+  // mantém 2 s; ociosa reduz a frequência (backoff até 10 s).
+  const stageBusy =
+    ws?.current_stage != null &&
+    (ws.current_stage.status === "aguardando" || ws.current_stage.status === "executando");
+
+  useAdaptivePolling(load, {
+    activeIntervalMs: 2000,
+    idleIntervalMs: 10000,
+    isActive: stageBusy,
+    deps: [chamadoId],
+  });
   usePolling(
     (signal) => {
       api

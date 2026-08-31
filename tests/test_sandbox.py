@@ -485,6 +485,8 @@ def test_run_executor_fail_closed_varredura_de_segredos(tmp_path):
         cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+
+        keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=True, image="debian:bookworm-slim",
                                  home=str(home)),
     )
@@ -513,6 +515,8 @@ def test_run_executor_varredura_avisa_mas_roda(tmp_path):
         cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+
+        keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=False, image="debian:bookworm-slim",
                                  home=str(home)),
     )
@@ -890,6 +894,8 @@ def test_docker_sandbox_fail_closed_sem_docker(tmp_path, monkeypatch):
         cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+
+        keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=True, image="img"),
     )
     outcome = runner._run_executor(eff, "kimi", "prompt", cwd=str(tmp_path), log_path=str(tmp_path / "x.log"))
@@ -909,6 +915,8 @@ def test_docker_sandbox_fallback_direto_sem_fail_closed(tmp_path, monkeypatch):
         cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+
+        keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=False, image="img"),
     )
     checkout = tmp_path / "checkout"

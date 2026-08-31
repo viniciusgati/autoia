@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import DiffView from "../components/DiffView";
 import ResponsavelControl from "../components/ResponsavelControl";
-import { usePolling } from "../lib/polling";
+import { useAdaptivePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
 import { fmtCost } from "../lib/money";
@@ -628,7 +628,14 @@ export default function Workspace() {
       .catch((e) => setError(String(e)));
   };
 
-  usePolling(
+  // Polling adaptativo: ocorrência `running`/task na fila mantém 1,5 s;
+  // ociosa reduz a frequência (backoff até 10 s).
+  const wsActive =
+    ws?.task?.status === "in_progress" ||
+    ws?.task?.status === "queued" ||
+    (ws?.occurrences ?? []).some((o) => o.status === "running");
+
+  useAdaptivePolling(
     (signal) => {
       api
         .getWorkspace(taskId, signal)
@@ -637,8 +644,7 @@ export default function Workspace() {
           if (!signal.aborted) setError(String(e));
         });
     },
-    1500,
-    [taskId],
+    { activeIntervalMs: 1500, idleIntervalMs: 10000, isActive: wsActive, deps: [taskId] },
   );
 
   // Mantém o fim da página sempre visível enquanto a execução evolui.

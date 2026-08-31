@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .models import STEP_GUARDRAIL_BLOCKED, RunEvent, Task, TaskStep
@@ -181,7 +182,7 @@ def _parse_result_text(payload: dict) -> str:
     return content
 
 
-def _tool_call_name(event: RunEvent, payload: dict) -> str:
+def _tool_call_name(payload: dict) -> str:
     tc = payload.get("tool_call") or {}
     fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
     name = fn.get("name") if isinstance(fn, dict) else None
@@ -210,16 +211,28 @@ def _event_base(event: RunEvent, payload: dict, ev_type: str, name: str, summary
 
 
 def derive_task_timeline(session: Session, task: Task) -> list[dict]:
-    """Constrói a timeline cronológica da task a partir dos RunEvent de todas as fases."""
+    """Constrói a timeline cronológica da task a partir dos RunEvent de todas as fases.
+
+    Carrega os eventos numa ÚNICA passada como linhas leves (`select` de colunas,
+    sem materializar objetos ORM — o acesso a `row.kind`/`row.payload`/... não
+    passa pelos descriptors do SQLAlchemy) e mapeia os steps por id em memória.
+    A saída é determinística e idêntica à versão anterior (paridade testada).
+    """
     steps = {st.id: st for st in task.steps}
 
-    events = (
-        session.query(RunEvent)
+    rows = session.execute(
+        select(
+            RunEvent.step_id,
+            RunEvent.seq,
+            RunEvent.ts,
+            RunEvent.kind,
+            RunEvent.payload,
+            RunEvent.cost,
+        )
         .join(TaskStep, RunEvent.step_id == TaskStep.id)
-        .filter(TaskStep.task_id == task.id)
+        .where(TaskStep.task_id == task.id)
         .order_by(RunEvent.ts, RunEvent.seq)
-        .all()
-    )
+    ).all()
 
     timeline: list[dict] = []
     # tool_call pendente por step (para parear com o tool_result seguinte).
@@ -229,16 +242,16 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
     # Sincroniza o relógio de fases: usa o primeiro tool_call/assistant_text como
     # início "real" do desenvolvimento.
-    for ev in events:
-        if first_step_ts is None or ev.ts < first_step_ts:
-            first_step_ts = ev.ts
-        if last_step_ts is None or ev.ts > last_step_ts:
-            last_step_ts = ev.ts
+    for row in rows:
+        if first_step_ts is None or row.ts < first_step_ts:
+            first_step_ts = row.ts
+        if last_step_ts is None or row.ts > last_step_ts:
+            last_step_ts = row.ts
 
-    for ev in events:
-        payload = dict(ev.payload or {})
-        step = steps.get(ev.step_id)
-        kind = ev.kind
+    for row in rows:
+        payload = dict(row.payload or {})
+        step = steps.get(row.step_id)
+        kind = row.kind
         if kind in _SKIP_KINDS:
             continue
 
@@ -248,7 +261,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             pos = step.position if step else "?"
             is_rerun = isinstance(attempt, int) and attempt > 1
             timeline.append(_event_base(
-                ev, payload,
+                row, payload,
                 EV_PHASE,
                 "etapa iniciada" if not is_rerun else f"re-execução da fase {pos}",
                 (
@@ -264,14 +277,14 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             content = str(payload.get("content") or "")
             first_line = next((l for l in content.splitlines() if l.strip()), "")[:160]
             timeline.append(_event_base(
-                ev, payload, EV_TEXT, "resposta do agente",
+                row, payload, EV_TEXT, "resposta do agente",
                 first_line or "(resposta sem texto)",
                 step=step,
             ))
             continue
 
         if kind == "tool_call":
-            name = _tool_call_name(ev, payload)
+            name = _tool_call_name(payload)
             args_raw = (payload.get("tool_call") or {}).get("function", {}).get("arguments") if isinstance(payload.get("tool_call"), dict) else None
             args = _parse_args(args_raw) if isinstance(args_raw, str) else None
             if args is None and isinstance(payload.get("input"), dict):
@@ -280,16 +293,16 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             label = _TOOL_LABELS.get(name, name)
             summary = f"{label}: {target}" if target else label
             entry = _event_base(
-                ev, payload, EV_TOOL_CALL, name, summary,
+                row, payload, EV_TOOL_CALL, name, summary,
                 step=step, status="running",
             )
             entry["input"] = args
-            pending_calls[ev.step_id] = entry
+            pending_calls[row.step_id] = entry
             timeline.append(entry)
             continue
 
         if kind == "tool_result":
-            pending = pending_calls.pop(ev.step_id, None)
+            pending = pending_calls.pop(row.step_id, None)
             if pending is not None:
                 pending["status"] = "error" if str(payload.get("error") or "").strip() else "completed"
                 content = _parse_result_text(payload)
@@ -299,13 +312,13 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                     pending["output"] = {"content": content}
                 if isinstance(pending["ts"], str):
                     start = datetime.fromisoformat(pending["ts"])
-                    delta = int((ev.ts - start).total_seconds() * 1000)
+                    delta = int((row.ts - start).total_seconds() * 1000)
                     pending["duration_ms"] = max(delta, 0)
                     pending["ts"] = _fmt_ts(start)
                 continue
             # tool_result sem tool_call pareado: evento próprio
             timeline.append(_event_base(
-                ev, payload, EV_TOOL_CALL, "resultado",
+                row, payload, EV_TOOL_CALL, "resultado",
                 "resultado de tool call (sem chamada pareada)",
                 step=step, status="completed",
             ))
@@ -313,7 +326,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "guardrail_blocked":
             timeline.append(_event_base(
-                ev, payload, EV_BLOCK, "guardrail bloqueou",
+                row, payload, EV_BLOCK, "guardrail bloqueou",
                 f"⛔ guardrail: {payload.get('detail') or payload.get('pattern') or 'comando bloqueado'}",
                 step=step, status="blocked",
             ))
@@ -321,7 +334,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "task_blocked":
             timeline.append(_event_base(
-                ev, payload, EV_BLOCK, "desenvolvimento bloqueado",
+                row, payload, EV_BLOCK, "desenvolvimento bloqueado",
                 f"Bloqueado aguardando instrução — {payload.get('reason') or ''}",
                 step=step, status="blocked",
             ))
@@ -330,7 +343,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
         if kind == "user_intervention":
             instruction = str(payload.get("instruction") or "")
             timeline.append(_event_base(
-                ev, payload, EV_USER, "intervenção do usuário",
+                row, payload, EV_USER, "intervenção do usuário",
                 f"👤 \"{instruction[:200]}\"",
                 step=step,
             ))
@@ -338,7 +351,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "execution_resumed":
             timeline.append(_event_base(
-                ev, payload, EV_USER, "execução retomada",
+                row, payload, EV_USER, "execução retomada",
                 "▶ execução retomada após intervenção do usuário",
                 step=step,
             ))
@@ -346,7 +359,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "human_gate_approved":
             timeline.append(_event_base(
-                ev, payload, EV_USER, "aprovação humana",
+                row, payload, EV_USER, "aprovação humana",
                 f"👤 fase {payload.get('position') or '?'} aprovada pelo usuário",
                 step=step,
             ))
@@ -357,7 +370,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             subs = " (subtarefas)" if payload.get("subtasks") else ""
             pos = step.position if step else payload.get("_position", "?")
             timeline.append(_event_base(
-                ev, payload, EV_PHASE_DONE, "etapa concluída",
+                row, payload, EV_PHASE_DONE, "etapa concluída",
                 f"✓ etapa {pos} concluída{subs}"
                 + (f" → próxima {nxt}" if nxt is not None else " → desenvolvimento concluído"),
                 step=step, status="completed",
@@ -366,7 +379,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "bounce_back":
             timeline.append(_event_base(
-                ev, payload, EV_WARNING, "bounce-back",
+                row, payload, EV_WARNING, "bounce-back",
                 f"↩️ fase {payload.get('from_position') or '?'} reprovou — a fase anterior volta para corrigir: {payload.get('reason') or ''}",
                 step=step, status="warning",
             ))
@@ -374,7 +387,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "subtask_bounce_back":
             timeline.append(_event_base(
-                ev, payload, EV_WARNING, "bounce-back de tarefas",
+                row, payload, EV_WARNING, "bounce-back de tarefas",
                 f"↩️ subtarefas {payload.get('positions') or '?'} reprovadas — voltam para implement",
                 step=step, status="warning",
             ))
@@ -382,7 +395,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "merged":
             timeline.append(_event_base(
-                ev, payload, EV_PHASE_DONE, "merge realizado",
+                row, payload, EV_PHASE_DONE, "merge realizado",
                 f"🔀 merge + push na default concluído: {payload.get('detail') or ''}",
                 step=step, status="completed",
             ))
@@ -390,7 +403,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "merge_failed":
             timeline.append(_event_base(
-                ev, payload, EV_ERROR, "merge falhou",
+                row, payload, EV_ERROR, "merge falhou",
                 f"⚠️ merge falhou: {payload.get('detail') or ''}",
                 step=step, status="error",
             ))
@@ -398,7 +411,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "budget_hit":
             timeline.append(_event_base(
-                ev, payload, EV_ERROR, "orçamento estourado",
+                row, payload, EV_ERROR, "orçamento estourado",
                 f"💰 orçamento estourado: {payload.get('reason') or ''}",
                 step=step, status="error",
             ))
@@ -406,7 +419,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "post_merge_failed":
             timeline.append(_event_base(
-                ev, payload, EV_ERROR, "falha pós-merge",
+                row, payload, EV_ERROR, "falha pós-merge",
                 f"⚠️ falha pós-merge (código já integrado): {payload.get('reason') or ''}",
                 step=step, status="error",
             ))
@@ -414,7 +427,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "arch_metric":
             timeline.append(_event_base(
-                ev, payload, EV_SYSTEM, "métrica de arquitetura",
+                row, payload, EV_SYSTEM, "métrica de arquitetura",
                 f"📐 arquitetura {payload.get('level') or '?'} ({payload.get('score') or '?'}/100)",
                 step=step,
             ))
@@ -441,7 +454,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                 summary = f"tarefa {position}: {title} falhou — {payload.get('reason') or ''}"
                 name = "tarefa falhou"
             timeline.append(_event_base(
-                ev, payload, EV_TASK_EVENT, name, summary,
+                row, payload, EV_TASK_EVENT, name, summary,
                 step=step, status="completed" if kind != "subtask_failed" else "error",
             ))
             continue
@@ -452,14 +465,14 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                 f" — {str(payload.get('reason') or '')[:200]}"
             )
             timeline.append(_event_base(
-                ev, payload, EV_TASK_EVENT, "correção do trabalho entregue", summary,
+                row, payload, EV_TASK_EVENT, "correção do trabalho entregue", summary,
                 step=step, status="completed",
             ))
             continue
 
         if kind == "pm_decision":
             timeline.append(_event_base(
-                ev, payload, EV_SYSTEM, "decisão do PM",
+                row, payload, EV_SYSTEM, "decisão do PM",
                 f"🤖 PM decidiu: {payload.get('action') or '?'} — {payload.get('reason') or ''}",
                 step=step,
             ))
@@ -468,20 +481,20 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
         if kind == "subtasks_generated":
             titles = ", ".join(str(t) for t in (payload.get("titles") or []))
             timeline.append(_event_base(
-                ev, payload, EV_TASK_EVENT, "tarefas propostas pelo agente",
+                row, payload, EV_TASK_EVENT, "tarefas propostas pelo agente",
                 f"🧩 {payload.get('count') or 0} tarefa(s) proposta(s): {titles}",
                 step=step,
             ))
             continue
 
         if kind == "task_paused":
-            timeline.append(_event_base(ev, payload, EV_USER, "tarefa pausada", "⏸ tarefa pausada", step=step))
+            timeline.append(_event_base(row, payload, EV_USER, "tarefa pausada", "⏸ tarefa pausada", step=step))
             continue
         if kind == "task_resumed":
-            timeline.append(_event_base(ev, payload, EV_USER, "tarefa retomada", "▶ tarefa retomada", step=step))
+            timeline.append(_event_base(row, payload, EV_USER, "tarefa retomada", "▶ tarefa retomada", step=step))
             continue
         if kind == "task_cancelled":
-            timeline.append(_event_base(ev, payload, EV_USER, "tarefa cancelada", "✕ tarefa cancelada — pipeline encerrado", step=step, status="error"))
+            timeline.append(_event_base(row, payload, EV_USER, "tarefa cancelada", "✕ tarefa cancelada — pipeline encerrado", step=step, status="error"))
             continue
 
         if kind == "sandbox":
@@ -491,7 +504,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             detail = f" (contêiner {cid[:12]})" if cid else ""
             wall_txt = f" · {wall} ms" if wall is not None else ""
             timeline.append(_event_base(
-                ev, payload, EV_SYSTEM, "sandbox",
+                row, payload, EV_SYSTEM, "sandbox",
                 f"🛡 execução em sandbox [{mode}]{detail}{wall_txt}",
                 step=step,
             ))
@@ -504,14 +517,14 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                 if mounts else "⚠ varredura de segredos: aviso"
             )
             timeline.append(_event_base(
-                ev, payload, EV_SYSTEM, "varredura de segredos", summary,
+                row, payload, EV_SYSTEM, "varredura de segredos", summary,
                 step=step, status="error",
             ))
             continue
 
         # Evento genérico do worker (worker_recovered, summary_generated, etc.)
         timeline.append(_event_base(
-            ev, payload, EV_SYSTEM, kind,
+            row, payload, EV_SYSTEM, kind,
             f"{kind}: {str(payload)[:140]}",
             step=step,
         ))

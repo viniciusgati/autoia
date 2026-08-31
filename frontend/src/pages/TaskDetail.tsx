@@ -19,7 +19,7 @@ import { formatToolCall } from "../lib/events";
 import Markdown from "../lib/markdown";
 import { fmtBudget, fmtCost } from "../lib/money";
 import { diffSummary, etapaAtualLabel, formatDuration, MSG_SEM_PERMISSAO, podeAtuar, tempoDecorrido } from "../lib/tasks";
-import { usePolling } from "../lib/polling";
+import { useAdaptivePolling } from "../lib/polling";
 import type { Epic, Pipeline, Project, Repository, RepositoryMember, RunEvent, Task, TaskStep, TimelineEvent } from "../types";
 
 /** Detalhe da task em 3 níveis de acompanhamento:
@@ -195,7 +195,11 @@ export default function TaskDetail() {
     };
   }, [task?.project_id]);
 
-  usePolling(
+  // Polling adaptativo: a task "ativa" (fila ou fase rodando) mantém 1,5 s;
+  // ociosa (done/needs_review/open/bloqueada) reduz a frequência (backoff até 10 s).
+  const taskActive = task?.status === "in_progress" || task?.status === "queued";
+
+  useAdaptivePolling(
     (signal) =>
       api
         .getTask(taskId, signal)
@@ -264,15 +268,13 @@ export default function TaskDetail() {
         .catch((e) => {
           if (!signal.aborted) setError(String(e));
         }),
-    1500,
-    [taskId],
+    { activeIntervalMs: 1500, idleIntervalMs: 10000, isActive: taskActive, deps: [taskId] },
   );
 
-  usePolling(
-    (signal) => api.getTaskTimeline(taskId, signal).then(setTimeline).catch(() => {}),
-    1500,
-    [taskId],
-  );
+    useAdaptivePolling(
+      (signal) => api.getTaskTimeline(taskId, signal).then(setTimeline).catch(() => {}),
+      { activeIntervalMs: 1500, idleIntervalMs: 10000, isActive: taskActive, deps: [taskId] },
+    );
 
   const refresh = () => api.getTask(taskId).then(setTask).catch((e) => setError(String(e)));
 

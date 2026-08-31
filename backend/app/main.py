@@ -6,15 +6,17 @@ import logging
 import os
 import sys
 import time
+from datetime import timedelta
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 
 from .api import auth, chamados, dashboard, execution, pipelines, repositories, robots, steps, subtasks, system, tasks, users
 from .api.deps import require_auth
 from .config import Settings
-from .db import Base, ensure_schema, make_engine, make_session_factory
+from .db import Base, ensure_schema, make_engine, make_session_factory, utcnow
 from .models import ChamadoStageType, Pipeline, PipelineStep, Robot, User
 from .worker.chamado_runner import chamado_worker_loop, recover_stale_chamados
 from .worker.runner import acquire_worker_lock, recover_stale_steps, worker_loop
@@ -539,6 +541,105 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             return FileResponse(os.path.join(settings.frontend_dist, "index.html"))
 
     return app
+
+
+def _cleanup_workspaces(
+    session_factory,
+    workspace_dir: str,
+    days: int,
+    dry_run: bool = False,
+    log=print,
+) -> dict:
+    """Remove workspaces de tasks `done`/`failed` concluídas há +`days` dias.
+
+    Reusa a detecção de `storage._workspace_tasks` (`workspace_dir/<repo>/task_<id>`).
+    Nunca toca tasks ativas (`queued`/`in_progress`/`open`/`needs_review`/bloqueadas)
+    nem concluídas recentes. Retorna contadores para relatório/teste.
+    """
+    import shutil
+
+    from app.models import TASK_DONE, TASK_FAILED, Task, TaskStep
+    from app.storage import _workspace_tasks
+
+    workspace_map = _workspace_tasks(workspace_dir)
+    cutoff = utcnow() - timedelta(days=max(1, days))
+    removed = 0
+    skipped_active = 0
+    skipped_recent = 0
+    with session_factory() as s:
+        for ws, task_id in sorted(workspace_map.items(), key=lambda kv: kv[1]):
+            task = s.get(Task, task_id)
+            if task is None or task.status not in (TASK_DONE, TASK_FAILED):
+                skipped_active += 1
+                continue
+            # Data da conclusão: última fase concluída (fallback: updated_at).
+            last_finished = (
+                s.query(func.max(TaskStep.finished_at))
+                .filter(TaskStep.task_id == task_id)
+                .scalar()
+            )
+            concluded_at = last_finished or task.updated_at
+            if concluded_at is None or concluded_at >= cutoff:
+                skipped_recent += 1
+                continue
+            if dry_run:
+                log(f"[dry-run] removeria {ws} (concluída {concluded_at:%Y-%m-%d})")
+                removed += 1
+                continue
+            try:
+                shutil.rmtree(ws)
+                log(f"removido {ws} (concluída {concluded_at:%Y-%m-%d})")
+                removed += 1
+            except OSError as exc:
+                log(f"erro ao remover {ws}: {exc}")
+    return {
+        "removed": removed,
+        "skipped_active": skipped_active,
+        "skipped_recent": skipped_recent,
+    }
+
+
+def run_cleanup() -> None:
+    """CLI `autoia-cleanup`: remove workspaces de tasks concluídas há +N dias.
+
+    Libera disco reusando a detecção de workspaces de `storage.py`
+    (`workspace_dir/<repo>/task_<id>`): remove apenas diretórios cuja task está
+    `done`/`failed` e cuja última atividade (fase concluída) é mais antiga que
+    `--days` dias. Tasks ativas (queued/in_progress/open/needs_review/bloqueadas)
+    e concluídas recentes NUNCA são tocadas. `--dry-run` apenas lista.
+
+    Ex.: `autoia-cleanup --days 30` remove workspaces de tasks concluídas há
+    mais de 30 dias; `autoia-cleanup --dry-run` mostra o que seria removido.
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="autoia-cleanup",
+        description="Remove workspaces de tasks concluídas há +N dias (libera disco).",
+    )
+    parser.add_argument("--days", type=int, default=7, help="idade mínima em dias (default 7)")
+    parser.add_argument("--dry-run", action="store_true", help="apenas lista, não remove")
+    args = parser.parse_args()
+
+    settings = Settings()
+    settings.ensure_dirs()
+    engine = make_engine(settings.database_url)
+    ensure_schema(engine)
+    session_factory = make_session_factory(engine)
+
+    if not os.path.isdir(settings.workspace_dir):
+        print("nenhum workspace encontrado.")
+        return
+
+    result = _cleanup_workspaces(
+        session_factory, settings.workspace_dir, args.days, dry_run=args.dry_run
+    )
+    action = "removeria" if args.dry_run else "removeu"
+    print(
+        f"autoia-cleanup {action} {result['removed']} workspace(s)"
+        f" ({result['skipped_active']} ativa(s)/inexistente(s) preservada(s),"
+        f" {result['skipped_recent']} concluída(s) recente(s) preservada(s))."
+    )
 
 
 def run_api() -> None:

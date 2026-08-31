@@ -181,13 +181,17 @@ def docker_available() -> bool:
     if docker_bin == "docker" and not shutil.which("docker"):
         return False
     try:
-        subprocess.run(
+        result = subprocess.run(
             [docker_bin, "version", "--format", "{{.Server.Version}}"],
             capture_output=True,
             text=True,
             timeout=10,
         )
-        return True
+        # `docker version` com o daemon fora retorna exit != 0 (a mensagem de
+        # erro vai para o stderr capturado) — sem checar o returncode, um daemon
+        # indisponível contaria como "docker disponível" e a execução tentaria
+        # `docker run` no meio da fase (falha em cadeia em vez de fallback/skip).
+        return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
 

@@ -28,6 +28,7 @@ autoia-api = "app.main:run_api"
 autoia-worker = "app.main:run_worker"
 autoia-chamado-worker = "app.main:run_chamado_worker"
 autoia-chat-worker = "app.main:run_chat_worker"
+autoia-cleanup = "app.main:run_cleanup"
 autoia-stop = "app.stopall:run_stop"
 
 [tool.hatch.build.targets.wheel]
