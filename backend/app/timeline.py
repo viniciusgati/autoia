@@ -15,10 +15,10 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import select, text
+from sqlalchemy.orm import Session, joinedload
 
-from .models import STEP_GUARDRAIL_BLOCKED, RunEvent, Task, TaskStep
+from .models import STEP_GUARDRAIL_BLOCKED, Task, TaskStep
 
 # Tipos de evento expostos na timeline.
 EV_DEV_START = "development_started"
@@ -189,10 +189,30 @@ def _tool_call_name(payload: dict) -> str:
     return str(name or payload.get("tool") or "?")
 
 
-def _event_base(event: RunEvent, payload: dict, ev_type: str, name: str, summary: str, *, step: TaskStep | None = None, status: str | None = None) -> dict:
-    out = {
-        "seq": event.seq,
-        "ts": _fmt_ts(event.ts),
+def _event_base(
+    evt: tuple,
+    meta: tuple | None,
+    payload: dict,
+    ev_type: str,
+    name: str,
+    summary: str,
+    *,
+    status: str | None = None,
+) -> dict:
+    """Monta o dict de evento da timeline a partir da linha crua do RunEvent.
+
+    `evt` é a tupla completa da linha `(step_id, seq, ts, kind, payload, cost)`
+    e `meta` o metadado pré-computado `(position, robot_name, robot_role)` do
+    TaskStep (None para eventos sem fase ancorada) — a derivação não re-acessa
+    descriptors do SQLAlchemy (Row/ORM) no hot path.
+    """
+    step_id, seq, ts, kind, _payload, cost = evt
+    pos = meta[0] if meta else None
+    robot_name = meta[1] if meta else None
+    robot_role = meta[2] if meta else None
+    return {
+        "seq": seq,
+        "ts": _fmt_ts(ts),
         "type": ev_type,
         "name": name,
         "summary": summary,
@@ -200,39 +220,56 @@ def _event_base(event: RunEvent, payload: dict, ev_type: str, name: str, summary
         "duration_ms": None,
         "input": None,
         "output": None,
-        "cost": float(event.cost or 0.0),
-        "raw": {"kind": event.kind, "payload": payload},
-        "step_id": event.step_id,
-        "step_position": step.position if step else None,
-        "step_robot": step.robot.name if step and step.robot else None,
-        "step_role": (step.robot.role if step and step.robot else None),
+        "cost": float(cost or 0.0),
+        "raw": {"kind": kind, "payload": payload},
+        "step_id": step_id,
+        "step_position": pos,
+        "step_robot": robot_name,
+        "step_role": robot_role,
     }
-    return out
+
+
+# Query leve dos RunEvent da task (uma passada, sem ORM): linhas cruas de
+# `run_events` + `task_steps` na ordem (ts, seq). No SQLite, `payload`/`ts`
+# chegam como TEXTO e são decodificados manualmente no loop (o processamento de
+# tipos do SQLAlchemy é o gargalo da derivação); no Postgres o driver entrega
+# tipos nativos (datetime/dict), tratados defensivamente na iteração.
+_TASK_EVENTS_SQL = text(
+    "SELECT run_events.step_id, run_events.seq, run_events.ts, run_events.kind,"
+    " run_events.payload, run_events.cost"
+    " FROM run_events JOIN task_steps ON run_events.step_id = task_steps.id"
+    " WHERE task_steps.task_id = :task_id"
+    " ORDER BY run_events.ts, run_events.seq"
+)
 
 
 def derive_task_timeline(session: Session, task: Task) -> list[dict]:
     """Constrói a timeline cronológica da task a partir dos RunEvent de todas as fases.
 
-    Carrega os eventos numa ÚNICA passada como linhas leves (`select` de colunas,
-    sem materializar objetos ORM — o acesso a `row.kind`/`row.payload`/... não
-    passa pelos descriptors do SQLAlchemy) e mapeia os steps por id em memória.
-    A saída é determinística e idêntica à versão anterior (paridade testada).
+    Carrega os eventos numa ÚNICA passada como linhas cruas (`text()`, sem
+    materializar objetos ORM — a iteração usa tuplas leves, sem os descriptors do
+    SQLAlchemy no hot path) e mapeia o metadado dos steps (position/robô) por id
+    em memória, pré-computado uma vez. Os eventos chegam ordenados por (ts, seq)
+    da query; o início/fim do desenvolvimento são inseridos nas pontas sem
+    re-ordenar a lista. A saída é determinística e idêntica à versão anterior
+    (paridade testada).
     """
-    steps = {st.id: st for st in task.steps}
-
-    rows = session.execute(
-        select(
-            RunEvent.step_id,
-            RunEvent.seq,
-            RunEvent.ts,
-            RunEvent.kind,
-            RunEvent.payload,
-            RunEvent.cost,
-        )
-        .join(TaskStep, RunEvent.step_id == TaskStep.id)
+    # Steps + robôs carregados de UMA vez (joinedload evita o lazy load de
+    # `step.robot` por step — N+1 eliminado também no endpoint workspace).
+    step_meta: dict[int, tuple[int, str | None, str | None]] = {}
+    for st in session.execute(
+        select(TaskStep)
         .where(TaskStep.task_id == task.id)
-        .order_by(RunEvent.ts, RunEvent.seq)
-    ).all()
+        .options(joinedload(TaskStep.robot))
+    ).scalars():
+        robot = st.robot
+        step_meta[st.id] = (
+            st.position,
+            robot.name if robot else None,
+            robot.role if robot else None,
+        )
+
+    rows = session.execute(_TASK_EVENTS_SQL, {"task_id": task.id}).all()
 
     timeline: list[dict] = []
     # tool_call pendente por step (para parear com o tool_result seguinte).
@@ -240,28 +277,33 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
     first_step_ts: datetime | None = None
     last_step_ts: datetime | None = None
 
-    # Sincroniza o relógio de fases: usa o primeiro tool_call/assistant_text como
-    # início "real" do desenvolvimento.
-    for row in rows:
-        if first_step_ts is None or row.ts < first_step_ts:
-            first_step_ts = row.ts
-        if last_step_ts is None or row.ts > last_step_ts:
-            last_step_ts = row.ts
+    for evt in rows:
+        step_id, seq, ts, kind, payload, cost = evt
+        # Decodificação manual: no SQLite `ts`/`payload` chegam como texto (o
+        # processamento de tipos do SQLAlchemy é o gargalo); no Postgres o driver
+        # entrega datetime/dict nativos. Resultado idêntico ao tipo JSON/DateTime.
+        ts = ts if isinstance(ts, datetime) else datetime.fromisoformat(ts)
+        payload = json.loads(payload) if isinstance(payload, str) and payload else (payload or {})
+        # Tupla normalizada (ts/payload convertidos) — passada adiante no build.
+        evt = (step_id, seq, ts, kind, payload, cost)
+        # Sincroniza o relógio de fases com o primeiro/último evento REAL —
+        # mesmo comportamento da versão anterior (varre TODOS os kinds).
+        if first_step_ts is None or ts < first_step_ts:
+            first_step_ts = ts
+        if last_step_ts is None or ts > last_step_ts:
+            last_step_ts = ts
 
-    for row in rows:
-        payload = dict(row.payload or {})
-        step = steps.get(row.step_id)
-        kind = row.kind
+        meta = step_meta.get(step_id)
         if kind in _SKIP_KINDS:
             continue
 
         if kind == "attempt_started":
             attempt = payload.get("attempt")
-            robot = payload.get("robot") or (step.robot.name if step and step.robot else "?")
-            pos = step.position if step else "?"
+            robot = payload.get("robot") or (meta[1] if meta else "?")
+            pos = meta[0] if meta else "?"
             is_rerun = isinstance(attempt, int) and attempt > 1
             timeline.append(_event_base(
-                row, payload,
+                evt, meta, payload,
                 EV_PHASE,
                 "etapa iniciada" if not is_rerun else f"re-execução da fase {pos}",
                 (
@@ -269,7 +311,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                     if is_rerun
                     else f"fase {pos} ({robot}) iniciada"
                 ),
-                step=step, status="running",
+                status="running",
             ))
             continue
 
@@ -277,9 +319,8 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             content = str(payload.get("content") or "")
             first_line = next((l for l in content.splitlines() if l.strip()), "")[:160]
             timeline.append(_event_base(
-                row, payload, EV_TEXT, "resposta do agente",
+                evt, meta, payload, EV_TEXT, "resposta do agente",
                 first_line or "(resposta sem texto)",
-                step=step,
             ))
             continue
 
@@ -293,143 +334,141 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             label = _TOOL_LABELS.get(name, name)
             summary = f"{label}: {target}" if target else label
             entry = _event_base(
-                row, payload, EV_TOOL_CALL, name, summary,
-                step=step, status="running",
+                evt, meta, payload, EV_TOOL_CALL, name, summary,
+                status="running",
             )
             entry["input"] = args
-            pending_calls[row.step_id] = entry
+            # Guarda o datetime cru junto do evento para o pareamento (evita
+            # re-parsear o `ts` ISO no tool_result seguinte).
+            pending_calls[step_id] = (entry, ts)
             timeline.append(entry)
             continue
 
         if kind == "tool_result":
-            pending = pending_calls.pop(row.step_id, None)
+            pending = pending_calls.pop(step_id, None)
             if pending is not None:
-                pending["status"] = "error" if str(payload.get("error") or "").strip() else "completed"
+                entry, start = pending
+                entry["status"] = "error" if str(payload.get("error") or "").strip() else "completed"
                 content = _parse_result_text(payload)
                 if payload.get("error"):
-                    pending["output"] = {"error": str(payload["error"]), "content": content}
+                    entry["output"] = {"error": str(payload["error"]), "content": content}
                 else:
-                    pending["output"] = {"content": content}
-                if isinstance(pending["ts"], str):
-                    start = datetime.fromisoformat(pending["ts"])
-                    delta = int((row.ts - start).total_seconds() * 1000)
-                    pending["duration_ms"] = max(delta, 0)
-                    pending["ts"] = _fmt_ts(start)
+                    entry["output"] = {"content": content}
+                if isinstance(entry["ts"], str):
+                    delta = int((ts - start).total_seconds() * 1000)
+                    entry["duration_ms"] = max(delta, 0)
+                    entry["ts"] = _fmt_ts(start)
                 continue
             # tool_result sem tool_call pareado: evento próprio
             timeline.append(_event_base(
-                row, payload, EV_TOOL_CALL, "resultado",
+                evt, meta, payload, EV_TOOL_CALL, "resultado",
                 "resultado de tool call (sem chamada pareada)",
-                step=step, status="completed",
+                status="completed",
             ))
             continue
 
         if kind == "guardrail_blocked":
             timeline.append(_event_base(
-                row, payload, EV_BLOCK, "guardrail bloqueou",
+                evt, meta, payload, EV_BLOCK, "guardrail bloqueou",
                 f"⛔ guardrail: {payload.get('detail') or payload.get('pattern') or 'comando bloqueado'}",
-                step=step, status="blocked",
+                status="blocked",
             ))
             continue
 
         if kind == "task_blocked":
             timeline.append(_event_base(
-                row, payload, EV_BLOCK, "desenvolvimento bloqueado",
+                evt, meta, payload, EV_BLOCK, "desenvolvimento bloqueado",
                 f"Bloqueado aguardando instrução — {payload.get('reason') or ''}",
-                step=step, status="blocked",
+                status="blocked",
             ))
             continue
 
         if kind == "user_intervention":
             instruction = str(payload.get("instruction") or "")
             timeline.append(_event_base(
-                row, payload, EV_USER, "intervenção do usuário",
+                evt, meta, payload, EV_USER, "intervenção do usuário",
                 f"👤 \"{instruction[:200]}\"",
-                step=step,
             ))
             continue
 
         if kind == "execution_resumed":
             timeline.append(_event_base(
-                row, payload, EV_USER, "execução retomada",
+                evt, meta, payload, EV_USER, "execução retomada",
                 "▶ execução retomada após intervenção do usuário",
-                step=step,
             ))
             continue
 
         if kind == "human_gate_approved":
             timeline.append(_event_base(
-                row, payload, EV_USER, "aprovação humana",
+                evt, meta, payload, EV_USER, "aprovação humana",
                 f"👤 fase {payload.get('position') or '?'} aprovada pelo usuário",
-                step=step,
             ))
             continue
 
         if kind == "phase_done":
             nxt = payload.get("next")
             subs = " (subtarefas)" if payload.get("subtasks") else ""
-            pos = step.position if step else payload.get("_position", "?")
+            pos = meta[0] if meta else payload.get("_position", "?")
             timeline.append(_event_base(
-                row, payload, EV_PHASE_DONE, "etapa concluída",
+                evt, meta, payload, EV_PHASE_DONE, "etapa concluída",
                 f"✓ etapa {pos} concluída{subs}"
                 + (f" → próxima {nxt}" if nxt is not None else " → desenvolvimento concluído"),
-                step=step, status="completed",
+                status="completed",
             ))
             continue
 
         if kind == "bounce_back":
             timeline.append(_event_base(
-                row, payload, EV_WARNING, "bounce-back",
+                evt, meta, payload, EV_WARNING, "bounce-back",
                 f"↩️ fase {payload.get('from_position') or '?'} reprovou — a fase anterior volta para corrigir: {payload.get('reason') or ''}",
-                step=step, status="warning",
+                status="warning",
             ))
             continue
 
         if kind == "subtask_bounce_back":
             timeline.append(_event_base(
-                row, payload, EV_WARNING, "bounce-back de tarefas",
+                evt, meta, payload, EV_WARNING, "bounce-back de tarefas",
                 f"↩️ subtarefas {payload.get('positions') or '?'} reprovadas — voltam para implement",
-                step=step, status="warning",
+                status="warning",
             ))
             continue
 
         if kind == "merged":
             timeline.append(_event_base(
-                row, payload, EV_PHASE_DONE, "merge realizado",
+                evt, meta, payload, EV_PHASE_DONE, "merge realizado",
                 f"🔀 merge + push na default concluído: {payload.get('detail') or ''}",
-                step=step, status="completed",
+                status="completed",
             ))
             continue
 
         if kind == "merge_failed":
             timeline.append(_event_base(
-                row, payload, EV_ERROR, "merge falhou",
+                evt, meta, payload, EV_ERROR, "merge falhou",
                 f"⚠️ merge falhou: {payload.get('detail') or ''}",
-                step=step, status="error",
+                status="error",
             ))
             continue
 
         if kind == "budget_hit":
             timeline.append(_event_base(
-                row, payload, EV_ERROR, "orçamento estourado",
+                evt, meta, payload, EV_ERROR, "orçamento estourado",
                 f"💰 orçamento estourado: {payload.get('reason') or ''}",
-                step=step, status="error",
+                status="error",
             ))
             continue
 
         if kind == "post_merge_failed":
             timeline.append(_event_base(
-                row, payload, EV_ERROR, "falha pós-merge",
+                evt, meta, payload, EV_ERROR, "falha pós-merge",
                 f"⚠️ falha pós-merge (código já integrado): {payload.get('reason') or ''}",
-                step=step, status="error",
+                status="error",
             ))
             continue
 
         if kind == "arch_metric":
             timeline.append(_event_base(
-                row, payload, EV_SYSTEM, "métrica de arquitetura",
+                evt, meta, payload, EV_SYSTEM, "métrica de arquitetura",
                 f"📐 arquitetura {payload.get('level') or '?'} ({payload.get('score') or '?'}/100)",
-                step=step,
             ))
             continue
 
@@ -454,8 +493,8 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                 summary = f"tarefa {position}: {title} falhou — {payload.get('reason') or ''}"
                 name = "tarefa falhou"
             timeline.append(_event_base(
-                row, payload, EV_TASK_EVENT, name, summary,
-                step=step, status="completed" if kind != "subtask_failed" else "error",
+                evt, meta, payload, EV_TASK_EVENT, name, summary,
+                status="completed" if kind != "subtask_failed" else "error",
             ))
             continue
 
@@ -465,36 +504,34 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                 f" — {str(payload.get('reason') or '')[:200]}"
             )
             timeline.append(_event_base(
-                row, payload, EV_TASK_EVENT, "correção do trabalho entregue", summary,
-                step=step, status="completed",
+                evt, meta, payload, EV_TASK_EVENT, "correção do trabalho entregue", summary,
+                status="completed",
             ))
             continue
 
         if kind == "pm_decision":
             timeline.append(_event_base(
-                row, payload, EV_SYSTEM, "decisão do PM",
+                evt, meta, payload, EV_SYSTEM, "decisão do PM",
                 f"🤖 PM decidiu: {payload.get('action') or '?'} — {payload.get('reason') or ''}",
-                step=step,
             ))
             continue
 
         if kind == "subtasks_generated":
             titles = ", ".join(str(t) for t in (payload.get("titles") or []))
             timeline.append(_event_base(
-                row, payload, EV_TASK_EVENT, "tarefas propostas pelo agente",
+                evt, meta, payload, EV_TASK_EVENT, "tarefas propostas pelo agente",
                 f"🧩 {payload.get('count') or 0} tarefa(s) proposta(s): {titles}",
-                step=step,
             ))
             continue
 
         if kind == "task_paused":
-            timeline.append(_event_base(row, payload, EV_USER, "tarefa pausada", "⏸ tarefa pausada", step=step))
+            timeline.append(_event_base(evt, meta, payload, EV_USER, "tarefa pausada", "⏸ tarefa pausada"))
             continue
         if kind == "task_resumed":
-            timeline.append(_event_base(row, payload, EV_USER, "tarefa retomada", "▶ tarefa retomada", step=step))
+            timeline.append(_event_base(evt, meta, payload, EV_USER, "tarefa retomada", "▶ tarefa retomada"))
             continue
         if kind == "task_cancelled":
-            timeline.append(_event_base(row, payload, EV_USER, "tarefa cancelada", "✕ tarefa cancelada — pipeline encerrado", step=step, status="error"))
+            timeline.append(_event_base(evt, meta, payload, EV_USER, "tarefa cancelada", "✕ tarefa cancelada — pipeline encerrado", status="error"))
             continue
 
         if kind == "sandbox":
@@ -504,9 +541,8 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             detail = f" (contêiner {cid[:12]})" if cid else ""
             wall_txt = f" · {wall} ms" if wall is not None else ""
             timeline.append(_event_base(
-                row, payload, EV_SYSTEM, "sandbox",
+                evt, meta, payload, EV_SYSTEM, "sandbox",
                 f"🛡 execução em sandbox [{mode}]{detail}{wall_txt}",
-                step=step,
             ))
             continue
 
@@ -517,19 +553,21 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
                 if mounts else "⚠ varredura de segredos: aviso"
             )
             timeline.append(_event_base(
-                row, payload, EV_SYSTEM, "varredura de segredos", summary,
-                step=step, status="error",
+                evt, meta, payload, EV_SYSTEM, "varredura de segredos", summary,
+                status="error",
             ))
             continue
 
         # Evento genérico do worker (worker_recovered, summary_generated, etc.)
         timeline.append(_event_base(
-            row, payload, EV_SYSTEM, kind,
+            evt, meta, payload, EV_SYSTEM, kind,
             f"{kind}: {str(payload)[:140]}",
-            step=step,
         ))
 
     # Início/fim do desenvolvimento: com base na primeira/última fase executada.
+    # As linhas já vêm ordenadas por (ts, seq); o início tem o menor ts (seq=-1)
+    # e o fim o maior (seq=10**9), então inserir nas pontas produz exatamente a
+    # mesma ordem do sort estável da versão anterior (paridade preservada).
     if first_step_ts is not None:
         timeline.insert(0, {
             "seq": -1,
@@ -570,8 +608,7 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             "step_role": None,
         })
 
-    # Ordena por ts (e seq) — tool_calls pareadas preservam a ordem original.
-    return sorted(timeline, key=lambda e: (e["ts"], e["seq"]))
+    return timeline
 
 
 # Kinds que encerram uma ocorrência de fase com estado terminal.
@@ -640,9 +677,6 @@ def _new_occurrence(step: TaskStep, attempt: int, index: int = 1) -> dict:
 def _finalize_occurrence(occ: dict, step: TaskStep | None, is_last: bool) -> None:
     events = sorted(occ["events"], key=lambda e: (e["ts"], e["seq"]))
     occ["events"] = events
-    # Custo acumulado da execução: soma dos custos dos RunEvent (kimi estimado por
-    # interação; opencode custo real do step_finish). Determinístico, sem LLM.
-    occ["cost"] = round(sum(float(ev.get("cost") or 0.0) for ev in events), 6)
     if events:
         occ["started_at"] = events[0]["ts"]
         occ["finished_at"] = events[-1]["ts"]
@@ -655,7 +689,12 @@ def _finalize_occurrence(occ: dict, step: TaskStep | None, is_last: bool) -> Non
             occ["duration_ms"] = None
 
     last_terminal = None
+    total_cost = 0.0
     for ev in events:
+        # Custo acumulado da execução: soma dos custos dos RunEvent (kimi
+        # estimado por interação; opencode custo real do step_finish). Somado no
+        # MESMO loop da varredura terminal (uma passada). Determinístico, sem LLM.
+        total_cost += float(ev.get("cost") or 0.0)
         kind = ev["raw"]["kind"]
         if kind in _TERMINAL_DONE:
             last_terminal = ("done", kind, ev["raw"]["payload"])
@@ -675,6 +714,7 @@ def _finalize_occurrence(occ: dict, step: TaskStep | None, is_last: bool) -> Non
                 "summary": ev["summary"],
                 "status": ev["status"],
             })
+    occ["cost"] = round(total_cost, 6)
 
     if last_terminal is not None:
         occ["status"], kind, payload = last_terminal
