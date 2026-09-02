@@ -48,6 +48,7 @@ from ..models import (
     TASK_OPEN,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
+    SUB_PENDING,
     Pipeline,
     PipelineStep,
     Repository,
@@ -1469,6 +1470,49 @@ def _mark_blocked(s: Session, step: TaskStep, task: Task, data: dict) -> None:
     _system_event(s, step, "task_blocked", data)
 
 
+def _create_subtasks(s: Session, step: TaskStep, task: Task, subtask_data: list[dict]) -> None:
+    """Cria as subtarefas a partir do plano de implementação parseado do PO."""
+    for i, sd in enumerate(subtask_data):
+        task.subtasks.append(
+            SubTask(
+                position=i,
+                title=sd["title"],
+                description=sd["description"],
+                acceptance_criteria=sd["acceptance_criteria"],
+            )
+        )
+    if subtask_data:
+        _system_event(
+            s, step, "subtasks_generated",
+            {"count": len(subtask_data), "titles": [sd["title"] for sd in subtask_data]},
+        )
+
+
+def _can_replace_pending_subtasks(step: TaskStep, task: Task) -> bool:
+    """True se as subtarefas atuais podem ser substituídas por um plano novo.
+
+    Só numa RE-EXECUÇÃO do PO (`step.attempt > 1` — ex.: bounce-back de QA com
+    NEEDS_WORK) e quando NENHUMA subtarefa foi de fato trabalhada (developer nunca
+    rodou sobre elas): todas ainda em `pending`, sem resumo/veredicto/erro/fim.
+    - Primeira execução com subtarefas MANUAIS (criadas na task antes do PO): não
+      substitui — `attempt == 1`.
+    - Re-execução do PO depois de implementação iniciada (subtarefas feitas):
+      preserva o progresso (não apaga trabalho entregue).
+    """
+    if step.attempt <= 1:
+        return False
+    if not task.subtasks:
+        return False
+    for st in task.subtasks:
+        if st.status != SUB_PENDING:
+            return False
+        if st.summary or st.verdict or st.error or st.finished_at:
+            return False
+        if st.attempt and st.attempt > 1:
+            return False
+    return True
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -1600,22 +1644,17 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
             if criteria:
                 task.acceptance_criteria = criteria
             # Gera subtarefas a partir do plano de implementação (se o PO gerou)
+            subtask_data = verdicts.parse_subtasks(outcome.final_text or "")
             if not task.subtasks:
-                subtask_data = verdicts.parse_subtasks(outcome.final_text or "")
-                for i, sd in enumerate(subtask_data):
-                    task.subtasks.append(
-                        SubTask(
-                            position=i,
-                            title=sd["title"],
-                            description=sd["description"],
-                            acceptance_criteria=sd["acceptance_criteria"],
-                        )
-                    )
-                if subtask_data:
-                    _system_event(
-                        s, step, "subtasks_generated",
-                        {"count": len(subtask_data), "titles": [sd["title"] for sd in subtask_data]},
-                    )
+                _create_subtasks(s, step, task, subtask_data)
+            elif _can_replace_pending_subtasks(step, task):
+                # Re-execução do PO (bounce-back de QA com NEEDS_WORK): o plano de
+                # implementação foi REESCRITO, mas as subtarefas antigas continuam
+                # no banco — QA/verify/assess leriam um plano obsoleto e reprovam
+                # de novo (loop). Se nenhuma subtarefa foi trabalhada ainda
+                # (developer não rodou), substitui o plano antigo pelo novo.
+                task.subtasks.clear()
+                _create_subtasks(s, step, task, subtask_data)
 
         steps = _active_steps(task)
         nxt = next((st for st in steps if st.position > step.position), None)
@@ -1748,6 +1787,19 @@ def _handle_failure(eff: EffectiveSettings, s: Session, step: TaskStep, task: Ta
         ),
         None,
     )
+    # Avaliador (assess): a falha é da ENTREGA (código), não da verificação — o
+    # bounce-back genérico (fase imediatamente anterior, o tester) re-rodaria só o
+    # tester sobre código inalterado (PASS de novo → loop até esgotar tentativas).
+    # O alvo correto é a fase `implement` (developer/android-developer) que corrige.
+    if (step.robot.role if step.robot else "") == "assess":
+        previous = next(
+            (
+                st
+                for st in reversed(_active_steps(task))
+                if st.position < step.position and (st.robot.role if st.robot else "") == "implement"
+            ),
+            previous,
+        )
     if previous is not None and previous.attempt < eff.max_attempts:
         previous.status = STEP_PENDING
         previous.attempt += 1

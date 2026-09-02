@@ -90,6 +90,57 @@ def test_qa_needs_work_bounces_to_po(flow, fake_kimi):
     assert po["attempt"] == 2
 
 
+def _plan_text(titles: list[str]) -> str:
+    """Texto final do PO com um plano de implementação (para gerar subtarefas)."""
+    parts = ["## Descrição\ndescrição", "## Critérios de aceite\n- [ ] ok"]
+    block = ["## Plano de implementação"]
+    for i, title in enumerate(titles, start=1):
+        block.append(
+            f"### Subtarefa {i}: {title}\n"
+            f"**Escopo:** escopo de {title}\n"
+            f"**Critérios:**\n- [ ] ok {title}"
+        )
+    return "\n\n".join(parts + ["\n".join(block)])
+
+
+def test_po_rewrite_replaces_pending_subtasks(flow, fake_kimi):
+    """Bounce-back QA→PO: o PO REESCREVE o plano de implementação e, se nenhuma
+    subtarefa foi trabalhada, o plano antigo é substituído (sem isso, QA/verify/
+    assess leriam subtarefas obsoletas e reprovavam em loop)."""
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+    task = flow["task"]
+
+    # po (0) entrega plano com 2 subtarefas
+    settings.kimi_bin = fake_kimi(
+        [{"role": "assistant", "content": _plan_text(["A", "B"])}],
+        verdict="ready_pass",
+    )
+    _execute(flow, _run_claim(flow))  # po conclui
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task["id"])
+        assert [st.title for st in sorted(t.subtasks, key=lambda x: x.position)] == ["A", "B"]
+        assert all(st.status == "pending" for st in t.subtasks)
+
+    # qa (1) NEEDS_WORK -> bounce para o po
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="needs_work")
+    _execute(flow, _run_claim(flow))
+
+    # po (0) re-executa com UM plano novo (2 -> 3 subtarefas diferentes)
+    settings.kimi_bin = fake_kimi(
+        [{"role": "assistant", "content": _plan_text(["X", "Y", "Z"])}],
+        verdict="ready_pass",
+    )
+    _execute(flow, _run_claim(flow))
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task["id"])
+        titles = [st.title for st in sorted(t.subtasks, key=lambda x: x.position)]
+        assert titles == ["X", "Y", "Z"], titles
+        assert all(st.status == "pending" for st in t.subtasks)
+
+
 def test_needs_work_content_reaches_bounce_back(flow, fake_kimi):
     """O conteúdo do NEEDS_WORK (correção pedida) é preservado para quem vai corrigir."""
     settings = flow["settings"]
@@ -246,8 +297,10 @@ def test_agents_md_written_and_never_committed(flow, fake_kimi):
     assert state["status"] == "done"
 
 
-def test_avaliador_fail_bounces_to_tester(flow, fake_kimi):
-    """Avaliador (pos 4, pré-merge) FAIL -> tester (pos 3) volta a pending (bounce-back)."""
+def test_avaliador_fail_bounces_to_developer(flow, fake_kimi):
+    """Avaliador (pos 4, pré-merge) FAIL -> volta à fase `implement` (developer,
+    pos 2), que é quem corrige código — não ao tester (re-rodar o tester sobre
+    código inalterado só reproduziria PASS e looping até esgotar tentativas)."""
     settings = flow["settings"]
     settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
     settings.task_budget = 100.0
@@ -257,16 +310,18 @@ def test_avaliador_fail_bounces_to_tester(flow, fake_kimi):
     for _ in range(4):
         _execute(flow, _run_claim(flow))
 
-    # avaliador FALHA -> bounce para a fase anterior (tester)
+    # avaliador FALHA -> bounce para a fase `implement` (developer)
     settings.kimi_bin = fake_kimi(HARMLESS, verdict="fail")
     _execute(flow, _run_claim(flow))
 
     state = _state(flow, task["id"])
     assert state["status"] == "in_progress"  # bounce-back, não failed
+    dev = _step(state, 2)
     tester = _step(state, 3)
     avaliador = _step(state, 4)
-    assert tester["status"] == "pending"
-    assert tester["attempt"] == 2
+    assert dev["status"] == "pending"
+    assert dev["attempt"] == 2
+    assert tester["status"] == "done"  # não foi reaberto por engano
     assert avaliador["status"] == "failed"
     assert "FAIL" in (avaliador["error"] or "")
-    assert state["current_step"] == 3
+    assert state["current_step"] == 2
