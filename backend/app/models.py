@@ -533,6 +533,9 @@ class TaskStep(Base):
     # (na prática) quando a fase conclui com sucesso.
     session_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
     diff_stat: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SHA do commit final desta fase (último commit produzido pela execução) —
+    # ancora o diff do workspace no commit REAL, sem buscar por mensagem na história.
+    commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)

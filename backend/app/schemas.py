@@ -571,6 +571,9 @@ class WorkspaceOccurrenceOut(BaseModel):
     tests: dict | None = None
     system_activity: list[dict] = []
     events: list[TimelineEventOut] = []
+    # Branch onde vive a alteração desta fase (pre-merge: branch da task; pós-merge:
+    # default do repositório, após a integração). Ajuda a conferir no remoto.
+    branch: str | None = None
 
 
 class WorkspaceOut(BaseModel):
@@ -639,6 +642,15 @@ class StepDiffOut(BaseModel):
     stat: str = ""
     diff: str = ""
     files: list[str] = []
+    commit: str | None = None
+
+
+class StepFileDiffOut(BaseModel):
+    """Diff real (git) de UM arquivo dentro do commit de uma fase."""
+
+    path: str = ""
+    stat: str = ""
+    diff: str = ""
     commit: str | None = None
 
 

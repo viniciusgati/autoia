@@ -65,6 +65,7 @@ from ..schemas import (
     RetryRequest,
     ReviewRequest,
     StepDiffOut,
+    StepFileDiffOut,
     TaskCreate,
     TaskListItem,
     TaskMessageOut,
@@ -1423,7 +1424,7 @@ def task_workspace(
                 if st.status in (STEP_PENDING, STEP_RUNNING):
                     continue
                 try:
-                    info = gitops.diff_for_step(checkout, st.position)
+                    info = _phase_diff(checkout, st, repo.default_branch)
                 except Exception:
                     continue
                 files_by_position[st.position] = info.get("files") or []
@@ -1436,6 +1437,11 @@ def task_workspace(
         delivered = step_summaries.get((sid, occ["attempt"]))
         mission = missions.get((sid, occ["run"]))
         prev_occ = last_by_step.get(sid)
+        # Branch da alteração: pré-merge = branch da task; pós-merge = default do
+        # repositório (a fase roda no estado integrado).
+        occ_branch = task.branch
+        if repo and step is not None and step.post_merge:
+            occ_branch = repo.default_branch
         out_occurrences.append(WorkspaceOccurrenceOut(
             step_id=sid,
             position=occ["position"],
@@ -1461,6 +1467,7 @@ def task_workspace(
             tests=_derive_tests(step, occ),
             system_activity=occ["system_activity"],
             events=occ["events"],
+            branch=occ_branch,
         ))
         last_by_step[sid] = occ
 
@@ -1498,6 +1505,36 @@ def task_workspace(
     )
 
 
+def _phase_diff(checkout: str, step, base: str) -> dict:
+    """Diff (git) da alteração de UMA fase.
+
+    Fonte preferida: `step.commit_sha` — o commit REAL que a execução produziu
+    (registrado pelo worker), sem depender de mensagem. Na ausência (fases antigas
+    ou em execução sob código antigo): a fase `implement` usa o diff acumulado da
+    branch da task (`origin/<base>...HEAD`, que cobre commits de subtarefa); as
+    demais fases buscam o commit da fase no segmento da branch (nunca na história
+    toda, que misturaria tasks já mescladas).
+    """
+    sha = getattr(step, "commit_sha", None)
+    if sha:
+        return gitops.diff_for_commit(checkout, sha)
+    role = step.robot.role if step.robot else ""
+    if role == "implement":
+        return gitops.diff_ahead(checkout, base)
+    return gitops.diff_for_step(checkout, step.position, base)
+
+
+def _phase_file_diff(checkout: str, step, base: str, file_path: str) -> dict:
+    """Diff de UM arquivo dentro da alteração de uma fase (espelha `_phase_diff`)."""
+    sha = getattr(step, "commit_sha", None)
+    if sha:
+        return gitops.diff_file_for_commit(checkout, sha, file_path)
+    role = step.robot.role if step.robot else ""
+    if role == "implement":
+        return gitops.diff_ahead_file(checkout, base, file_path)
+    return gitops.diff_step_file(checkout, step.position, file_path, base)
+
+
 @router.get("/{task_id}/steps/{position}/diff", response_model=StepDiffOut)
 def step_diff(
     task_id: int,
@@ -1516,7 +1553,7 @@ def step_diff(
     if not os.path.isdir(os.path.join(checkout, ".git")):
         return StepDiffOut()
     try:
-        info = gitops.diff_for_step(checkout, position)
+        info = _phase_diff(checkout, step, repo.default_branch)
     except Exception:
         log.warning("diff da fase %s (task %s) falhou", position, task_id, exc_info=True)
         info = {"stat": "", "diff": "", "files": [], "commit": None}
@@ -1524,6 +1561,42 @@ def step_diff(
         stat=info["stat"],
         diff=info["diff"],
         files=info["files"],
+        commit=info["commit"],
+    )
+
+
+@router.get("/{task_id}/steps/{position}/diff-file/{file_path:path}", response_model=StepFileDiffOut)
+def step_file_diff(
+    task_id: int,
+    position: int,
+    file_path: str,
+    settings=Depends(get_settings),
+    session: Session = Depends(get_session),
+):
+    """Diff real (git) de UM arquivo dentro do commit da fase.
+
+    O workspace lista os arquivos alterados de cada fase; clicar num arquivo abre
+    o diff só dele — o git é a fonte de verdade da alteração.
+    """
+    task = _get_task_or_404(session, task_id)
+    step = next((st for st in _active_steps(task) if st.position == position), None)
+    if step is None:
+        raise HTTPException(404, f"fase {position} não encontrada")
+    repo = task.repository
+    eff = _effective(settings, repo)
+    checkout = _task_workspace(eff, repo.id, task.id)
+    if not os.path.isdir(os.path.join(checkout, ".git")):
+        return StepFileDiffOut(path=file_path)
+    try:
+        info = _phase_file_diff(checkout, step, repo.default_branch, file_path)
+    except Exception:
+        log.warning("diff do arquivo %s (fase %s, task %s) falhou",
+                    file_path, position, task_id, exc_info=True)
+        info = {"stat": "", "diff": "", "files": [], "commit": None}
+    return StepFileDiffOut(
+        path=file_path,
+        stat=info["stat"],
+        diff=info["diff"],
         commit=info["commit"],
     )
 

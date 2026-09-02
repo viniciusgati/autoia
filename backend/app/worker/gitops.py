@@ -9,6 +9,7 @@ profundidade: pushurl inválido + hook pre-push que falha).
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -21,6 +22,22 @@ _PUSH_LOCK_URL = "none://autoia-push-lock"
 
 # Marcador do hook pre-push instalado pelo worker (para remover só o nosso).
 _PUSH_HOOK_MARKER = "# autoia push-lock"
+
+# Arquivos de controle do autoia (gerados/escritos pelo worker no checkout) que,
+# por acidente de `git add -A`, podem acabar commitados num commit de fase. Não
+# são alterações de código do robô — ocultá-los do diff/listagem do workspace
+# evita o diff "só de arquivo interno" que confunde a revisão.
+_AUTOIA_CONTROL_PREFIX = "autoia_"
+
+
+def _is_autoia_control(rel_path: str) -> bool:
+    """True se o caminho relativo é um arquivo de controle do autoia.
+
+    Qualquer segmento do caminho iniciando com `autoia_` (ex.: `autoia_handoff.md`,
+    `autoia_screenshots/step_5/cap.png`). O AGENTS.md do checkout pode ser de
+    controle quando NÃO versionado, mas se estiver num commit é do projeto — mantém.
+    """
+    return any(seg.startswith(_AUTOIA_CONTROL_PREFIX) for seg in rel_path.split("/"))
 
 
 class GitError(Exception):
@@ -316,33 +333,124 @@ def diff_changes(path: str, base: str, branch: str) -> list[DiffChange]:
     return changes
 
 
-def _step_commit(path: str, position: int) -> str | None:
-    """SHA do commit mais recente da fase `position` (mensagem `(fase N)`)."""
-    result = run_git(
-        path, "log", "-1", "--fixed-strings", "--grep", f"(fase {position})",
-        "--format=%H", check=False,
-    )
+def _step_commit(path: str, position: int, base: str | None = None) -> str | None:
+    """SHA do commit mais recente da fase `position` (mensagem `(fase N)`).
+
+    Com `base` (default do repo), limita a busca a commits ainda NÃO na default
+    (`origin/<base>..HEAD`): commits de fases de tasks ANTERIORES que já foram
+    mescladas na main têm a MESMA mensagem e poluiriam o diff (a task 115 mostrava
+    o diff de fases da 109). Sem `base`, busca na história toda.
+    """
+    args = ["log", "-1"]
+    if base:
+        args.append(f"origin/{base}..HEAD")
+    args += ["--fixed-strings", "--grep", f"(fase {position})", "--format=%H"]
+    result = run_git(path, *args, check=False)
     sha = result.stdout.strip()
     return sha or None
 
 
-def diff_for_step(path: str, position: int) -> dict:
+def _strip_internal_hunks(diff: str) -> str:
+    """Remove do patch unificado multi-arquivo os hunks de arquivos internos."""
+    marker = "diff --git "
+    if marker not in diff:
+        return diff
+    chunks = diff.split(marker)
+    keep = [chunks[0]]
+    for chunk in chunks[1:]:
+        m = re.match(r"a/(\S+) b/\S+", chunk)
+        rel = m.group(1) if m else ""
+        if not _is_autoia_control(rel):
+            keep.append(marker + chunk)
+    return "".join(keep)
+
+
+def _diff_body(path: str, commit: str) -> dict:
+    """Stat + patch unificado + arquivos de `git show <commit>` (sem arquivos internos)."""
+    stat = run_git(path, "show", "--stat", "--format=", commit, check=False).stdout.strip()
+    diff = _strip_internal_hunks(
+        run_git(path, "show", "--format=", commit, check=False).stdout.rstrip()
+    )
+    files = [
+        f for f in (s.strip() for s in run_git(
+            path, "show", "--name-only", "--format=", commit, check=False
+        ).stdout.splitlines())
+        if f and not _is_autoia_control(f)
+    ]
+    return {"stat": stat, "diff": diff, "files": files, "commit": commit}
+
+
+def diff_for_step(path: str, position: int, base: str | None = None) -> dict:
     """Diff real (do git) do commit mais recente da fase `position`.
 
     O git é a fonte de verdade da alteração — a LLM apenas explica. Retorna
     `stat` (git diff --stat), `diff` (patch unificado), `files` e o sha do commit.
+    Arquivos internos do autoia são ocultados da listagem/diff (ruído, não é código).
+    `base` restringe a busca ao que a branch da task ainda não entregou à default.
     """
-    commit = _step_commit(path, position)
+    commit = _step_commit(path, position, base)
     if commit is None:
         return {"stat": "", "diff": "", "files": [], "commit": None}
-    stat = run_git(path, "show", "--stat", "--format=", commit, check=False).stdout.strip()
-    diff = run_git(path, "show", "--format=", commit, check=False).stdout.rstrip()
+    return _diff_body(path, commit)
+
+
+def diff_for_commit(path: str, commit: str) -> dict:
+    """Diff de UM commit específico (ancorado no `commit_sha` registrado da fase)."""
+    if not commit:
+        return {"stat": "", "diff": "", "files": [], "commit": None}
+    return _diff_body(path, commit)
+
+
+def diff_ahead(path: str, base: str) -> dict:
+    """Diff acumulado do que a branch da task ainda NÃO entregou à default
+    (`origin/<base>...HEAD`). Fase `implement` em execução/recém-concluída commita
+    por subtarefa (mensagens sem `(fase N)`) — sem `commit_sha`, este é o fallback
+    correto para listar os arquivos que o developer realmente alterou."""
+    if not base:
+        return {"stat": "", "diff": "", "files": [], "commit": None}
+    rev = f"origin/{base}...HEAD"
+    stat = run_git(path, "diff", rev, "--stat", check=False).stdout.strip()
+    diff = _strip_internal_hunks(
+        run_git(path, "diff", rev, check=False).stdout.rstrip()
+    )
     files = [
         f for f in (s.strip() for s in run_git(
-            path, "show", "--name-only", "--format=", commit, check=False
-        ).stdout.splitlines()) if f
+            path, "diff", rev, "--name-only", check=False
+        ).stdout.splitlines())
+        if f and not _is_autoia_control(f)
     ]
-    return {"stat": stat, "diff": diff, "files": files, "commit": commit}
+    return {"stat": stat, "diff": diff, "files": files, "commit": None}
+
+
+def diff_ahead_file(path: str, base: str, file_path: str) -> dict:
+    """Diff de UM arquivo no acumulado do branch (fallback do `implement`)."""
+    if not base or not file_path:
+        return {"stat": "", "diff": "", "files": [], "commit": None}
+    rev = f"origin/{base}...HEAD"
+    diff = run_git(path, "diff", rev, "--", file_path, check=False).stdout.rstrip()
+    stat = run_git(
+        path, "diff", rev, "--stat", "--", file_path, check=False
+    ).stdout.strip()
+    return {"stat": stat, "diff": diff, "files": [], "commit": None}
+
+
+def diff_step_file(path: str, position: int, file_path: str, base: str | None = None) -> dict:
+    """Diff (patch unificado + stat) de UM arquivo dentro do commit da fase."""
+    commit = _step_commit(path, position, base)
+    return diff_file_for_commit(path, commit, file_path)
+
+
+def diff_file_for_commit(path: str, commit: str | None, file_path: str) -> dict:
+    """Diff de UM arquivo dentro de um commit específico."""
+    if commit is None or not file_path:
+        return {"stat": "", "diff": "", "files": [], "commit": None}
+    diff = run_git(
+        path, "show", "--format=", commit, "--", file_path, check=False
+    ).stdout.rstrip()
+    stat = run_git(
+        path, "show", "--stat", "--format=", commit, "--", file_path, check=False
+    ).stdout.strip()
+    return {"stat": stat, "diff": diff, "files": [], "commit": commit}
 
 
 @dataclass

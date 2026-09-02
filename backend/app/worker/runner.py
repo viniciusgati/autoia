@@ -1219,6 +1219,12 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             s, step, "prompt",
             {"prompt": prompt, "robot": step.robot.name if step.robot else None},
         )
+        # HEAD no início da execução: usado para ancorar o diff da fase no commit
+        # REAL que esta execução produzir (se o HEAD mudar até o sucesso).
+        try:
+            head_before = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+        except gitops.GitError:
+            head_before = None
         role = step.robot.role if step.robot else ""
         has_subtasks = bool(task.subtasks)  # força eager load dentro da sessão
         if not step.goal:
@@ -1314,7 +1320,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             )
         verdict_label = _consume_verdict(s, step, checkout)
         s.commit()
-    trigger = _decide(eff, session_factory, step_id, checkout, outcome, verdict_label)
+    trigger = _decide(eff, session_factory, step_id, checkout, outcome, verdict_label, head_before)
     _maybe_release_workspace(eff, session_factory, task.id, checkout)
     return trigger
 
@@ -1513,7 +1519,7 @@ def _can_replace_pending_subtasks(step: TaskStep, task: Task) -> bool:
     return True
 
 
-def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None) -> dict | None:
+def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None, head_before: str | None = None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
         step = s.get(TaskStep, step_id)
@@ -1613,6 +1619,16 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                 trigger = _handle_failure(eff, s, step, task, f"commit/push: {exc}", "git_error", STEP_FAILED)
                 s.commit()
                 return trigger
+
+        # Ancora o diff desta execução no commit REAL produzido (commits do robô
+        # e/ou o commit final do worker). Se o HEAD não mudou, a fase não alterou
+        # arquivos (não há o que mostrar de diff).
+        try:
+            head_now = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+        except gitops.GitError:
+            head_now = None
+        if head_before and head_now and head_now != head_before:
+            step.commit_sha = head_now
 
         # Registra screenshots e outros arquivos gerados pelo robô no checkout.
         try:

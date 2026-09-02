@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
@@ -8,7 +8,7 @@ import { useAdaptivePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
 import { fmtCost } from "../lib/money";
-import type { Epic, Project, RepositoryMember, StepDiff, Task, TaskMessage, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
+import type { Epic, Project, RepositoryMember, StepFileDiff, Task, TaskMessage, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
 function statusMeta(status: string): { label: string; cls: string } {
@@ -257,30 +257,37 @@ function ProposalRow({ proposal, onChanged, onError, canAct }: {
   );
 }
 
-function DiffModal({ taskId, position, onClose }: {
+/** Modal com o diff de UM arquivo (patch real do commit da fase). */
+function FileDiffModal({ taskId, position, file, branch, onClose }: {
   taskId: number;
   position: number;
+  file: string;
+  branch: string | null;
   onClose: () => void;
 }) {
-  const [diff, setDiff] = useState<StepDiff | null>(null);
+  const [diff, setDiff] = useState<StepFileDiff | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
     api
-      .getStepDiff(taskId, position)
+      .getStepFileDiff(taskId, position, file)
       .then((d) => active && setDiff(d))
       .catch((e) => active && setError(String(e)));
     return () => {
       active = false;
     };
-  }, [taskId, position]);
+  }, [taskId, position, file]);
+
+  const commitShort = diff?.commit ? diff.commit.slice(0, 7) : null;
 
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal ws-diff-modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <span>Diff da fase {position + 1}</span>
+          <strong className="mono ws-file-modal-title" title={file}>{file}</strong>
+          {branch && <button className="ws-branch" title="branch no remoto (github/outro)" onClick={() => navigator.clipboard?.writeText(branch)}>⎇ {branch}</button>}
+          {commitShort && <span className="ws-commit-chip" title={diff?.commit ?? ""}>{commitShort}</span>}
           <button className="link-btn" onClick={onClose}>fechar</button>
         </div>
         <div className="modal-body">
@@ -289,7 +296,7 @@ function DiffModal({ taskId, position, onClose }: {
           {diff && diff.diff ? (
             <DiffView code={diff.diff} />
           ) : diff ? (
-            <div className="muted">Sem diff para esta fase (nenhum commit com alterações encontrado).</div>
+            <div className="muted">Sem alterações neste arquivo no commit da fase.</div>
           ) : null}
         </div>
       </div>
@@ -297,14 +304,84 @@ function DiffModal({ taskId, position, onClose }: {
   );
 }
 
-function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct, expanded, onToggle }: {
+/** Modal de detalhes da execução: atividade do sistema + eventos técnicos. */
+function OccurrenceDetailsModal({ occ, onClose }: {
+  occ: WorkspaceOccurrence;
+  onClose: () => void;
+}) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal ws-diff-modal" onClick={(e) => e.stopPropagation()}>
+        <div className="modal-head">
+          <strong>
+            Detalhes — {occ.robot?.name ?? "?"} · fase {occ.position + 1}
+            {occ.is_rerun ? ` · tentativa ${occ.attempt}` : ""}
+          </strong>
+          <button className="link-btn" onClick={onClose}>fechar</button>
+        </div>
+        <div className="modal-body">
+          <section className="ws-occ-section">
+            <h4 className="ws-section-title">Atividade do sistema ({occ.system_activity.length})</h4>
+            <ul className="ws-sysact">
+              {occ.system_activity.length === 0 && <li className="muted small">sem atividade registrada</li>}
+              {occ.system_activity.map((a, i) => (
+                <li key={i} className="ws-sysact-item">
+                  <span className="muted small">{fmtTime(a.ts)}</span>
+                  <span className="ws-sysact-text" title={a.summary}>{a.summary}</span>
+                </li>
+              ))}
+            </ul>
+          </section>
+          <section className="ws-occ-section">
+            <h4 className="ws-section-title">Detalhes técnicos ({occ.events.length} eventos)</h4>
+            <ul className="ws-sysact">
+              {occ.events.length === 0 && <li className="muted small">sem eventos</li>}
+              {occ.events.map((e, i) => (
+                <li key={i} className="ws-sysact-item">
+                  <span className="muted small">{fmtTime(e.ts)}</span>
+                  <span className="ws-sysact-text" title={`${e.type} — ${e.summary}`}>
+                    [{e.type}] {e.name} — {e.summary}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Um item da timeline "bonitinha" dentro do card da execução. */
+function TItem({ kind, title, when, children }: {
+  kind: "start" | "user" | "ok" | "stop" | "system";
+  title?: ReactNode;
+  when?: string | null;
+  children?: ReactNode;
+}) {
+  return (
+    <div className={`ws-tl-item ws-tl-${kind}`}>
+      <span className="ws-tl-dot" />
+      <div className="ws-tl-body">
+        {(title || when) && (
+          <div className="ws-tl-head">
+            {title && <span className="ws-tl-title">{title}</span>}
+            {when && <span className="ws-tl-when">{when}</span>}
+          </div>
+        )}
+        {children && <div className="ws-tl-content">{children}</div>}
+      </div>
+    </div>
+  );
+}
+
+function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile }: {
   occ: WorkspaceOccurrence;
   onChanged: () => void;
   onError: (msg: string) => void;
-  onOpenDiff: (position: number) => void;
   canAct: boolean;
-  expanded: boolean;
-  onToggle: () => void;
+  onDetails: () => void;
+  onFile: (file: string) => void;
 }) {
   const meta = occStatusMeta(occ.status);
   const running = occ.status === "running";
@@ -319,34 +396,16 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct, expanded,
     occ.duration_ms ??
     (running && occ.started_at ? Date.now() - new Date(occ.started_at).getTime() : null);
 
+  const stop = stopMeta(occ.stop?.kind ?? "");
+
   return (
     <article className={`ws-occ ws-occ-${occ.status}`}>
-      {running && (
-        <div className="ws-occ-running-banner">
-          <span className="ws-pulse" /> ETAPA EM EXECUÇÃO — {occ.robot?.name} · Fase {occ.position + 1}
-        </div>
-      )}
-      <header
-        className="ws-occ-head"
-        onClick={onToggle}
-        role="button"
-        tabIndex={0}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            onToggle();
-          }
-        }}
-        title={expanded ? "Recolher detalhes" : "Ver detalhes"}
-      >
-        <span className={`ws-occ-chevron${expanded ? " ws-occ-chevron-open" : ""}`}>
-          {expanded ? "▾" : "▸"}
-        </span>
+      <header className="ws-occ-head ws-occ-head-flat">
         <span className="ws-occ-pos">FASE {occ.position + 1}</span>
         <span className="ws-occ-robot">{occ.robot?.name ?? "?"}</span>
         {occ.is_rerun && (
           <span className="badge badge-warn" title="Nova execução da mesma fase — o histórico anterior foi preservado">
-            ↻ Nova execução · tentativa {occ.attempt}
+            ↻ tentativa {occ.attempt}
           </span>
         )}
         <span className={`badge ${meta.cls}`}>{meta.label}</span>
@@ -363,81 +422,59 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct, expanded,
             {fmtCost(occ.cost)}
           </span>
         )}
+        <span className="ws-occ-actions">
+          <button className="link-btn" onClick={onDetails}>Detalhes</button>
+        </span>
       </header>
 
-      {expanded && (
-        <>
-      {/* 2. MISSÃO desta execução — o conteúdo principal do card. */}
-      <section className="ws-occ-section ws-mission-box">
-        <h4 className="ws-section-title">
-          Missão desta execução
-          {occ.mission_source === "llm" && (
-            <span className="badge ws-badge-delivered">resumo LLM</span>
-          )}
-        </h4>
-        <p className="ws-mission" title={occ.mission || occ.goal || undefined}>
-          {occ.mission || occ.goal || "Execução em preparação…"}
-        </p>
-      </section>
-
-      {/* 4. EM ANDAMENTO — atividade atual da execução. */}
-      {running && occ.last_activity && (
-        <section className="ws-occ-section">
-          <h4 className="ws-section-title">Em andamento</h4>
-          <p className="ws-live">
-            <span className="ws-pulse" />
-            <span className="ws-live-text" title={occ.last_activity}>{occ.last_activity}</span>
+      {/* Linha do tempo das mensagens da execução (o conteúdo principal do card). */}
+      <div className="ws-tl">
+        <TItem kind="start" title={<>Início {occ.mission_source === "llm" && <span className="badge ws-badge-delivered">missão LLM</span>}</>} when={fmtTime(occ.started_at)}>
+          <p className="ws-tl-mission" title={occ.mission || occ.goal || undefined}>
+            {occ.mission || occ.goal || "Execução em preparação…"}
           </p>
-        </section>
-      )}
+        </TItem>
 
-      {/* 4. MOTIVO DA PARADA — imediatamente depois da missão. */}
-      {!running && occ.stop && (
-        <section className={`ws-occ-section ws-stop${occ.stop.detail ? " ws-stop-with-detail" : ""}`}>
-          <h4 className="ws-section-title">
-            <span className={stopMeta(occ.stop.kind).cls}>
-              {stopMeta(occ.stop.kind).label}
-            </span>
-          </h4>
-          <p className="ws-stop-reason">{occ.stop.reason || "execução interrompida"}</p>
-          {occ.stop.detail && (
-            <div className="ws-stop-detail">
-              <Markdown text={occ.stop.detail} />
+        {interventions.map((e, i) => (
+          <TItem key={i} kind="user" title="👤 Você" when={fmtTime(e.ts)}>
+            <p className="ws-tl-user">
+              {String(e.raw?.payload?.instruction ?? "") || e.summary}
+            </p>
+          </TItem>
+        ))}
+
+        {deliveredText && (
+          <TItem
+            kind="ok"
+            title={
+              <>
+                🤖 {occ.robot?.name ?? "robô"} respondeu
+                {occ.delivered ? (
+                  <span className="badge ws-badge-delivered">resumo LLM</span>
+                ) : (
+                  <span className="badge badge-muted ws-badge-delivered">texto do robô</span>
+                )}
+              </>
+            }
+            when={fmtTime(occ.finished_at)}
+          >
+            <div className="ws-delivered">
+              <Markdown text={deliveredText} />
             </div>
-          )}
-        </section>
-      )}
+          </TItem>
+        )}
 
-      {/* 3. RESULTADO — o que esta execução resolveu/entregou. */}
-      {!running && deliveredText && (
-        <section className="ws-occ-section ws-result">
-          <h4 className="ws-section-title">
-            O que foi resolvido
-            {occ.delivered ? (
-              <span className="badge ws-badge-delivered">resumo LLM</span>
-            ) : (
-              <span className="badge badge-muted ws-badge-delivered">texto do robô</span>
+        {!running && occ.stop && (
+          <TItem kind="stop" title={<span className={stop.cls}>{stop.label}</span>} when={fmtTime(occ.finished_at)}>
+            <p className="ws-stop-reason">{occ.stop.reason || "execução interrompida"}</p>
+            {occ.stop.detail && (
+              <div className="ws-stop-detail">
+                <Markdown text={occ.stop.detail} />
+              </div>
             )}
-          </h4>
-          <div className="ws-delivered">
-            <Markdown text={deliveredText} />
-          </div>
-        </section>
-      )}
-
-      {interventions.length > 0 && (
-        <section className="ws-occ-section ws-intervention">
-          <h4 className="ws-section-title">👤 Sua mensagem para o robô</h4>
-          {interventions.map((e, i) => (
-            <div key={i} className="ws-intervention-item">
-              <span className="muted small">{fmtTime(e.ts)}</span>
-              <p className="ws-intervention-text">
-                {String(e.raw?.payload?.instruction ?? "") || e.summary}
-              </p>
-            </div>
-          ))}
-        </section>
-      )}
+          </TItem>
+        )}
+      </div>
 
       {subtasks.length > 0 && (
         <section className="ws-occ-section">
@@ -480,52 +517,45 @@ function OccurrenceCard({ occ, onChanged, onError, onOpenDiff, canAct, expanded,
       )}
 
       {occ.file_count > 0 && (
-        <section className="ws-occ-section">
-          <h4 className="ws-section-title">Arquivos alterados</h4>
-          <ul className="ws-files">
-            {occ.files.slice(0, 10).map((f) => (
-              <li key={f}>{f}</li>
+        <section className="ws-occ-section ws-files-sec">
+          <div className="ws-files-head">
+            <h4 className="ws-section-title">Arquivos alterados ({occ.file_count})</h4>
+            {occ.branch && (
+              <button
+                className="ws-branch"
+                title="Branch desta alteração — confira no remoto (github/outro). Clique para copiar."
+                onClick={() => navigator.clipboard?.writeText(occ.branch ?? "")}
+              >
+                ⎇ {occ.branch}
+              </button>
+            )}
+          </div>
+          <ul className="ws-files-links">
+            {occ.files.slice(0, 12).map((f) => (
+              <li key={f}>
+                <button className="ws-file-link" title="ver diff deste arquivo" onClick={() => onFile(f)}>
+                  {f}
+                </button>
+              </li>
             ))}
           </ul>
-          <div className="ws-file-actions">
-            {occ.file_count > 10 && <span className="muted small">Ver todos os {occ.file_count} arquivos…</span>}
-            <button className="link-btn" onClick={() => onOpenDiff(occ.position)}>
-              Ver diff
-            </button>
-          </div>
+          {occ.file_count > 12 && (
+            <div className="ws-file-actions">
+              <span className="muted small">+{occ.file_count - 12} arquivos — veja todos em “Detalhes”</span>
+            </div>
+          )}
         </section>
       )}
 
-      {occ.system_activity.length > 0 && (
-        <details className="ws-occ-section ws-collapse">
-          <summary className="ws-section-title">Atividade do sistema ({occ.system_activity.length})</summary>
-          <ul className="ws-sysact">
-            {occ.system_activity.map((a, i) => (
-              <li key={i} className="ws-sysact-item">
-                <span className="muted small">{fmtTime(a.ts)}</span>
-                <span className="ws-sysact-text" title={a.summary}>{a.summary}</span>
-              </li>
-            ))}
-          </ul>
-        </details>
-      )}
-
-      {occ.events.length > 0 && (
-        <details className="ws-occ-section ws-collapse">
-          <summary className="ws-section-title">Detalhes técnicos ({occ.events.length} eventos)</summary>
-          <ul className="ws-sysact">
-            {occ.events.map((e, i) => (
-              <li key={i} className="ws-sysact-item">
-                <span className="muted small">{fmtTime(e.ts)}</span>
-                <span className="ws-sysact-text" title={`${e.type} — ${e.summary}`}>
-                  [{e.type}] {e.name} — {e.summary}
-                </span>
-              </li>
-            ))}
-            </ul>
-          </details>
-        )}
-        </>
+      {/* EM ANDAMENTO — fixado no fim do card. */}
+      {running && (
+        <div className="ws-occ-foot">
+          <span className="ws-pulse" />
+          <span className="ws-foot-label">EM ANDAMENTO</span>
+          <span className="ws-live-text" title={occ.last_activity ?? ""}>
+            {occ.last_activity ?? "executando…"}
+          </span>
+        </div>
       )}
     </article>
   );
@@ -545,7 +575,14 @@ export default function Workspace() {
   const [resumePos, setResumePos] = useState<string>("");
   const [busy, setBusy] = useState(false);
   const [summaryBusy, setSummaryBusy] = useState(false);
-  const [diffPos, setDiffPos] = useState<number | null>(null);
+  // Modal de detalhes (atividade do sistema + eventos técnicos) de uma execução.
+  const [detailsOcc, setDetailsOcc] = useState<WorkspaceOccurrence | null>(null);
+  // Modal de diff de UM arquivo alterado (position/branch vêm da ocorrência).
+  const [fileDiff, setFileDiff] = useState<{
+    position: number;
+    branch: string | null;
+    file: string;
+  } | null>(null);
   const [chatText, setChatText] = useState("");
   const [chatBusy, setChatBusy] = useState(false);
   // Projetos/épicos do repositório: nomes da associação da tarefa no header.
@@ -555,23 +592,6 @@ export default function Workspace() {
   // Segue automaticamente o fim da página conforme a execução avança; pausa
   // quando o usuário rola para cima (ler histórico) e volta quando chega ao fim.
   const [followLatest, setFollowLatest] = useState(true);
-  // Acordeão de ocorrências: chave do cartão aberto (um por vez). Inicialmente
-  // abre a fase em execução (ou a última) na primeira carga; depois o usuário
-  // controla clicando no cabeçalho.
-  const [openOcc, setOpenOcc] = useState<string | null>(null);
-  const occInit = useRef(false);
-
-  // Abre o cartão em execução (ou o último) na primeira carga.
-  useEffect(() => {
-    if (!ws || occInit.current) return;
-    occInit.current = true;
-    const occs = ws.occurrences;
-    if (occs.length === 0) return;
-    const target = occs.find((o) => o.status === "running") ?? occs[occs.length - 1];
-    setOpenOcc(`${target.step_id}-${target.attempt}`);
-  }, [ws]);
-
-  const toggleOcc = (key: string) => setOpenOcc((cur) => (cur === key ? null : key));
 
   // Membros do projeto: define admin do projeto (permissão de atuação) e
   // alimenta o controle de atribuição de responsável.
@@ -921,6 +941,7 @@ export default function Workspace() {
         )}
       </header>
 
+      <div className="ws-body">
       <main className="ws-timeline">
         {!ws && <div className="muted ws-loading">carregando workspace…</div>}
         {ws && ws.occurrences.length === 0 && (
@@ -960,32 +981,6 @@ export default function Workspace() {
           </section>
         ) : null}
 
-        {ws?.task.subtasks.length ? (
-          <section className="ws-subtasks-panel">
-            <h4 className="ws-section-title">
-              Subtarefas
-              <span className="muted small">
-                ({ws.task.subtasks.filter((s) => s.status === "done").length}/{ws.task.subtasks.length} concluídas)
-              </span>
-            </h4>
-            <ul className="ws-subtasks-global">
-              {[...ws.task.subtasks].sort((a, b) => a.position - b.position).map((s) => {
-                const lb = SUB_LABELS[s.status] ?? { label: s.status, cls: "badge-muted" };
-                return (
-                  <li key={s.position} className="ws-subtask-global-item">
-                    <span className="ws-sub-pos">{s.position + 1}</span>
-                    <span className="ws-sub-title">{s.title}</span>
-                    <span className={`badge ${lb.cls}`}>{lb.label}</span>
-                    {s.attempt > 1 && <span className="muted small">tentativa {s.attempt}</span>}
-                    {s.verdict && <span className="muted small">{s.verdict}</span>}
-                    {s.error && <span className="ws-sub-error" title={s.error}>{s.error}</span>}
-                  </li>
-                );
-              })}
-            </ul>
-          </section>
-        ) : null}
-
         {ws?.occurrences.map((occ) => {
           const key = `${occ.step_id}-${occ.attempt}`;
           return (
@@ -994,10 +989,11 @@ export default function Workspace() {
               occ={occ}
               onChanged={refresh}
               onError={setError}
-              onOpenDiff={setDiffPos}
               canAct={canAct}
-              expanded={openOcc === key}
-              onToggle={() => toggleOcc(key)}
+              onDetails={() => setDetailsOcc(occ)}
+              onFile={(file) =>
+                setFileDiff({ position: occ.position, branch: occ.branch ?? null, file })
+              }
             />
           );
         })}
@@ -1018,6 +1014,40 @@ export default function Workspace() {
           </section>
         )}
       </main>
+
+      {/* Subtarefas sempre visíveis, fixas à direita. */}
+      <aside className="ws-aside">
+        <section className="ws-subtasks-panel ws-subtasks-side">
+          <h4 className="ws-section-title">
+            Subtarefas
+            <span className="muted small">
+              {ws?.task.subtasks.length
+                ? `(${ws.task.subtasks.filter((s) => s.status === "done").length}/${ws.task.subtasks.length} concluídas)`
+                : ""}
+            </span>
+          </h4>
+          {ws?.task.subtasks.length ? (
+            <ul className="ws-subtasks-global">
+              {[...ws.task.subtasks].sort((a, b) => a.position - b.position).map((s) => {
+                const lb = SUB_LABELS[s.status] ?? { label: s.status, cls: "badge-muted" };
+                return (
+                  <li key={s.position} className="ws-subtask-global-item">
+                    <span className="ws-sub-pos">{s.position + 1}</span>
+                    <span className="ws-sub-title">{s.title}</span>
+                    <span className={`badge ${lb.cls}`}>{lb.label}</span>
+                    {s.attempt > 1 && <span className="muted small">tentativa {s.attempt}</span>}
+                    {s.verdict && <span className="muted small">{s.verdict}</span>}
+                    {s.error && <span className="ws-sub-error" title={s.error}>{s.error}</span>}
+                  </li>
+                );
+              })}
+            </ul>
+          ) : (
+            <p className="muted small ws-aside-empty">Sem subtarefas nesta tarefa.</p>
+          )}
+        </section>
+      </aside>
+      </div>
 
       {task?.mode === "manual" ? (
         <footer className="ws-input">
@@ -1097,8 +1127,17 @@ export default function Workspace() {
         </footer>
       )}
 
-      {diffPos != null && (
-        <DiffModal taskId={taskId} position={diffPos} onClose={() => setDiffPos(null)} />
+      {detailsOcc && (
+        <OccurrenceDetailsModal occ={detailsOcc} onClose={() => setDetailsOcc(null)} />
+      )}
+      {fileDiff && (
+        <FileDiffModal
+          taskId={taskId}
+          position={fileDiff.position}
+          file={fileDiff.file}
+          branch={fileDiff.branch}
+          onClose={() => setFileDiff(null)}
+        />
       )}
     </div>
   );

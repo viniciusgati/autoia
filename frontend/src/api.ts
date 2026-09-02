@@ -22,6 +22,7 @@ import type {
   Robot,
   RunEvent,
   StepDiff,
+  StepFileDiff,
   StorageReport,
   SubTask,
   Task,
@@ -327,6 +328,13 @@ export const api = {
     request<Workspace>(`/api/tasks/${taskId}/workspace`, { signal }),
   getStepDiff: (taskId: number, position: number) =>
     request<StepDiff>(`/api/tasks/${taskId}/steps/${position}/diff`),
+  getStepFileDiff: (taskId: number, position: number, filePath: string) =>
+    request<StepFileDiff>(
+      `/api/tasks/${taskId}/steps/${position}/diff-file/${filePath
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`,
+    ),
   sendInstruction: (taskId: number, data: { instruction: string; position?: number }) =>
     request<Task>(`/api/tasks/${taskId}/instruction`, {
       method: "POST",

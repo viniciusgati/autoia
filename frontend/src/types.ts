@@ -390,6 +390,8 @@ export interface WorkspaceOccurrence {
   tests: { passed: number | null; failed: number | null; verdict: string | null } | null;
   system_activity: { ts: string; type: string; name: string; summary: string; status: string | null }[];
   events: TimelineEvent[];
+  /** Branch onde vive a alteração (pre-merge: task; pós-merge: default do repo). */
+  branch: string | null;
 }
 
 /** Pedido de decisão do agente aguardando resposta do usuário. */
@@ -446,6 +448,14 @@ export interface StepDiff {
   stat: string;
   diff: string;
   files: string[];
+  commit: string | null;
+}
+
+/** Diff real (git) de UM arquivo dentro do commit de uma fase. */
+export interface StepFileDiff {
+  path: string;
+  stat: string;
+  diff: string;
   commit: string | null;
 }
 

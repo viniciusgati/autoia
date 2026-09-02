@@ -127,3 +127,24 @@ def test_advpl_helpers():
     assert gitops.is_advpl_robot(None) is False
     assert gitops.advpl_commit_message("kimi", "cria função X") == "[kimi] - cria função X"
     assert gitops.advpl_commit_message("opencode", "ajusta Y") == "[opencode] - ajusta Y"
+
+
+def test_diff_for_step_filters_autoia_and_file_diff(bare_repo, tmp_path):
+    """O diff de fase oculta arquivos internos do autoia (autoia_*) e o diff de
+    UM arquivo devolve só o patch daquele arquivo do commit da fase."""
+    dest = str(tmp_path / "clone")
+    gitops.clone(bare_repo, dest)
+    gitops.ensure_task_branch(dest, "autoia/task-x", "main")
+    (tmp_path / "clone" / "app.py").write_text("print('oi')\n")
+    (tmp_path / "clone" / "autoia_summary.json").write_text('{"summary": "x"}\n')
+    assert gitops.commit_all(dest, "feat: ajusta X (fase 2)")
+
+    info = gitops.diff_for_step(dest, 2)
+    assert info["commit"] is not None
+    assert info["files"] == ["app.py"]
+    assert "autoia_summary.json" not in info["diff"]
+
+    single = gitops.diff_step_file(dest, 2, "app.py")
+    assert single["commit"] == info["commit"]
+    assert "+print('oi')" in single["diff"]
+    assert "autoia_summary" not in single["diff"]

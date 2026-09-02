@@ -93,6 +93,10 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("session_id", "VARCHAR(200)"),
         ("archived", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("execution_mode", "VARCHAR(20)"),
+        # SHA do commit final da fase (worker registra ao concluir): ancora o diff
+        # do workspace no commit REAL da task — sem grep de mensagem na história
+        # (que pegava commits de outras tasks já mescladas na main).
+        ("commit_sha", "VARCHAR(64)"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
