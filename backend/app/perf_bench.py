@@ -33,7 +33,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.db import make_engine, make_session_factory, utcnow
 from app.main import create_app
-from app.models import Repository, RunEvent, Task, TaskStep
+from app.models import Repository, Robot, RunEvent, Task, TaskStep
 from app.timeline import derive_task_occurrences, derive_task_timeline
 
 DEFAULT_EVENTS = 500
@@ -120,11 +120,21 @@ def build_synthetic_task(
         s.add(task)
         s.commit()
 
-        robots = [
-            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
+        # Robôs do seed por NOME (não por id posicional): a ordem de inserção dos
+        # robôs no seed pode mudar (ex.: deep-v2 adicionou qa-lean/validador) e os
+        # ids sequenciais não devem afetar a task sintética nem o snapshot de
+        # paridade da timeline. Mantém a sequência original do seed.
+        robot_names = [
+            "po", "qa", "developer", "developer-advpl", "tester", "avaliador",
+            "merger", "deploy-tester", "pm", "dispatcher", "iniciador", "analista",
+            "auditor-ux", "propositor", "browser-tester",
         ][:steps]
+        robots_by_name = {
+            r.name: r for r in s.query(Robot).filter(Robot.name.in_(robot_names)).all()
+        }
+        robot_ids = [robots_by_name[n].id for n in robot_names]
         task_steps: list[TaskStep] = []
-        for pos, robot_id in enumerate(robots):
+        for pos, robot_id in enumerate(robot_ids):
             st = TaskStep(
                 task_id=task.id,
                 position=pos,

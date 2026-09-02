@@ -15,8 +15,10 @@ def test_seed_roles_and_pipeline(settings):
         roles = {r.name: r.role for r in s.query(Robot).all()}
         assert roles["po"] == "refine"
         assert roles["qa"] == "review"
+        assert roles["qa-lean"] == "review"
         assert roles["developer"] == "implement"
         assert roles["tester"] == "verify"
+        assert roles["validador"] == "verify"
         assert roles["avaliador"] == "assess"
         assert roles["merger"] == "merge"
         assert roles["deploy-tester"] == "verify"
@@ -32,7 +34,7 @@ def test_seed_roles_and_pipeline(settings):
         # dispatcher (human-in-the-loop): roteia a intenção do usuário
         assert roles["dispatcher"] == "dispatcher"
 
-        assert s.query(Pipeline).count() == 5
+        assert s.query(Pipeline).count() == 11
 
         # com deploy: avaliador pré-merge + deploy-tester pós-merge (7 fases)
         deploy = (
@@ -87,11 +89,56 @@ def test_seed_roles_and_pipeline(settings):
         assert order == ["po", "qa", "developer-advpl", "tester", "avaliador", "merger"]
         assert all(not st.post_merge for st in advpl.steps)
 
+    # Pipelines deep-v2 (por superfície): validador (role verify) no lugar do tester,
+    # QA rigoroso (qa) por padrão; variantes -lean usam qa-lean.
+    with session_factory() as s:
+        frontend = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "deep-v2-frontend")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(frontend.steps, key=lambda x: x.position)]
+        assert order == [
+            "po", "qa", "developer", "validador", "avaliador", "merger",
+            "deploy-tester", "browser-tester",
+        ]
+        post = [st.post_merge for st in sorted(frontend.steps, key=lambda x: x.position)]
+        assert post == [False, False, False, False, False, False, True, True]
+
+        frontend_lean = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "deep-v2-frontend-lean")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(frontend_lean.steps, key=lambda x: x.position)]
+        assert order == [
+            "po", "qa-lean", "developer", "validador", "avaliador", "merger",
+            "deploy-tester", "browser-tester",
+        ]
+
+        backend = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "deep-v2-backend")
+            .one()
+        )
+        order = [st.robot.name for st in sorted(backend.steps, key=lambda x: x.position)]
+        assert order == [
+            "po", "qa", "developer", "validador", "avaliador", "merger", "deploy-tester",
+        ]
+        post = [st.post_merge for st in sorted(backend.steps, key=lambda x: x.position)]
+        assert post == [False, False, False, False, False, False, True]
+
+        for name in ("deep-v2-backend-lean", "deep-v2-fullstack", "deep-v2-fullstack-lean"):
+            p = s.query(Pipeline).filter(Pipeline.name == name).one()
+            names = [st.robot.name for st in sorted(p.steps, key=lambda x: x.position)]
+            assert names[:3] == ["po", ("qa-lean" if name.endswith("-lean") else "qa"), "developer"]
+            assert "validador" in names and "avaliador" in names and "merger" in names
+
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
-        assert s.query(Robot).count() == 15
-        assert s.query(Pipeline).count() == 5
+        assert s.query(Robot).count() == 17
+        assert s.query(Pipeline).count() == 11
 
 
 def test_migrate_schema_creates_auth_tables_and_new_columns(settings):

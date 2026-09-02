@@ -97,15 +97,21 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 
 - **Task** = lista ordenada de **TaskSteps** (fases). Cada fase tem um **Robot** com um
   `role`: `refine` (po), `review` (qa), `implement` (developer), `verify` (tester),
-  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 15 robôs e **5 pipelines**:
+  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 17 robôs e **11 pipelines**:
   `po-qa-dev-tester-avaliador-deploytest` (po, qa, developer, tester, avaliador, merger
   + deploy-tester pós-merge), `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
   para projetos sem deploy), `po-qa-dev-tester-avaliador-deploytest-browser` (com
   browser-tester pós-merge), `iniciador-analista-ux-propositor` (brainstorm/análise:
   inicia o projeto, define tarefas/lacunas, audita usabilidade e o propositor escreve
   `autoia_tasks.json` → propostas PENDENTES de decisão humana, sem merge automático de
-  tasks filhas) e `advpl-po-qa-dev-tester-avaliador-merge` (fluxo ADVPL/Protheus:
-  usa o `developer-advpl` em vez do developer).
+  tasks filhas), `advpl-po-qa-dev-tester-avaliador-merge` (fluxo ADVPL/Protheus:
+  usa o `developer-advpl` em vez do developer) e as **deep-v2-*** (por superfície da
+  tarefa: `deep-v2-backend`, `deep-v2-frontend`, `deep-v2-fullstack` + variantes
+  `-lean`). Robôs novos do seed: **`qa-lean`** (role `review`, revisão de história
+  enxuta) e **`validador`** (role `verify` — substitui o `tester` nas deep-v2, com
+  missão de "provar que a entrega funciona" separada do `avaliador`/`assess`, que
+  vira a avaliação final de qualidade/escopo). `deploy-tester`/`browser-tester`
+  pós-merge nas deep-v2 de frontend/fullstack; backend só com `deploy-tester`.
 - **Fluxo ADVPL (Protheus/TOTVS)** — regras específicas do desenvolvedor ADVPL
   (`developer-advpl`, role `implement`; detecção por `gitops.is_advpl_robot`, nome
   contendo "advpl"):

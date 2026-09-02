@@ -58,6 +58,24 @@ ambiguidade. Se a história estiver boa, veredicto READY. Se precisar de ajustes
 veredicto NEEDS_WORK com o que o PO deve corrigir.""",
     ),
     (
+        "qa-lean",
+        "review",
+        """Você é o robô QA LEAN de um pipeline automatizado — a revisão de história ENXUTA,
+para fluxos rápidos. Sua missão é uma checagem rápida da história (descrição +
+critérios de aceite) escrita pelo PO, antes do desenvolvimento.
+
+Título: {task_title}
+
+Foque no essencial para destravar a implementação sem burocracia:
+1. CLAREZA: a história descreve o que entregar e o escopo mínimo, sem ambiguidade que
+   trave o desenvolvedor.
+2. CRITÉRIOS TESTÁVEIS: cada critério de aceite é verificável (por humano ou teste).
+
+NÃO invente requisitos, não exija matrizes/planos de teste nem rode código: a revisão
+aqui é lean. Se a história estiver boa o suficiente para implementar, veredicto READY.
+Se precisar de ajustes, veredicto NEEDS_WORK com o que o PO deve corrigir.""",
+    ),
+    (
         "developer",
         "implement",
         """Você é o robô DESENVOLVEDOR de um pipeline automatizado.
@@ -108,6 +126,23 @@ Descrição: {task_description}
 Rode a suíte de testes do projeto e valide cada critério de aceite da história contra o
 código implementado. Só emita o veredicto depois de verificar de verdade, com o
 resultado real dos comandos no SUMMARY.""",
+    ),
+    (
+        "validador",
+        "verify",
+        """Você é o robô VALIDADOR de um pipeline automatizado — a prova de que a entrega
+FUNCIONA de verdade, separada da avaliação final de qualidade.
+
+Título: {task_title}
+Descrição: {task_description}
+
+Sua missão é VALIDAR o que o desenvolvedor entregou: rode a suíte de testes do projeto e
+valide CADA critério de aceite da história contra o código implementado, com resultado
+REAL (não suposições). Se a tarefa envolver execução da aplicação (CLI, API ou UI),
+execute e confirme o comportamento de ponta a ponta. Documente no SUMMARY a evidência
+concreta de cada validação (comandos rodados + saída). Só emita o veredicto depois de
+verificar de verdade — se algo não funcionar, emita FAIL com o que precisa ser
+corrigido.""",
     ),
     (
         "avaliador",
@@ -359,6 +394,87 @@ SEED_PIPELINES = [
             ("analista", False),
             ("auditor-ux", False),
             ("propositor", False),
+        ],
+    ),
+    # Pipelines deep-v2 (por superfície da tarefa): QA rigoroso (qa) por padrão +
+    # variantes -lean (qa-lean), validador (role verify) substitui o tester e o
+    # avaliador/assess vira a avaliação final de qualidade. Superfícies:
+    # - deep-v2-backend: sem browser (validação pós-merge só com deploy-tester).
+    # - deep-v2-frontend / deep-v2-fullstack: com browser-tester pós-merge.
+    (
+        "deep-v2-backend",
+        [
+            ("po", False),
+            ("qa", False),
+            ("developer", False),
+            ("validador", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),  # pós-merge: valida deploy na default integrada
+        ],
+    ),
+    (
+        "deep-v2-frontend",
+        [
+            ("po", False),
+            ("qa", False),
+            ("developer", False),
+            ("validador", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),   # pós-merge: valida deploy na default integrada
+            ("browser-tester", True),  # pós-merge: smoke test visual com navegador real
+        ],
+    ),
+    (
+        "deep-v2-fullstack",
+        [
+            ("po", False),
+            ("qa", False),
+            ("developer", False),
+            ("validador", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),   # pós-merge: valida deploy na default integrada
+            ("browser-tester", True),  # pós-merge: smoke test visual com navegador real
+        ],
+    ),
+    (
+        "deep-v2-backend-lean",
+        [
+            ("po", False),
+            ("qa-lean", False),
+            ("developer", False),
+            ("validador", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),
+        ],
+    ),
+    (
+        "deep-v2-frontend-lean",
+        [
+            ("po", False),
+            ("qa-lean", False),
+            ("developer", False),
+            ("validador", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),
+            ("browser-tester", True),
+        ],
+    ),
+    (
+        "deep-v2-fullstack-lean",
+        [
+            ("po", False),
+            ("qa-lean", False),
+            ("developer", False),
+            ("validador", False),
+            ("avaliador", False),
+            ("merger", False),
+            ("deploy-tester", True),
+            ("browser-tester", True),
         ],
     ),
 ]
