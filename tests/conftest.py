@@ -95,6 +95,9 @@ def fake_kimi(tmp_path):
                 "    prompt = sys.argv[sys.argv.index('-p') + 1]\n"
                 "elif len(sys.argv) > 1 and sys.argv[1] == 'run':\n"
                 "    prompt = sys.argv[2]\n"
+                "elif len(sys.argv) > 1 and sys.argv[1] == 'exec':\n"
+                "    # codex exec/opencode run: prompt é o primeiro posicional.\n"
+                "    prompt = sys.argv[2]\n"
                 + rule
                 + "\nif v:\n    with open('autoia_verdict.txt', 'w') as f:\n        f.write(v)\n"
             )

@@ -168,7 +168,9 @@ def summarize_task(settings, session_factory, task_id: int) -> bool:
                 pass
             prompt = build_summary_prompt(task, timeline_text, subtasks, phases, project_info)
             log_path = os.path.join(eff.log_dir, f"summary_task_{task_id}.log")
-            model = None
+            # Modelo escolhido na task vale também para o resumo (precedência
+            # task > default do executor).
+            model = (task.model or "").strip() or None
             executor = task.executor
 
         outcome = _run_executor(

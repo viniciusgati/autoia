@@ -65,7 +65,7 @@ from ..models import (
 )
 from . import (
     arch_metric,
-    cmd_exec,
+    codex_exec,
     exec_common,
     gitops,
     handoff,
@@ -108,8 +108,8 @@ class EffectiveSettings:
     kimi_bin: str
     opencode_bin: str
     opencode_model: str
-    cmd_bin: str
-    cmd_model: str
+    codex_bin: str
+    codex_model: str
     log_dir: str
     workspace_dir: str
     branch_prefix: str
@@ -168,8 +168,8 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         kimi_bin=settings.kimi_bin,
         opencode_bin=settings.opencode_bin,
         opencode_model=settings.opencode_model,
-        cmd_bin=settings.cmd_bin,
-        cmd_model=settings.cmd_model,
+        codex_bin=settings.codex_bin,
+        codex_model=settings.codex_model,
         log_dir=settings.log_dir,
         branch_prefix=settings.branch_prefix,
         workspace_dir=settings.workspace_dir,
@@ -186,6 +186,19 @@ def _effective_step_mode(step: TaskStep, task: Task) -> str:
     if task.mode == TASK_MODE_MANUAL:
         return STEP_MODE_MANUAL
     return step.execution_mode or "auto"
+
+
+def _effective_model(task, robot=None) -> str | None:
+    """Modelo efetivo de uma execução: `task.model` (escolha na task/chamado) >
+    `robot.model` > None (default do executor). `""` é tratado como ausente."""
+    model = (task.model or "").strip()
+    if model:
+        return model
+    if robot is not None:
+        robot_model = (getattr(robot, "model", None) or "").strip()
+        if robot_model:
+            return robot_model
+    return None
 
 
 def _step_goal(step: TaskStep, task: Task) -> str:
@@ -887,7 +900,8 @@ def _run_executor(
     task_id: int | None = None,
     skills_dir: str | None = None,
 ):
-    """Executa a fase com o executor da task: `kimi` (kimi-code), `opencode` ou `cmd`.
+    """Executa a fase com o executor da task: `kimi` (kimi-code), `opencode` ou
+    `codex` (OpenAI Codex CLI).
 
     `repo_id` identifica o projeto no registro de subprocessos ativos e alimenta o
     watchdog de parada cooperativa (`stop_file`): se a API excluir o projeto
@@ -958,7 +972,7 @@ def _run_executor(
             # entrou como mount (regressão do builder é pega na hora).
             scan_cli = {
                 "opencode": eff.opencode_bin,
-                "cmd": eff.cmd_bin,
+                "codex": eff.codex_bin,
             }.get(executor, eff.kimi_bin)
             sandbox_scan = sandbox_mod.scan_secret_mounts(sandbox, cwd, eff.workspace_dir, scan_cli)
             if sandbox_scan:
@@ -1002,11 +1016,11 @@ def _run_executor(
                 extra_env=extra_env,
                 on_event=on_event,
             )
-        elif executor == "cmd":
-            outcome = cmd_exec.run_cmd(
+        elif executor == "codex":
+            outcome = codex_exec.run_codex(
                 prompt,
                 cwd=cwd,
-                cmd_bin=eff.cmd_bin,
+                codex_bin=eff.codex_bin,
                 log_path=log_path,
                 timeout=eff.run_timeout,
                 max_identical_calls=eff.max_identical_calls,
@@ -1020,7 +1034,7 @@ def _run_executor(
                 ),
                 no_progress_timeout=eff.no_progress_timeout,
                 resume_session_id=resume_session_id,
-                model=model or eff.cmd_model,
+                model=model or eff.codex_model or None,
                 repo_id=repo_id,
                 stop_file=stop_file,
                 task_stop_file=task_stop_file,
@@ -1283,7 +1297,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         prompt,
         cwd=checkout,
         log_path=log_path,
-        model=step.robot.model if step.robot else None,
+        model=_effective_model(task, step.robot),
         on_event=on_event,
         resume_session_id=resume_session_id,
         repo_id=repo.id,
@@ -1296,9 +1310,9 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         if step is None:
             return None
         # Captura a sessão (kimi: `session.resume_hint`; opencode: `sessionID`
-        # do JSONL) p/ retomar a MESMA conversa se a fase for re-executada após
-        # interrupção (timeout/stall).
-        if outcome.session_id and task.executor != "cmd":
+        # do JSONL; codex: `thread_id`) p/ retomar a MESMA conversa se a fase for
+        # re-executada após interrupção (timeout/stall).
+        if outcome.session_id:
             step.session_id = outcome.session_id
         # Observabilidade do sandbox desta execução (modo, contêiner, overhead de
         # startup medido como tempo até a primeira linha de saída quando possível).
@@ -2215,7 +2229,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             prompt,
             cwd=effective_cwd,
             log_path=log_path,
-            model=pm_robot.model if pm_robot else None,
+            model=_effective_model(task, pm_robot),
             on_event=None,
             kimi_cost_per_interaction=0.0,
             repo_id=task.repository_id,
@@ -2632,6 +2646,7 @@ def create_child_task(
         kind=kind,
         status="created",
         executor=parent.executor,
+        model=parent.model,
         budget_limit=target_repo.task_budget if target_repo.task_budget is not None else parent.budget_limit,
         parent_task_id=parent.id,
         # Tarefas geradas por spawn herdam o responsável da task pai (se definido).

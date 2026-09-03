@@ -633,7 +633,7 @@ export default function TaskDetail() {
         <div className="task-head-grid">
           <div>
             <span className="task-head-label">Executor</span>
-            <span>{task.executor === "opencode" ? "opencode" : task.executor === "cmd" ? "cmd (command-code)" : "kimi code"}</span>
+            <span>{task.executor === "codex" ? "codex" : task.executor === "opencode" ? "opencode" : "kimi code"}</span>
           </div>
           <div>
             <span className="task-head-label">Responsável</span>

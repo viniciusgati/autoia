@@ -1,6 +1,7 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api } from "../api";
+import ModelSelect from "../components/ModelSelect";
 import { TaskCardGrid } from "../components/TaskCard";
 import { usePolling } from "../lib/polling";
 import type { Epic, Pipeline, Project, TaskListItem } from "../types";
@@ -17,6 +18,7 @@ export default function RepoTasks() {
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("issue");
   const [executor, setExecutor] = useState("kimi");
+  const [model, setModel] = useState("");
   const [error, setError] = useState("");
   const [formError, setFormError] = useState("");
   const [creating, setCreating] = useState(false);
@@ -121,6 +123,7 @@ export default function RepoTasks() {
         description,
         kind,
         executor,
+        model: model || null,
         project_id: projectSel === "" ? null : Number(projectSel),
         epic_id: epicSel === "" ? null : Number(epicSel),
       });
@@ -163,12 +166,25 @@ export default function RepoTasks() {
           </div>
           <div className="form-field">
             <label className="form-label">Executor</label>
-            <select value={executor} onChange={(e) => setExecutor(e.target.value)}>
+            <select
+              value={executor}
+              onChange={(e) => {
+                const value = e.target.value;
+                setExecutor(value);
+                if (value !== "codex") setModel("");
+              }}
+            >
               <option value="kimi">kimi code</option>
               <option value="opencode">opencode</option>
-              <option value="cmd">cmd (command-code)</option>
+              <option value="codex">codex</option>
             </select>
           </div>
+          {executor === "codex" && (
+            <div className="form-field">
+              <label className="form-label">Modelo</label>
+              <ModelSelect value={model} onChange={setModel} />
+            </div>
+          )}
         </div>
         <div className="form-inline">
           <div className="form-field">

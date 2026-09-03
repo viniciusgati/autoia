@@ -38,7 +38,7 @@ from ..models import (
     Task,
     TaskStep,
 )
-from . import cmd_exec, exec_common, gitops, kimi_exec, opencode_exec
+from . import codex_exec, exec_common, gitops, kimi_exec, opencode_exec
 from .sandbox import (
     SANDBOX_OFF,
     SandboxConfig,
@@ -63,6 +63,19 @@ def _sub_extra_env(settings) -> dict[str, str]:
     return {"AUTOIA_HOST_SERVICES_BASE": base, "AUTOIA_SANDBOX": mode}
 
 
+def _task_effective_model(task, robot=None) -> str | None:
+    """Modelo efetivo de uma execução de subtarefa: `task.model` (escolha na
+    task) > `robot.model` > None (default do executor). `""` = ausente."""
+    model = (getattr(task, "model", None) or "").strip()
+    if model:
+        return model
+    if robot is not None:
+        robot_model = (getattr(robot, "model", None) or "").strip()
+        if robot_model:
+            return robot_model
+    return None
+
+
 def _run_subtask_executor(
     settings,
     executor: str,
@@ -75,9 +88,10 @@ def _run_subtask_executor(
     stop_file: str | None,
     task_stop_file: str | None,
     sandbox: SandboxConfig | None,
+    model: str | None = None,
     on_event,
 ):
-    """Dispatch do executor da task (kimi/opencode/cmd) para UMA execução de
+    """Dispatch do executor da task (kimi/opencode/codex) para UMA execução de
     subtarefa — espelha o `_run_executor` do runner, mas o ciclo de subtarefas
     gerencia o próprio lock_push/sandbox (por isso não reusa o runner)."""
     workspace_dir = getattr(settings, "workspace_dir", None)
@@ -115,7 +129,7 @@ def _run_subtask_executor(
             risky_patterns=settings.risky_patterns,
             checkout_path=checkout_path,
             whitelisted_hosts=settings.whitelisted_hosts,
-            model=settings.opencode_model,
+            model=model or settings.opencode_model,
             no_progress_timeout=settings.no_progress_timeout,
             repo_id=repo_id,
             stop_file=stop_file,
@@ -125,11 +139,11 @@ def _run_subtask_executor(
             extra_env=extra_env,
             on_event=on_event,
         )
-    if executor == "cmd":
-        return cmd_exec.run_cmd(
+    if executor == "codex":
+        return codex_exec.run_codex(
             prompt,
             cwd=cwd,
-            cmd_bin=settings.cmd_bin,
+            codex_bin=settings.codex_bin,
             log_path=log_path,
             timeout=settings.run_timeout,
             max_identical_calls=settings.max_identical_calls,
@@ -138,7 +152,7 @@ def _run_subtask_executor(
             whitelisted_hosts=settings.whitelisted_hosts,
             cost_per_interaction=settings.cost_per_interaction,
             no_progress_timeout=settings.no_progress_timeout,
-            model=settings.cmd_model,
+            model=model or settings.codex_model or None,
             repo_id=repo_id,
             stop_file=stop_file,
             task_stop_file=task_stop_file,
@@ -598,6 +612,7 @@ def _run_free_implement(
         )
         s.commit()
 
+    model = _task_effective_model(task, step_obj.robot)
     sandbox = _sub_sandbox(settings)
     try:
         gitops.lock_push(checkout)
@@ -615,6 +630,7 @@ def _run_free_implement(
             stop_file=stop_file,
             task_stop_file=task_stop_file,
             sandbox=sandbox,
+            model=model,
             on_event=on_event,
         )
     finally:
@@ -849,6 +865,7 @@ def _run_one_implement(
         )
         s.commit()
 
+    model = _task_effective_model(task, step_obj.robot)
     sandbox = _sub_sandbox(settings)
     try:
         gitops.lock_push(checkout)
@@ -864,6 +881,7 @@ def _run_one_implement(
             stop_file=stop_file,
             task_stop_file=task_stop_file,
             sandbox=sandbox,
+            model=model,
             on_event=on_event,
         )
     finally:
@@ -1066,6 +1084,11 @@ def _run_one_verify(
         st = s.get(SubTask, subtask.id)
         if st is None:
             return "subtarefa não encontrada"
+        # Modelo efetivo (task.model > robô do step): robot carregado DENTRO da
+        # sessão p/ não disparar lazy-load com a sessão fechada ou num step
+        # detached passado pelo chamador.
+        step_obj = s.get(TaskStep, step.id) if step is not None else None
+        robot = step_obj.robot if step_obj is not None else None
         # Parada cooperativa: se o projeto for excluído durante a execução da
         # subtarefa, o watchdog do executor mata o processo.
         repo_id = task.repository_id
@@ -1098,6 +1121,7 @@ def _run_one_verify(
         )
         s.commit()
 
+    model = _task_effective_model(task, robot)
     sandbox = _sub_sandbox(settings)
     try:
         gitops.lock_push(checkout)
@@ -1113,6 +1137,7 @@ def _run_one_verify(
             stop_file=stop_file,
             task_stop_file=task_stop_file,
             sandbox=sandbox,
+            model=model,
             on_event=on_event,
         )
     finally:

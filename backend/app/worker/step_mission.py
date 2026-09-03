@@ -111,7 +111,7 @@ def generate_mission(settings, session_factory, step_id: int, run: int) -> bool:
             prompt,
             cwd=checkout,
             log_path=log_path,
-            model=None,
+            model=(task.model or "").strip() or None,
             on_event=None,
             kimi_cost_per_interaction=0.0,
         )

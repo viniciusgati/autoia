@@ -482,7 +482,7 @@ def test_run_executor_fail_closed_varredura_de_segredos(tmp_path):
         max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
         cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
         whitelisted_hosts=[], db_rule="", kimi_bin=str(fake), opencode_bin="opencode", opencode_model="deepseek/deepseek-v4-flash",
-        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
 
@@ -512,7 +512,7 @@ def test_run_executor_varredura_avisa_mas_roda(tmp_path):
         max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
         cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
         whitelisted_hosts=[], db_rule="", kimi_bin=fake, opencode_bin="opencode", opencode_model="deepseek/deepseek-v4-flash",
-        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
 
@@ -891,7 +891,7 @@ def test_docker_sandbox_fail_closed_sem_docker(tmp_path, monkeypatch):
         max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
         cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
         whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="opencode", opencode_model="deepseek/deepseek-v4-flash",
-        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
 
@@ -912,7 +912,7 @@ def test_docker_sandbox_fallback_direto_sem_fail_closed(tmp_path, monkeypatch):
         max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
         cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
         whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="opencode", opencode_model="deepseek/deepseek-v4-flash",
-        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
 
@@ -947,7 +947,7 @@ def test_subtask_executor_fallback_direto_sem_fail_closed(tmp_path, monkeypatch)
         cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
         whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="opencode",
         opencode_model="deepseek/deepseek-v4-flash",
-        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
         keep_workspaces=True,
@@ -983,7 +983,7 @@ def test_subtask_executor_fail_closed_aborta_sem_docker(tmp_path, monkeypatch):
         cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
         whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="opencode",
         opencode_model="deepseek/deepseek-v4-flash",
-        cmd_bin="cmd", cmd_model="claude-sonnet-4-6",
+        codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
         keep_workspaces=True,

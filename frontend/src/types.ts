@@ -210,6 +210,9 @@ export interface TimelineEvent {
   step_role: string | null;
 }
 
+/** Executores das fases (CLIs de robô LLM): kimi-code, opencode ou codex. */
+export type Executor = "kimi" | "opencode" | "codex";
+
 export interface Task {
   id: number;
   repository_id: number;
@@ -219,6 +222,8 @@ export interface Task {
   kind: string;
   status: string;
   executor: string;
+  /** Modelo do executor escolhido na task (null = herda robô/default do executor). */
+  model: string | null;
   current_step: number;
   branch: string | null;
   acceptance_criteria: string | null;
@@ -281,6 +286,7 @@ export interface TaskListItem {
   kind: string;
   status: string;
   executor: string;
+  model: string | null;
   current_step: number;
   budget_limit: number;
   cost_spent: number;
@@ -542,6 +548,8 @@ export interface Chamado {
   workflow_status: string;
   status: string;
   executor: string;
+  /** Modelo do executor escolhido no chamado (null = default do executor). */
+  model: string | null;
   budget_limit: number;
   cost_spent: number;
   error: string | null;

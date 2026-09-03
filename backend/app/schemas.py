@@ -300,7 +300,10 @@ class TaskCreate(BaseModel):
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
     kind: Literal["issue", "bug", "feature", "chore"] = "issue"
-    executor: Literal["kimi", "opencode", "cmd"] = "kimi"
+    executor: Literal["kimi", "opencode", "codex"] = "kimi"
+    # Modelo do executor (precedência: task > Robot.model > default do executor).
+    # Vazio/null = não passa `--model` (codex usa o config dele).
+    model: str | None = Field(default=None, max_length=200)
     budget_limit: float | None = Field(default=None, gt=0)
     subtasks: list[SubTaskIn] = []
     # Associação organizacional Projeto > Épico (0..1, opcional). O épico deriva o
@@ -418,6 +421,7 @@ class TaskListItem(BaseModel):
     kind: str
     status: str
     executor: str = "kimi"
+    model: str | None = None
     current_step: int
     budget_limit: float
     cost_spent: float
@@ -445,6 +449,7 @@ class TaskOut(BaseModel):
     kind: str
     status: str
     executor: str = "kimi"
+    model: str | None = None
     current_step: int
     branch: str | None
     acceptance_criteria: str | None
@@ -705,9 +710,9 @@ class ApproveStepRequest(BaseModel):
 class TaskUpdateRequest(BaseModel):
     """Edição humana da história (descrição/critérios) — permitida em `created` e
     `waiting_approval`. `details` (detalhes da implementação), a associação
-    Projeto > Épico (`project_id`/`epic_id`) e o `executor` das fases são
-    permitidos em qualquer status (o executor só não pode mudar com uma fase em
-    execução real).
+    Projeto > Épico (`project_id`/`epic_id`), o `executor` e o `model` das fases
+    são permitidos em qualquer status (executor/modelo só não mudam com uma fase
+    em execução real).
 
     A associação distingue **campo ausente** (via `model_fields_set` — não altera)
     de **`null` explícito** (remove): `project_id: null` remove projeto e épico;
@@ -719,9 +724,21 @@ class TaskUpdateRequest(BaseModel):
     details: str | None = None
     project_id: int | None = None
     epic_id: int | None = None
-    executor: str | None = Field(default=None, pattern="^(kimi|opencode|cmd)$")
+    executor: str | None = Field(default=None, pattern="^(kimi|opencode|codex)$")
+    # Modelo do executor da task (""/null = herda Robot.model / default do executor).
+    model: str | None = Field(default=None, max_length=200)
     # Modo de execução (auto | manual): alternável em runtime, em qualquer status.
     mode: str | None = Field(default=None, pattern="^(auto|manual)$")
+
+
+# ---------- Modelos de executor ----------
+
+class CodexModelsOut(BaseModel):
+    """Modelos disponíveis para o executor codex (populam o dropdown da UI)."""
+
+    models: list[str] = []
+    # Fonte da lista: "cli" (`codex debug models`) ou "config" (AUTOIA_CODEX_MODELS).
+    source: str = "config"
 
 
 # ---------- Eventos ----------
@@ -927,7 +944,9 @@ class ChamadoCreate(BaseModel):
     epic_id: int | None = None
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
-    executor: str = Field(default="kimi", pattern="^(kimi|opencode|cmd)$")
+    executor: str = Field(default="kimi", pattern="^(kimi|opencode|codex)$")
+    # Modelo do executor do chamado (""/null = default do executor).
+    model: str | None = Field(default=None, max_length=200)
     budget_limit: float | None = None
     initial_stage_type_id: int | None = None
 
@@ -937,7 +956,8 @@ class ChamadoUpdate(BaseModel):
     description: str | None = None
     project_id: int | None = None
     epic_id: int | None = None
-    executor: str | None = Field(default=None, pattern="^(kimi|opencode|cmd)$")
+    executor: str | None = Field(default=None, pattern="^(kimi|opencode|codex)$")
+    model: str | None = Field(default=None, max_length=200)
 
 
 class ToolInfoOut(BaseModel):
@@ -991,6 +1011,7 @@ class ChamadoOut(BaseModel):
     workflow_status: str = ""
     status: str = "aberto"
     executor: str = "kimi"
+    model: str | None = None
     budget_limit: float = 10.0
     cost_spent: float = 0.0
     error: str | None = None

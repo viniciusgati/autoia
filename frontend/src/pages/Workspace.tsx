@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import DiffView from "../components/DiffView";
+import ModelSelect from "../components/ModelSelect";
 import ResponsavelControl from "../components/ResponsavelControl";
 import { useAdaptivePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
@@ -708,7 +709,7 @@ export default function Workspace() {
     ? "fase em execução — troque o executor quando ela terminar"
     : !canAct
       ? MSG_SEM_PERMISSAO
-      : "CLI das próximas fases e decisões de PM (kimi code ou opencode)";
+      : "CLI das próximas fases e decisões de PM (kimi code, opencode ou codex)";
 
   const modeTitle = !canAct
     ? MSG_SEM_PERMISSAO
@@ -858,17 +859,34 @@ export default function Workspace() {
                 <select
                   value={task.executor}
                   disabled={executorDisabled}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const value = e.target.value as "kimi" | "opencode" | "codex";
                     act(() =>
-                      api.updateTaskStory(taskId, { executor: e.target.value as "kimi" | "opencode" | "cmd" }),
-                    )
-                  }
+                      api.updateTaskStory(taskId, {
+                        executor: value,
+                        // Modelo só faz sentido no codex: trocar de executor limpa.
+                        model: value === "codex" ? task.model ?? null : null,
+                      }),
+                    );
+                  }}
                 >
                   <option value="kimi">kimi code</option>
                   <option value="opencode">opencode</option>
-                  <option value="cmd">cmd (command-code)</option>
+                  <option value="codex">codex</option>
                 </select>
               </label>
+              {task.executor === "codex" && (
+                <label className="ws-executor" title="modelo do codex (vazio = padrão do codex)">
+                  modelo:
+                  <ModelSelect
+                    value={task.model ?? ""}
+                    disabled={executorDisabled}
+                    onChange={(value) =>
+                      act(() => api.updateTaskStory(taskId, { model: value || null }))
+                    }
+                  />
+                </label>
+              )}
               <label className="ws-executor" title={modeTitle}>
                 modo:
                 <select

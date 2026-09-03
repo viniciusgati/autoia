@@ -229,6 +229,7 @@ export const api = {
     description: string;
     kind: string;
     executor?: string;
+    model?: string | null;
     budget_limit?: number;
     project_id?: number | null;
     epic_id?: number | null;
@@ -295,7 +296,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ position, note }),
     }),
-  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null; executor?: "kimi" | "opencode" | "cmd"; mode?: "auto" | "manual" }) =>
+  updateTaskStory: (taskId: number, data: { description?: string; acceptance_criteria?: string | null; details?: string | null; project_id?: number | null; epic_id?: number | null; executor?: "kimi" | "opencode" | "codex"; model?: string | null; mode?: "auto" | "manual" }) =>
     request<Task>(`/api/tasks/${taskId}`, {
       method: "PATCH",
       body: JSON.stringify(data),
@@ -445,9 +446,9 @@ export const api = {
     return request<Chamado[]>(`/api/chamados${qs}`, { signal });
   },
   getChamado: (id: number, signal?: AbortSignal) => request<Chamado>(`/api/chamados/${id}`, { signal }),
-  createChamado: (data: { repository_id: number; project_id?: number | null; epic_id?: number | null; title: string; description?: string; executor?: string; budget_limit?: number }) =>
+  createChamado: (data: { repository_id: number; project_id?: number | null; epic_id?: number | null; title: string; description?: string; executor?: string; model?: string | null; budget_limit?: number }) =>
     request<Chamado>("/api/chamados", { method: "POST", body: JSON.stringify(data) }),
-  updateChamado: (id: number, data: Partial<Pick<Chamado, "title" | "description" | "executor" | "project_id" | "epic_id">>) =>
+  updateChamado: (id: number, data: Partial<Pick<Chamado, "title" | "description" | "executor" | "model" | "project_id" | "epic_id">>) =>
     request<Chamado>(`/api/chamados/${id}`, { method: "PATCH", body: JSON.stringify(data) }),
   deleteChamado: (id: number) => request<void>(`/api/chamados/${id}`, { method: "DELETE" }),
   getChamadoWorkspace: (id: number, signal?: AbortSignal) =>
@@ -475,4 +476,22 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ targets }),
     }),
+  // Modelos disponíveis para o executor codex (dropdown; fonte: `codex debug
+  // models`, com fallback na lista configurável do backend).
+  codexModels: () => request<{ models: string[]; source: string }>("/api/system/codex/models"),
 };
+
+// Cache curto em memória da lista de modelos do codex (vários seletores na UI).
+let _codexModelsCache: string[] | null = null;
+
+/** Lista de modelos do codex com cache em memória; vazio em erro/indisponível. */
+export async function getCodexModels(): Promise<string[]> {
+  if (_codexModelsCache !== null) return _codexModelsCache;
+  try {
+    const data = await api.codexModels();
+    _codexModelsCache = data.models;
+  } catch {
+    _codexModelsCache = [];
+  }
+  return _codexModelsCache;
+}

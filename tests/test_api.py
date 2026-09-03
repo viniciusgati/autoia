@@ -434,24 +434,20 @@ def test_worker_opencode_executor_runs_pipeline(settings, bare_repo, fake_kimi):
         assert t.cost_spent > 0
 
 
-CMD_LINES = [
-    {"type": "event", "event": {"type": "tool_running", "toolName": "bash", "description": "roda ls"}},
-    {"type": "event", "event": {"type": "tool_running", "toolName": "read", "description": "le arquivo"}},
-    {
-        "type": "result",
-        "subtype": "success",
-        "sessionId": "ses_cmd_1",
-        "stopReason": "end_turn",
-        "usage": {"input_tokens": 20, "output_tokens": 10},
-        "finalText": "tarefa concluída com sucesso",
-    },
+CODEX_LINES = [
+    {"type": "thread.started", "thread_id": "thr_codex_1"},
+    {"type": "turn.started"},
+    {"type": "item.started", "item": {"id": "item_0", "type": "command_execution", "command": "bash -lc ls", "status": "in_progress"}},
+    {"type": "item.completed", "item": {"id": "item_0", "type": "command_execution", "command": "bash -lc ls", "aggregated_output": "ok", "exit_code": 0, "status": "completed"}},
+    {"type": "item.completed", "item": {"id": "item_1", "type": "agent_message", "text": "tarefa concluída com sucesso"}},
+    {"type": "turn.completed", "usage": {"input_tokens": 20, "output_tokens": 10, "cached_input_tokens": 0}},
 ]
 
 
-def test_worker_cmd_executor_runs_pipeline(settings, bare_repo, fake_kimi):
-    """Task com executor=cmd (Command Code) roda todo o pipeline via cmd CLI fake,
-    com tool_running (nome+descrição) e frame result final com sessionId/texto."""
-    settings.cmd_bin = fake_kimi(CMD_LINES, verdict="ready_pass")
+def test_worker_codex_executor_runs_pipeline(settings, bare_repo, fake_kimi):
+    """Task com executor=codex (OpenAI Codex CLI) roda todo o pipeline via codex
+    CLI fake, com tool calls, texto final e custo estimado por interação."""
+    settings.codex_bin = fake_kimi(CODEX_LINES, verdict="ready_pass")
     settings.task_budget = 100.0
     from app.db import make_engine, make_session_factory
 
@@ -466,13 +462,13 @@ def test_worker_cmd_executor_runs_pipeline(settings, bare_repo, fake_kimi):
         json={
             "repository_id": 1,
             "pipeline_id": 1,
-            "title": "t-cmd",
+            "title": "t-codex",
             "description": "d",
             "kind": "feature",
-            "executor": "cmd",
+            "executor": "codex",
         },
     ).json()
-    assert task["executor"] == "cmd"
+    assert task["executor"] == "codex"
 
     client.post(f"/api/tasks/{task['id']}/start")
 
@@ -486,11 +482,64 @@ def test_worker_cmd_executor_runs_pipeline(settings, bare_repo, fake_kimi):
         t = s.get(Task, task["id"])
         assert t.status == "done"
         assert all(st.status == "done" for st in t.steps)
-        # eventos do cmd registrados (tool_call resumido + system com o result)
+        # eventos do codex registrados (tool_call/tool_result + system com usage)
         kinds = {e.kind for st in t.steps for e in st.events}
         assert "tool_call" in kinds
+        assert "tool_result" in kinds
         assert "system" in kinds
         assert t.cost_spent > 0
+
+
+def test_task_model_field_persists_and_flows_to_codex(settings, bare_repo, fake_kimi, monkeypatch):
+    """O modelo escolhido na task persiste e é repassado ao codex (dispatch do
+    runner envia `model=task.model` — precedência task > robô > default)."""
+    settings.task_budget = 100.0
+    settings.codex_bin = fake_kimi(CODEX_LINES, verdict="ready_pass")
+    from app.worker import runner as runner_mod
+
+    captured = {}
+    real_run_codex = runner_mod.codex_exec.run_codex
+
+    def spy_run_codex(prompt, **kwargs):
+        captured["model"] = kwargs.get("model")
+        return real_run_codex(prompt, **kwargs)
+
+    monkeypatch.setattr(runner_mod.codex_exec, "run_codex", spy_run_codex)
+
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = client.post(
+        "/api/tasks",
+        json={
+            "repository_id": 1,
+            "pipeline_id": 1,
+            "title": "t-model",
+            "description": "d",
+            "kind": "feature",
+            "executor": "codex",
+            "model": "gpt-5.6-luna",
+        },
+    ).json()
+    assert task["model"] == "gpt-5.6-luna"
+
+    client.post(f"/api/tasks/{task['id']}/start")
+    for _ in range(PIPELINE_STEPS + 2):
+        claimed = runner.claim_next(session_factory)
+        if claimed is None:
+            break
+        runner.execute_step(settings, session_factory, claimed)
+
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        assert t.status == "done"
+    # pelo menos uma execução de fase recebeu o modelo escolhido na task
+    assert captured.get("model") == "gpt-5.6-luna"
 
 
 def test_worker_opencode_resume_session_on_reexecution(settings, bare_repo, tmp_path):

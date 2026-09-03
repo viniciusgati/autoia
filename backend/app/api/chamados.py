@@ -116,6 +116,7 @@ def _chamado_out(c: Chamado) -> ChamadoOut:
         workflow_status=c.workflow_status,
         status=c.status,
         executor=c.executor,
+        model=c.model,
         budget_limit=c.budget_limit,
         cost_spent=c.cost_spent,
         error=c.error,
@@ -495,6 +496,7 @@ def create_chamado(
         title=data.title,
         description=data.description,
         executor=data.executor,
+        model=(data.model or "").strip() or None,
         budget_limit=data.budget_limit if data.budget_limit is not None else settings.task_budget,
         workflow_status=initial.name,
         status=CHAMADO_EM_ANDAMENTO,
@@ -550,6 +552,8 @@ def update_chamado(
         chamado.description = data.description
     if data.executor is not None:
         chamado.executor = data.executor
+    if "model" in data.model_fields_set:
+        chamado.model = (data.model or "").strip() or None
     if data.project_id is not None:
         project = _project_or_404(session, data.project_id)
         if project.repository_id != chamado.repository_id:

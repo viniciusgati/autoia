@@ -141,6 +141,7 @@ def _task_list_item(task: Task) -> TaskListItem:
         kind=task.kind,
         status=task.status,
         executor=task.executor,
+        model=task.model,
         current_step=task.current_step,
         budget_limit=task.budget_limit,
         cost_spent=task.cost_spent,
@@ -310,6 +311,7 @@ def create_task(
         description=data.description,
         kind=data.kind,
         executor=data.executor,
+        model=(data.model or "").strip() or None,
         budget_limit=data.budget_limit if data.budget_limit is not None else settings.task_budget,
         # Default = criador; com auth OFF (user=None) fica NULL até reatribuição.
         responsible_id=user.id if user else None,
@@ -1044,16 +1046,17 @@ def update_task(
     handoff das próximas fases, diferenciado da solicitação original. A associação
     Projeto > Épico (`project_id`/`epic_id`) também é editável em qualquer status:
     são metadados organizacionais que não alteram a história nem a execução. O
-    `executor` (kimi/opencode) também é editável em qualquer status, exceto com
-    uma fase em execução real: o runner lê `task.executor` a cada fase e na
-    decisão do PM, então a troca vale para as próximas execuções (fases já
-    concluídas não são re-executadas).
+    `executor` (kimi/opencode/codex) e o `model` (modelo do executor) também são
+    editáveis em qualquer status, exceto com uma fase em execução real: o runner
+    lê `task.executor`/`task.model` a cada fase e na decisão do PM, então a troca
+    vale para as próximas execuções (fases já concluídas não são re-executadas).
     """
-    # Executor das fases: o runner já lê `task.executor` por fase e no PM, então a
-    # troca entre execuções é segura. Proibida apenas com uma fase em execução real
-    # (seria ignorada até o fim da fase e confundiria o operador) — vale para
-    # qualquer status, antes da restrição de edição da história.
-    if "executor" in data.model_fields_set:
+    # Executor/modelo das fases: o runner já lê `task.executor`/`task.model` por
+    # fase e no PM, então a troca entre execuções é segura. Proibida apenas com uma
+    # fase em execução real (seria ignorada até o fim da fase e confundiria o
+    # operador) — vale para qualquer status, antes da restrição de edição da
+    # história. O modelo vazio/null = herda Robot.model / default do executor.
+    if "executor" in data.model_fields_set or "model" in data.model_fields_set:
         task = _get_task_or_404(session, task_id)
         _ensure_can_act(session, task, user)
         if any(st.status == STEP_RUNNING for st in _active_steps(task)):
@@ -1064,7 +1067,9 @@ def update_task(
             )
         if data.executor is not None:
             task.executor = data.executor
-            session.commit()
+        if "model" in data.model_fields_set:
+            task.model = (data.model or "").strip() or None
+        session.commit()
         return _get_task_or_404(session, task_id)
     # Modo de execução (auto | manual): alternável em runtime, em qualquer status.
     if "mode" in data.model_fields_set and data.mode is not None:

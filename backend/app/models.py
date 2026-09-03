@@ -296,8 +296,12 @@ class Task(Base):
     pending_action: Mapped[str | None] = mapped_column(String(50), nullable=True)
     # Estado da ação de chat: idle | queued | running (espelho do ChamadoStage).
     chat_status: Mapped[str] = mapped_column(String(20), default=CHAT_STATUS_IDLE)
-    # Executor das fases: "kimi" (kimi-code CLI) ou "opencode" (opencode CLI).
+    # Executor das fases: "kimi" (kimi-code CLI), "opencode" (opencode CLI) ou
+    # "codex" (OpenAI Codex CLI).
     executor: Mapped[str] = mapped_column(String(20), default="kimi")
+    # Modelo do executor escolhido na task (precedência: task > Robot.model >
+    # default do executor). Null = herda.
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     current_step: Mapped[int] = mapped_column(Integer, default=0)
     branch: Mapped[str | None] = mapped_column(String(300), nullable=True)
     acceptance_criteria: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -774,6 +778,8 @@ class Chamado(Base):
     workflow_status: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[str] = mapped_column(String(30), default=CHAMADO_ABERTO)
     executor: Mapped[str] = mapped_column(String(20), default="kimi")
+    # Modelo do executor escolhido no chamado (null = default do executor).
+    model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     budget_limit: Mapped[float] = mapped_column(Float, default=10.0)
     cost_spent: Mapped[float] = mapped_column(Float, default=0.0)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

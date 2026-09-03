@@ -1,5 +1,6 @@
 import { ChangeEvent, FormEvent, useEffect, useState } from "react";
 import { api } from "../api";
+import ModelSelect from "../components/ModelSelect";
 import { TaskCardGrid } from "../components/TaskCard";
 import type { Pipeline, Repository, TaskListItem } from "../types";
 
@@ -13,6 +14,7 @@ export default function Tasks() {
   const [description, setDescription] = useState("");
   const [kind, setKind] = useState("issue");
   const [executor, setExecutor] = useState("kimi");
+  const [model, setModel] = useState("");
   const [error, setError] = useState("");
   // Import de descrição a partir de arquivo (txt/md): erro inline abaixo do
   // campo de arquivo e input desabilitado com indicador durante a requisição.
@@ -42,6 +44,7 @@ export default function Tasks() {
         description,
         kind,
         executor,
+        model: model || null,
       });
       setTitle("");
       setDescription("");
@@ -106,12 +109,25 @@ export default function Tasks() {
           </div>
           <div className="form-field">
             <label className="form-label">Executor</label>
-            <select value={executor} onChange={(e) => setExecutor(e.target.value)}>
+            <select
+              value={executor}
+              onChange={(e) => {
+                const value = e.target.value;
+                setExecutor(value);
+                if (value !== "codex") setModel("");
+              }}
+            >
               <option value="kimi">kimi code</option>
               <option value="opencode">opencode</option>
-              <option value="cmd">cmd (command-code)</option>
+              <option value="codex">codex</option>
             </select>
           </div>
+          {executor === "codex" && (
+            <div className="form-field">
+              <label className="form-label">Modelo</label>
+              <ModelSelect value={model} onChange={setModel} />
+            </div>
+          )}
         </div>
         <div className="form-field">
           <label className="form-label">Título da tarefa</label>

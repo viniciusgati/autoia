@@ -57,6 +57,7 @@ from . import gitops, handoff, project
 from .runner import (
     VERDICT_EXPECTED,
     _effective,
+    _effective_model,
     _materialize_skills,
     _repo_context,
     _run_executor,
@@ -382,7 +383,7 @@ def _run_dispatch(settings, eff, session_factory, task_id: int, checkout: str, b
         executor = task.executor
         repo_id = repo.id
         robot = _dispatcher_robot(s)
-        model = robot.model if robot else None
+        model = _effective_model(task, robot)
     log_path = os.path.join(eff.log_dir, f"chat_dispatch_{task_id}.log")
     state = {"seq": _msg_count(session_factory, task_id), "cost": 0.0}
 
@@ -530,7 +531,7 @@ def _run_agent(settings, eff, session_factory, task_id: int, run_id: int, checko
         )
         executor = task.executor
         repo_id = repo.id
-        model = robot.model
+        model = _effective_model(task, robot)
     log_path = os.path.join(eff.log_dir, f"chat_agent_{task_id}_{run_id}.log")
     state = {"seq": _msg_count(session_factory, task_id), "cost": 0.0}
 

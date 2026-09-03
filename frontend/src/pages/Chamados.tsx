@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
+import ModelSelect from "../components/ModelSelect";
 import { usePolling } from "../lib/polling";
 import type { Chamado, Epic, Project, Repository } from "../types";
 
@@ -44,6 +45,7 @@ export default function Chamados() {
     project_id: "",
     epic_id: "",
     executor: "kimi",
+    model: "",
   });
 
   const load = async (signal?: AbortSignal) => {
@@ -88,8 +90,9 @@ export default function Chamados() {
         project_id: form.project_id === "" ? null : Number(form.project_id),
         epic_id: form.epic_id === "" ? null : Number(form.epic_id),
         executor: form.executor,
+        model: form.model || null,
       });
-      setForm({ title: "", description: "", project_id: "", epic_id: "", executor: "kimi" });
+      setForm({ title: "", description: "", project_id: "", epic_id: "", executor: "kimi", model: "" });
       setCreating(false);
       void load();
     } catch (e) {
@@ -167,12 +170,30 @@ export default function Chamados() {
               </div>
               <div className="form-field">
                 <label className="form-label">Executor</label>
-                <select value={form.executor} onChange={(e) => setForm((f) => ({ ...f, executor: e.target.value }))}>
+                <select
+                  value={form.executor}
+                  onChange={(e) =>
+                    setForm((f) => ({
+                      ...f,
+                      executor: e.target.value,
+                      model: e.target.value === "codex" ? f.model : "",
+                    }))
+                  }
+                >
                   <option value="kimi">kimi</option>
                   <option value="opencode">opencode</option>
-                  <option value="cmd">cmd</option>
+                  <option value="codex">codex</option>
                 </select>
               </div>
+              {form.executor === "codex" && (
+                <div className="form-field">
+                  <label className="form-label">Modelo</label>
+                  <ModelSelect
+                    value={form.model}
+                    onChange={(model) => setForm((f) => ({ ...f, model }))}
+                  />
+                </div>
+              )}
             </div>
             {formError && <p className="form-error">{formError}</p>}
             <div className="form-actions">

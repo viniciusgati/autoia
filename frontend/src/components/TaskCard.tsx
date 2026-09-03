@@ -116,7 +116,7 @@ export default function TaskCard({
           {task.responsible?.name ?? "Não atribuída"}
         </span>
         <span className="task-card-executor" title={`executor: ${task.executor}`}>
-          {task.executor === "opencode" ? "opencode" : task.executor === "cmd" ? "cmd" : "kimi"}
+          {task.executor === "codex" ? "codex" : task.executor === "opencode" ? "opencode" : "kimi"}
         </span>
         {hasTimestamps && (
           <span className="task-card-duration" title="tempo total de execução">

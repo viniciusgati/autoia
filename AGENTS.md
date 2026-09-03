@@ -21,7 +21,7 @@ chama APIs de LLM diretamente.
 | Worker | **síncrono, thread-based** (`subprocess`), um único processo |
 | Frontend | React 18 + Vite + TypeScript (estrito), react-router, `vite-plugin-pwa` |
 | Testes | pytest (`httpx` p/ TestClient) |
-| Execução dos robôs | por **task**: `kimi -p --output-format stream-json` (JSONL no stdout) **ou** `opencode run --format json` (campo `Task.executor`: `kimi` \| `opencode`, default `kimi`) |
+| Execução dos robôs | por **task**: `kimi -p --output-format stream-json` (JSONL no stdout) **ou** `opencode run --format json` **ou** `codex exec --json` (campo `Task.executor`: `kimi` \| `opencode` \| `codex`, default `kimi`) |
 
 ## Estrutura
 
@@ -46,6 +46,7 @@ backend/app/            # pacote `app`
     exec_common.py      # ExecOutcome + kill por grupo/watchdog (compartilhado)
     kimi_exec.py        # subprocess do kimi (stream-json): streaming JSONL, timeout, kill
     opencode_exec.py    # subprocess do opencode (--format json): tool_use, custo REAL
+    codex_exec.py       # subprocess do codex (exec --json): thread/turn/item, custo estimado
     sandbox.py          # sandbox de execução (docker/bwrap): mounts, flags, rede, proxy egress
     gitops.py           # clone/branch/commit/merge/push/checkout_default/diff + lock/unlock push
     project.py          # detecção de ecossistema + AGENTS.md gerado no checkout
@@ -186,12 +187,21 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 - **PM** (`pm`): decide `retry <pos>` / `continuar` (top-up de orçamento) / `escalar`
   (default seguro). Limite por task: `AUTOIA_MAX_PM_DECISIONS` (default 2). Decisão
   inválida/ausente → **escalar**.
-- **Executor por task**: `Task.executor` (`kimi` \| `opencode`, default `kimi`) define o
-  CLI que roda cada fase e o PM (escolhido na criação da tarefa; tasks filhas herdam).
-  `kimi_exec` estima custo por interação; `opencode_exec` usa o **custo real** do
-  `step_finish` do `opencode run --format json` (tool_use com nome+input+output).
-  Ambos compartilham `exec_common.ExecOutcome`; `_run_executor` no runner
-  faz o dispatch.
+- **Executor por task**: `Task.executor` (`kimi` \| `opencode` \| `codex`, default
+  `kimi`) define o CLI que roda cada fase e o PM (escolhido na criação da tarefa;
+  tasks filhas herdam). `kimi_exec` estima custo por interação; `opencode_exec`
+  usa o **custo real** do `step_finish` do `opencode run --format json` (tool_use
+  com nome+input+output); `codex_exec` roda `codex exec --json` (OpenAI Codex CLI;
+  eventos `thread.*`/`turn.*`/`item.*`, `--model` só com modelo explícito, retomada
+  por `codex exec resume <thread_id>`, custo estimado por interação). Todos
+  compartilham `exec_common.ExecOutcome`; `_run_executor` no runner faz o dispatch.
+- **Modelo por task/chamado**: `Task.model`/`Chamado.model` (colunas aditivas,
+  editáveis em runtime como o executor) escolhem o modelo do executor. Precedência:
+  **task > `Robot.model` > default do executor** (codex: `AUTOIA_CODEX_MODEL`,
+  vazio = o `model` do `~/.codex/config.toml`). O modelo da task vale também para
+  PM, resumos/missões e subtarefas. O seletor de modelo do frontend popula de
+  `GET /api/system/codex/models` (`codex debug models`; fallback
+  `AUTOIA_CODEX_MODELS`).
 - **Orçamento**: custo por interação (`AUTOIA_COST_PER_INTERACTION`, kimi) ou custo real
   (opencode); estourou → `needs_review`. `RunEvent.cost` acumula em `Task.cost_spent`.
 - **Watchdogs de execução** (em `kimi_exec`/`opencode_exec`): o guardrail de comandos

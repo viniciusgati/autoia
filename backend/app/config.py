@@ -130,16 +130,22 @@ class Settings:
     skills_dir: str = field(default_factory=lambda: _env("AUTOIA_SKILLS_DIR", "data/skills"))
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
-    cmd_bin: str = field(default_factory=lambda: _env("AUTOIA_CMD_BIN", "cmd"))
+    codex_bin: str = field(default_factory=lambda: _env("AUTOIA_CODEX_BIN", "codex"))
     # Modelo default do executor opencode (usado quando o robô não define `Robot.model`).
     opencode_model: str = field(
         default_factory=lambda: _env("AUTOIA_OPENCODE_MODEL", "deepseek/deepseek-v4-flash")
     )
-    # Modelo default do executor cmd (Command Code); usado quando o robô não define
-    # `Robot.model` (que é a fonte primária, como no opencode). Mesmo modelo do
-    # executor opencode — disponível nos planos Go+ (o claude-sonnet-4-6 exige Pro).
-    cmd_model: str = field(
-        default_factory=lambda: _env("AUTOIA_CMD_MODEL", "deepseek/deepseek-v4-flash")
+    # Modelo default do executor codex (OpenAI Codex CLI); usado quando nem a task/
+    # chamado nem o `Robot.model` definem modelo. Vazio = o codex usa o `model` do
+    # `~/.codex/config.toml` dele (nenhum `--model` é passado).
+    codex_model: str = field(default_factory=lambda: _env("AUTOIA_CODEX_MODEL", ""))
+    # Modelos oferecidos no seletor de modelo do frontend quando o `codex debug
+    # models` não responde (sem binário/erro). CSV na env AUTOIA_CODEX_MODELS.
+    codex_models: list[str] = field(
+        default_factory=lambda: _list(
+            "AUTOIA_CODEX_MODELS",
+            ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
+        )
     )
     run_timeout: int = field(default_factory=lambda: _int("AUTOIA_RUN_TIMEOUT", 1800))
     max_identical_calls: int = field(default_factory=lambda: _int("AUTOIA_MAX_IDENTICAL_CALLS", 6))

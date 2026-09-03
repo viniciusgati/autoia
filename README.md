@@ -146,6 +146,10 @@ acompanhar no **Resumo** (mobile) ou no **TaskDetail** (timeline com polling a c
 | `AUTOIA_WORKSPACE_DIR` | `data/workspaces` | checkouts dos repositórios |
 | `AUTOIA_LOG_DIR` | `data/logs` | transcripts brutos dos runs |
 | `AUTOIA_KIMI_BIN` | `kimi` | binário do kimi-code |
+| `AUTOIA_OPENCODE_BIN` | `opencode` | binário do opencode |
+| `AUTOIA_CODEX_BIN` | `codex` | binário do codex (OpenAI Codex CLI) |
+| `AUTOIA_CODEX_MODEL` | *(vazio)* | modelo default do codex (vazio = `~/.codex/config.toml`) |
+| `AUTOIA_CODEX_MODELS` | `gpt-5.6-luna,…` | modelos do seletor quando o `codex debug models` falha (lista JSON) |
 | `AUTOIA_RUN_TIMEOUT` | `1800` | timeout por fase (s) |
 | `AUTOIA_MAX_IDENTICAL_CALLS` | `3` | loop de calls idênticas → kill |
 | `AUTOIA_MAX_ATTEMPTS` | `3` | limite de retries por fase |

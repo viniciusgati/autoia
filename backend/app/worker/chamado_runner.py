@@ -292,6 +292,7 @@ def _run_tool(eff, session_factory, stage_id: int, checkout: str, tool_key: str)
             return {"ok": False, "error": "pedido do usuário vazio"}
         prompt = chamado_prompts.build_tool_prompt(chamado, stage, tool_key, text)
         executor = chamado.executor
+        model = (chamado.model or "").strip() or None
         repo_id = chamado.repository_id
         chamado_id = chamado.id
     log_path = os.path.join(eff.log_dir, f"chamado_{chamado_id}_{stage_id}.log")
@@ -331,6 +332,7 @@ def _run_tool(eff, session_factory, stage_id: int, checkout: str, tool_key: str)
         log_path=log_path,
         on_event=on_event,
         repo_id=repo_id,
+        model=model,
     )
     if outcome.aborted or outcome.exit_code != 0:
         return {
@@ -348,6 +350,7 @@ def _run_evaluation(eff, session_factory, stage_id: int, checkout: str) -> dict:
         allowed = list(stage.stage_type.close_options or [])
         prompt = chamado_prompts.build_evaluation_prompt(chamado, stage, allowed)
         executor = chamado.executor
+        model = (chamado.model or "").strip() or None
         repo_id = chamado.repository_id
         chamado_id = chamado.id
     log_path = os.path.join(eff.log_dir, f"chamado_{chamado_id}_{stage_id}.log")
@@ -387,6 +390,7 @@ def _run_evaluation(eff, session_factory, stage_id: int, checkout: str) -> dict:
         log_path=log_path,
         on_event=on_event,
         repo_id=repo_id,
+        model=model,
     )
     decision = verdicts.read_chamado_decision(checkout)
     verdicts.remove_chamado_decision(checkout)

@@ -922,13 +922,13 @@ class TestPostDeployFix:
 
 # ---------------------------------------------------------------------------
 # Dispatch do executor da task no ciclo de subtarefas (regressão: o ciclo
-# hardcodava kimi e ignorava executor=opencode/cmd nas subtarefas).
+# hardcodava kimi e ignorava executor=opencode/codex nas subtarefas).
 # ---------------------------------------------------------------------------
 
 
 def test_subtask_executor_dispatch(monkeypatch):
     """`_run_subtask_executor` roteia a execução de UMA subtarefa para o executor
-    da task (kimi/opencode/cmd) — não força kimi como antes."""
+    da task (kimi/opencode/codex) — não força kimi como antes."""
     import app.worker.subtask as st
 
     class FakeSettings:
@@ -939,8 +939,8 @@ def test_subtask_executor_dispatch(monkeypatch):
         kimi_bin = "kimi"
         opencode_bin = "opencode"
         opencode_model = "opencode-model"
-        cmd_bin = "cmd"
-        cmd_model = "cmd-model"
+        codex_bin = "codex"
+        codex_model = ""
         cost_per_interaction = 0.01
         no_progress_timeout = 0
         workspace_dir = None
@@ -956,13 +956,13 @@ def test_subtask_executor_dispatch(monkeypatch):
         calls["opencode"] = kwargs
         return "opencode-ok"
 
-    def fake_cmd(prompt, **kwargs):
-        calls["cmd"] = kwargs
-        return "cmd-ok"
+    def fake_codex(prompt, **kwargs):
+        calls["codex"] = kwargs
+        return "codex-ok"
 
     monkeypatch.setattr(st.kimi_exec, "run_kimi", fake_kimi)
     monkeypatch.setattr(st.opencode_exec, "run_opencode", fake_opencode)
-    monkeypatch.setattr(st.cmd_exec, "run_cmd", fake_cmd)
+    monkeypatch.setattr(st.codex_exec, "run_codex", fake_codex)
 
     s = FakeSettings()
     base = dict(
@@ -972,8 +972,13 @@ def test_subtask_executor_dispatch(monkeypatch):
 
     assert st._run_subtask_executor(s, "kimi", "p", **base) == "kimi-ok"
     assert st._run_subtask_executor(s, "opencode", "p", **base) == "opencode-ok"
-    assert st._run_subtask_executor(s, "cmd", "p", **base) == "cmd-ok"
-    assert set(calls) == {"kimi", "opencode", "cmd"}
+    assert st._run_subtask_executor(s, "codex", "p", **base) == "codex-ok"
+    assert set(calls) == {"kimi", "opencode", "codex"}
     # Parâmetros específicos de cada executor são repassados corretamente.
     assert calls["opencode"]["model"] == "opencode-model"
-    assert calls["cmd"]["model"] == "cmd-model"
+    # codex sem modelo explícito → None (sem `--model`; usa o default do CLI)
+    assert calls["codex"]["model"] is None
+    # modelo explícito repassa (precedência task/robô)
+    assert st._run_subtask_executor(s, "codex", "p", **base, model="gpt-5.6-luna") == "codex-ok"
+    assert calls["codex"]["model"] == "gpt-5.6-luna"
+

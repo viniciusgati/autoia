@@ -81,6 +81,12 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("mode", "VARCHAR(20) DEFAULT 'auto' NOT NULL"),
         ("pending_action", "VARCHAR(50)"),
         ("chat_status", "VARCHAR(20) DEFAULT 'idle' NOT NULL"),
+        # Modelo do executor escolhido na task (precedência: task > robô > default).
+        ("model", "VARCHAR(200)"),
+    ],
+    "chamados": [
+        # Modelo do executor escolhido no chamado (null = default do executor).
+        ("model", "VARCHAR(200)"),
     ],
     "task_steps": [
         ("verdict", "VARCHAR(30)"),
@@ -125,8 +131,15 @@ ADDITIVE_INDEXES: list[tuple[str, str, str]] = [
 
 def migrate_schema(engine) -> None:
     """Adiciona colunas novas em tabelas já existentes (somente adições)."""
+    from sqlalchemy import inspect
+
+    existing_tables = set(inspect(engine).get_table_names())
     with engine.begin() as conn:
         for table, columns in ADDITIVE_COLUMNS.items():
+            if table not in existing_tables:
+                # Instância sem a tabela ainda (banco parcial/recém-criado) —
+                # o `create_all` a cria; nada a migrar aqui.
+                continue
             existing = {
                 row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")
             }
@@ -142,6 +155,28 @@ def _ensure_indexes(engine) -> None:
             conn.exec_driver_sql(
                 f"CREATE INDEX IF NOT EXISTS {index_name} ON {table} ({columns})"
             )
+
+
+def backfill_legacy_executors(engine) -> None:
+    """Normaliza dados legados após mudanças de executor.
+
+    Idempotente, roda no boot (api + workers). O executor `cmd` (Command Code)
+    foi removido e substituído por `codex` (OpenAI Codex CLI): tasks/chamados
+    antigos com `executor='cmd'` passam a rodar com codex em vez de caírem
+    silenciosamente no fallback (kimi). Tabelas ausentes (banco recém-criado/
+    parcial) são ignoradas.
+    """
+    from sqlalchemy.exc import OperationalError, ProgrammingError
+
+    for table in ("tasks", "chamados"):
+        try:
+            with engine.begin() as conn:
+                conn.exec_driver_sql(
+                    f"UPDATE {table} SET executor='codex' WHERE executor='cmd'"
+                )
+        except (OperationalError, ProgrammingError):
+            # Tabela ainda não existe nesta instância — nada a backfillear.
+            pass
 
 
 def ensure_schema(engine) -> None:
@@ -163,3 +198,4 @@ def ensure_schema(engine) -> None:
         Base.metadata.create_all(engine)
     migrate_schema(engine)
     _ensure_indexes(engine)
+    backfill_legacy_executors(engine)
