@@ -17,6 +17,7 @@ PID_API="$PIDS/api.pid"
 PID_WORKER="$PIDS/worker.pid"
 PID_FRONT="$PIDS/frontend.pid"
 WORKERS="${AUTOIA_WORKERS:-3}"
+API_PORT="${AUTOIA_API_PORT:-9000}"
 
 if [[ ! -f "$VENV" ]]; then
   echo "venv não encontrado. Rode: python3 -m venv .venv && . .venv/bin/activate && pip install -e \".[dev]\""
@@ -33,14 +34,36 @@ HOME_DIR="${HOME:-$HOME}"
 NVM_BIN="$(compgen -G "$HOME_DIR/.nvm/versions/node/*/bin" 2>/dev/null | sort -V | tail -n 1 || true)"
 export PATH="$HOME_DIR/.kimi-code/bin${NVM_BIN:+:$NVM_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
+wait_for_service() {
+  local name="$1"
+  local url="$2"
+  local attempts=60
+
+  if ! command -v curl >/dev/null 2>&1; then
+    echo "Não foi possível verificar o serviço $name: curl não encontrado."
+    return 1
+  fi
+
+  for ((i = 0; i < attempts; i++)); do
+    if curl --silent --show-error --fail --max-time 1 "$url" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  echo "Tempo esgotado aguardando $name em $url."
+  return 1
+}
+
 start_api() {
   if [[ -f "$PID_API" ]] && kill -0 "$(cat "$PID_API")" 2>/dev/null; then
     echo "API já está rodando (PID $(cat "$PID_API"))"
   else
-    echo "Iniciando API (:9000)..."
+    echo "Iniciando API (:${API_PORT})..."
     AUTOIA_API_HOST="${AUTOIA_API_HOST:-0.0.0.0}" nohup autoia-api > "$LOGS/api.log" 2>&1 &
     echo $! > "$PID_API"
   fi
+  wait_for_service "API" "http://127.0.0.1:${API_PORT}/health"
 }
 
 start_worker() {
@@ -61,6 +84,7 @@ start_frontend() {
     nohup npm --prefix "$ROOT/frontend" run dev > "$LOGS/frontend.log" 2>&1 &
     echo $! > "$PID_FRONT"
   fi
+  wait_for_service "frontend" "http://127.0.0.1:5173/"
 }
 
 stop() {
@@ -81,7 +105,7 @@ case "$MODE" in
     start_api
     start_worker
     start_frontend
-    echo "Frontend dev em http://localhost:5173 | API em http://localhost:9000"
+    echo "Frontend dev em http://localhost:5173 | API em http://localhost:${API_PORT}"
     ;;
   api)
     start_api

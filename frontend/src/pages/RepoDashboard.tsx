@@ -26,6 +26,7 @@ export default function RepoDashboard() {
       const list = await api.listTasks(repoId, signal);
       setTasks(list);
       setUpdatedAt(new Date());
+      setError("");
     } catch (e) {
       if (!signal?.aborted) setError(String(e));
     }
