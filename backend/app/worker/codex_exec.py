@@ -22,6 +22,12 @@ Custo: o stream traz tokens mas não custo em moeda — estimado por interação
 aplica: o `risky_patterns`/`max_identical_calls` são aceitos por compatibilidade
 de assinatura e ignorados (a proteção real é o sandbox externo do autoia).
 
+Retomada de sessão com fallback: `codex exec resume <id>` falha com exit code 2
+e mensagem de thread/sessão não encontrada quando o thread_id morreu (ex.: a
+sessão foi interrompida por um rewind do usuário e o store do codex não tem mais
+o thread). Em vez de derrubar a fase, o executor detecta o padrão no stderr e
+RECOMEÇA do zero com uma sessão nova — a re-execução segue, não falha.
+
 Flags: o codex roda com `--sandbox danger-full-access` (o isolamento de verdade
 fica no sandbox externo do autoia; o sandbox interno do codex default é
 read-only e impediria o robô de escrever) e `--skip-git-repo-check` por robustez.
@@ -32,6 +38,7 @@ modelo o codex usa o `model` do `~/.codex/config.toml` dele.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -41,7 +48,6 @@ from .exec_common import (
     ExecOutcome,
     build_spawn_command,
     cleanup_container,
-    drain_stderr,
     kill_group,
     make_no_progress_watchdog,
     make_stop_watchdog,
@@ -75,6 +81,54 @@ _INTERACTION_ITEMS = {
 # Tipos de evento de topo do JSONL que não são atividade (não logar cru).
 _JSONL_SKIP_TYPES = {"thread.started", "turn.started"}
 
+log = logging.getLogger("autoia.worker.codex")
+
+# Marcadores de sessão de retomada inválida. `codex exec resume <id>` com um
+# thread_id morto/ausente cai com exit code 2 e mensagens como
+# "failed to record rollout items: thread ... not found" — antes, isso derrubava
+# a fase inteira numa re-execução. Detecta-se o padrão no stderr para RECOMEÇAR
+# do zero (sessão nova) em vez de falhar.
+_RESUME_BROKEN_MARKERS = (
+    "rollout items",
+    "thread not found",
+    "session not found",
+    "thread does not exist",
+    "session does not exist",
+    "no such thread",
+    "no such session",
+)
+
+
+def _resume_broken(stderr: list[str]) -> bool:
+    """True se o stderr indica sessão de retomada do codex inválida/ausente."""
+    for line in stderr:
+        low = line.lower()
+        if any(marker in low for marker in _RESUME_BROKEN_MARKERS):
+            return True
+        if ("thread" in low or "session" in low) and any(
+            marker in low for marker in ("not found", "does not exist", "no such", "missing")
+        ):
+            return True
+    return False
+
+
+# Marcadores de LIMITAÇÃO do provedor (usage/rate limit, créditos). Não é defeito
+# de código nem de infra do projeto: a fase deve ESPERAR e retomar sozinha quando
+# o provedor liberar — o runner trata `provider_limit:` como retry agendado.
+_PROVIDER_LIMIT_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "quota",
+    "credits",
+    "try again at",
+    "too many requests",
+)
+
+
+def _provider_limit_detected(text: str) -> bool:
+    low = text.lower()
+    return any(marker in low for marker in _PROVIDER_LIMIT_MARKERS)
+
 
 def _frame_thread_id(obj: dict) -> str | None:
     """Session/thread id do frame (topo do objeto)."""
@@ -87,6 +141,28 @@ def _frame_thread_id(obj: dict) -> str | None:
 
 def _item_type(item: dict) -> str:
     return str(item.get("type") or "")
+
+
+def _failure_reason(obj: dict, event_type: str) -> str:
+    """Motivo legível de `turn.failed`/`error`.
+
+    O codex nem sempre preenche `error`/`part.message` nesses eventos (na
+    prática chegam payloads vazios); busca-se o motivo em vários campos e, sem
+    nada, o rótulo genérico preserva o tipo do evento para o diagnóstico.
+    """
+    item = obj.get("item") or {}
+    candidates = [
+        obj.get("error"),
+        (obj.get("part") or {}).get("message"),
+        (item.get("part") or {}).get("message"),
+        item.get("error"),
+        item.get("message"),
+        obj.get("message"),
+    ]
+    for value in candidates:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return f"erro do codex ({event_type})"
 
 
 def _item_id(item: dict) -> str | None:
@@ -104,67 +180,29 @@ def _tool_input(item: dict) -> dict:
     return payload
 
 
-def run_codex(
-    prompt: str,
+def _run_codex_stream(
     *,
+    cmd: list[str],
     cwd: str,
     codex_bin: str,
     log_path: str,
     timeout: int,
-    max_identical_calls: int,
-    risky_patterns: list[str],
-    checkout_path: str,
-    whitelisted_hosts: list[str] = (),
     cost_per_interaction: float,
-    no_progress_timeout: int = 0,
-    resume_session_id: str | None = None,
-    model: str | None = None,
-    repo_id: int | None = None,
-    stop_file: str | None = None,
-    task_stop_file: str | None = None,
-    sandbox: SandboxConfig | None = None,
-    workspace_dir: str | None = None,
-    extra_env: dict[str, str] | None = None,
+    no_progress_timeout: int,
+    repo_id: int | None,
+    stop_file: str | None,
+    task_stop_file: str | None,
+    sandbox: SandboxConfig | None,
+    workspace_dir: str | None,
+    extra_env: dict[str, str] | None,
     on_event,
-) -> ExecOutcome:
-    """Roda o codex e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
+) -> tuple[ExecOutcome, list[str]]:
+    """Spawna UMA execução do codex e streama os eventos.
 
-    Se `on_event` retornar uma string (ex.: orçamento estourado), o run é abortado.
-    `repo_id` identifica o projeto (kill seletivo na exclusão) e `stop_file`, quando
-    fornecido, dispara a parada cooperativa: se o arquivo `.stop-<repo_id>` aparecer,
-    o processo é morto e o run retorna abortado.
-    Síncrono: chamar de um thread/processo dedicado.
-
-    `sandbox` (opcional): configuração de isolamento — com modo ligado, o comando
-    roda dentro de um contêiner (mesma árvore do checkout); `workspace_dir` é a raiz
-    de workspaces (mount rw) e `extra_env` injeta variáveis no ambiente da execução.
-
-    `resume_session_id` (opcional): id (thread_id) da sessão anterior da MESMA fase
-    (timeout/stall → re-execução) — o comando vira `codex exec resume <id>` para
-    continuar a mesma conversa (contexto preservado), espelhando o `-S` do kimi.
-    `risky_patterns`/`max_identical_calls` são mantidos apenas por compatibilidade
-    de assinatura com os outros executores (ver docstring do módulo).
+    Retorna `(outcome, stderr_capture)` — o stderr é capturado para o fallback
+    de retomada de sessão (`_resume_broken`). O `log_path` é reescrito a cada
+    execução (a última prevalece no log da fase).
     """
-    if resume_session_id:
-        # `codex exec resume <session_id> <prompt>`; opções antes dos posicionais.
-        cmd = [codex_bin, "exec", "resume", "--json", "--skip-git-repo-check"]
-        if model:
-            cmd += ["--model", model]
-        cmd += [resume_session_id, prompt]
-    else:
-        cmd = [
-            codex_bin,
-            "exec",
-            prompt,
-            "--json",
-            "--cd",
-            os.path.abspath(cwd),
-            "--sandbox",
-            "danger-full-access",
-            "--skip-git-repo-check",
-        ]
-        if model:
-            cmd += ["--model", model]
     outcome = ExecOutcome()
     outcome.sandbox_mode = sandbox.mode if sandbox else None
     log_lock = threading.Lock()
@@ -174,6 +212,17 @@ def run_codex(
         os.path.dirname(os.path.abspath(log_path)),
         f".sandbox-cid-{os.getpid()}-{int(time.time()*1000)}",
     )
+    stderr_capture: list[str] = []
+
+    def _drain_stderr(pipe, logf, lock, capture):
+        try:
+            for line in pipe:
+                with lock:
+                    logf.write(f"[stderr] {line}")
+                    logf.flush()
+                capture.append(line)
+        except ValueError:
+            pass
 
     with open(log_path, "w", encoding="utf-8") as logf:
         spawn_cmd, spawn_env = build_spawn_command(
@@ -188,6 +237,12 @@ def run_codex(
         proc = subprocess.Popen(
             spawn_cmd,
             cwd=cwd,
+            # `stdin` NUNCA é herdado do worker: o codex exec, com stdin piped,
+            # imprime "Reading additional input from stdin..." e tenta ler a
+            # continuação da conversa — com um pipe aberto herdado ele BLOQUEIA
+            # para sempre (vira "timeout sem progresso"); com DEVNULL o EOF é
+            # imediato e o CLI segue/prossegue sem pendência.
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -198,7 +253,9 @@ def run_codex(
         register_proc(proc, repo_id=repo_id, cidfile=cidfile if sandbox and sandbox.enabled else None)
 
         stderr_thread = threading.Thread(
-            target=drain_stderr, args=(proc.stderr, logf, log_lock), daemon=True
+            target=_drain_stderr,
+            args=(proc.stderr, logf, log_lock, stderr_capture),
+            daemon=True,
         )
         stderr_thread.start()
 
@@ -279,7 +336,7 @@ def run_codex(
                         cost_per_interaction,
                     )
                     if abort_reason:
-                        return _abort(abort_reason)
+                        return _abort(abort_reason), stderr_capture
 
                 elif event_type == "item.completed":
                     itype = _item_type(item)
@@ -291,7 +348,7 @@ def run_codex(
                                 EVENT_ASSISTANT_TEXT, {"content": text}
                             )
                             if abort_reason:
-                                return _abort(abort_reason)
+                                return _abort(abort_reason), stderr_capture
                     elif itype in _INTERACTION_ITEMS:
                         exit_code = item.get("exit_code")
                         status = item.get("status")
@@ -309,7 +366,7 @@ def run_codex(
                             },
                         )
                         if abort_reason:
-                            return _abort(abort_reason)
+                            return _abort(abort_reason), stderr_capture
                     else:
                         with log_lock:
                             logf.write(line + "\n")
@@ -326,13 +383,16 @@ def run_codex(
                     )
 
                 elif event_type in ("turn.failed", "error"):
-                    reason = str(
-                        obj.get("error")
-                        or (obj.get("part") or {}).get("message")
-                        or "erro do codex"
-                    )
+                    reason = _failure_reason(obj, event_type)
+                    # Loga a linha BRUTA do evento antes de abortar: os campos
+                    # originais (rollback/code/etc.) somem no payload resumido e
+                    # sem ela não há como diagnosticar falhas do provider.
+                    with log_lock:
+                        logf.write(line + "\n")
                     _persist(EVENT_SYSTEM, {"error": reason})
-                    return _abort(f"codex: {reason}")
+                    if _provider_limit_detected(reason):
+                        return _abort(f"provider_limit: {reason}"), stderr_capture
+                    return _abort(f"codex: {reason}"), stderr_capture
 
                 else:
                     if event_type not in _JSONL_SKIP_TYPES:
@@ -369,7 +429,13 @@ def run_codex(
     outcome.interaction_count = interactions
     if outcome.exit_code and not outcome.aborted:
         outcome.aborted = True
-        outcome.abort_reason = f"codex saiu com código {outcome.exit_code}"
+        # Limitação do provedor pode sair só no stderr (CLI morre antes de emitir
+        # evento JSONL) — classifica como `provider_limit:` p/ retry agendado.
+        stderr_text = "\n".join(stderr_capture)
+        if _provider_limit_detected(stderr_text):
+            outcome.abort_reason = f"provider_limit: {stderr_text.strip()[:400]}"
+        else:
+            outcome.abort_reason = f"codex saiu com código {outcome.exit_code}"
     if sandbox and sandbox.enabled:
         try:
             cid = open(cidfile, encoding="utf-8").read().strip()
@@ -383,4 +449,125 @@ def run_codex(
             os.remove(cidfile)
         except OSError:
             pass
-    return outcome
+    return outcome, stderr_capture
+
+
+def run_codex(
+    prompt: str,
+    *,
+    cwd: str,
+    codex_bin: str,
+    log_path: str,
+    timeout: int,
+    max_identical_calls: int,
+    risky_patterns: list[str],
+    checkout_path: str,
+    whitelisted_hosts: list[str] = (),
+    cost_per_interaction: float,
+    no_progress_timeout: int = 0,
+    resume_session_id: str | None = None,
+    model: str | None = None,
+    repo_id: int | None = None,
+    stop_file: str | None = None,
+    task_stop_file: str | None = None,
+    sandbox: SandboxConfig | None = None,
+    workspace_dir: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    on_event,
+) -> ExecOutcome:
+    """Roda o codex e streama eventos. `on_event(kind, payload, cost) -> abort_reason|None`.
+
+    Se `on_event` retornar uma string (ex.: orçamento estourado), o run é abortado.
+    `repo_id` identifica o projeto (kill seletivo na exclusão) e `stop_file`, quando
+    fornecido, dispara a parada cooperativa: se o arquivo `.stop-<repo_id>` aparecer,
+    o processo é morto e o run retorna abortado.
+    Síncrono: chamar de um thread/processo dedicado.
+
+    `sandbox` (opcional): configuração de isolamento — com modo ligado, o comando
+    roda dentro de um contêiner (mesma árvore do checkout); `workspace_dir` é a raiz
+    de workspaces (mount rw) e `extra_env` injeta variáveis no ambiente da execução.
+
+    `resume_session_id` (opcional): id (thread_id) da sessão anterior da MESMA fase
+    (timeout/stall → re-execução) — o comando vira `codex exec resume <id>` para
+    continuar a mesma conversa (contexto preservado), espelhando o `-S` do kimi.
+    Se a sessão de retomada for inválida (thread_id morto — exit code 2 com
+    "thread/session not found" no stderr), o executor RECOMEÇA do zero com uma
+    sessão nova e emite o evento `codex_resume_fallback`, em vez de derrubar a
+    fase (uma sessão perdida não pode travar a automação).
+    `risky_patterns`/`max_identical_calls` são mantidos apenas por compatibilidade
+    de assinatura com os outros executores (ver docstring do módulo).
+    """
+    def _execute(resume_id: str | None) -> tuple[ExecOutcome, list[str]]:
+        if resume_id:
+            # `codex exec resume <session_id> <prompt>`: a retomada NÃO aceita
+            # `--sandbox`/`--skip-git-repo-check`/`--model` (só o `exec` normal
+            # tem esses flags) — passar qualquer um deles faz o CLI sair com
+            # "unexpected argument" (exit 2), quebrando TODA retomada. O sandbox
+            # e o modelo vão por `-c` (override de config):
+            #   -c 'sandbox_mode="danger-full-access"'  (mesma política do exec)
+            #   -c 'model="<model>"'                     (modelo da task, se houver)
+            cmd = [
+                codex_bin,
+                "exec",
+                "resume",
+                "--json",
+                "-c", 'sandbox_mode="danger-full-access"',
+            ]
+            if model:
+                cmd += ["-c", f'model="{model}"']
+            cmd += [resume_id, prompt]
+        else:
+            cmd = [
+                codex_bin,
+                "exec",
+                prompt,
+                "--json",
+                "--cd",
+                os.path.abspath(cwd),
+                "--sandbox",
+                "danger-full-access",
+                "--skip-git-repo-check",
+            ]
+            if model:
+                cmd += ["--model", model]
+        return _run_codex_stream(
+            cmd=cmd,
+            cwd=cwd,
+            codex_bin=codex_bin,
+            log_path=log_path,
+            timeout=timeout,
+            cost_per_interaction=cost_per_interaction,
+            no_progress_timeout=no_progress_timeout,
+            repo_id=repo_id,
+            stop_file=stop_file,
+            task_stop_file=task_stop_file,
+            sandbox=sandbox,
+            workspace_dir=workspace_dir,
+            extra_env=extra_env,
+            on_event=on_event,
+        )
+
+    if resume_session_id:
+        outcome, stderr_lines = _execute(resume_session_id)
+        if _resume_broken(stderr_lines) and (outcome.aborted or outcome.exit_code):
+            log.warning(
+                "codex: sessão de retomada %s inválida/ausente — recomeçando do zero",
+                resume_session_id,
+            )
+            try:
+                if on_event:
+                    on_event(
+                        EVENT_SYSTEM,
+                        {
+                            "codex_resume_fallback": {
+                                "resume_session_id": resume_session_id,
+                                "detail": "sessão anterior não encontrada — iniciada nova sessão",
+                            }
+                        },
+                        0.0,
+                    )
+            except Exception:  # pragma: no cover — evento é best-effort
+                pass
+            return _execute(None)[0]
+        return outcome
+    return _execute(None)[0]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime
 
 from app.config import Settings, _load_dotenv
 
@@ -61,3 +62,57 @@ def test_settings_step_context_recent_phases_env_overrides(monkeypatch):
     assert Settings().step_context_recent_phases == 0
     monkeypatch.setenv("AUTOIA_STEP_CONTEXT_RECENT_PHASES", "3")
     assert Settings().step_context_recent_phases == 3
+
+
+def _utc(h: int, m: int = 0) -> datetime:
+    return datetime(2026, 9, 8, h, m)  # terça-feira (weekday 1)
+
+
+def test_peak_hours_defaults():
+    """Sem env, a janela de pico é a do DeepSeek (seg–sex 01-04 e 06-10 UTC)."""
+    assert Settings().peak_hours_windows == "01:00-04:00,06:00-10:00"
+    assert Settings().peak_hours_weekdays_only is True
+
+
+def test_peak_hours_inside_window():
+    s = Settings()
+    assert s.in_peak_hours(_utc(1, 0))     # início da 1ª janela
+    assert s.in_peak_hours(_utc(3, 59))    # fim da 1ª janela
+    assert s.in_peak_hours(_utc(6, 0))     # início da 2ª janela
+    assert s.in_peak_hours(_utc(9, 59))    # fim da 2ª janela
+
+
+def test_peak_hours_outside_window():
+    s = Settings()
+    assert not s.in_peak_hours(_utc(0, 59))  # antes da 1ª janela
+    assert not s.in_peak_hours(_utc(4, 0))   # o fim da janela é exclusivo
+    assert not s.in_peak_hours(_utc(5, 59))
+    assert not s.in_peak_hours(_utc(10, 0))  # após a 2ª janela
+    assert not s.in_peak_hours(_utc(23, 59))
+
+
+def test_peak_hours_weekend_ignores_window():
+    """Fim de semana (sábado/domingo UTC) é fora de pico mesmo dentro da janela."""
+    s = Settings()
+    saturday = datetime(2026, 9, 12, 2, 0)   # sábado
+    sunday = datetime(2026, 9, 13, 8, 0)     # domingo
+    assert saturday.weekday() == 5
+    assert sunday.weekday() == 6
+    assert not s.in_peak_hours(saturday)
+    assert not s.in_peak_hours(sunday)
+
+
+def test_peak_hours_window_disabled_when_empty():
+    s = Settings(peak_hours_windows="")
+    assert not s.in_peak_hours(_utc(2, 0))
+
+
+def test_peak_hours_custom_window(monkeypatch):
+    monkeypatch.setenv("AUTOIA_PEAK_HOURS_WINDOWS", "22:00-02:00")
+    monkeypatch.setenv("AUTOIA_PEAK_HOURS_WEEKDAYS_ONLY", "0")
+    s = Settings()
+    assert s.in_peak_hours(_utc(22, 0))   # noite (cruzando a meia-noite)
+    assert s.in_peak_hours(_utc(0, 30))   # depois da meia-noite, ainda na janela
+    assert s.in_peak_hours(_utc(1, 59))   # fim da janela
+    assert not s.in_peak_hours(_utc(21, 59))
+    assert not s.in_peak_hours(_utc(2, 0))

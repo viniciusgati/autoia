@@ -86,4 +86,4 @@ def test_retry_done_step_with_note(flow, fake_kimi):
     assert data["feedback"] == "Railway: ENOTFOUND host — corrija o fallback"
     dev = next(st for st in data["steps"] if st["position"] == 2)
     assert dev["status"] == "pending"
-    assert dev["attempt"] == 2
+    assert dev["attempt"] == 1  # ação humana = novo orçamento

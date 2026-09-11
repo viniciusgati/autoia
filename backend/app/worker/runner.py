@@ -21,10 +21,11 @@ import shutil
 import threading
 import time
 import types
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import exists, func, update
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from .. import budget, prompts, verdicts
 from ..config import Settings
@@ -76,6 +77,7 @@ from . import (
     subtask,
 )
 from .sandbox import SandboxConfig
+from . import toolchains
 
 log = logging.getLogger("autoia.worker")
 
@@ -128,10 +130,38 @@ def _sandbox_config(settings: Settings, repo: Repository) -> sandbox_mod.Sandbox
     como `AUTOIA_HOST_SERVICES_BASE` para os robôs usarem.
     """
     mode = sandbox_mod.normalize_mode(repo.sandbox or settings.sandbox)
+    profile_name = repo.sandbox_profile or settings.sandbox_profile
+    configured_adb = settings.sandbox_android_adb_server.strip()
+    container_adb = configured_adb
+    if not container_adb and profile_name == toolchains.PROFILE_ANDROID_COMPOSE_37:
+        if mode == sandbox_mod.SANDBOX_FULL:
+            container_adb = "tcp:host.docker.internal:5037"
+        elif mode == sandbox_mod.SANDBOX_FS:
+            container_adb = "tcp:127.0.0.1:5037"
+    profile = toolchains.get_profile(
+        profile_name,
+        android_image=settings.sandbox_android_image,
+        android_emu_image=settings.sandbox_android_emu_image,
+        sandbox_enabled=mode != sandbox_mod.SANDBOX_OFF,
+        host_java_home=settings.sandbox_android_java_home,
+        host_android_home=settings.sandbox_android_home,
+        adb_server_socket=container_adb,
+    )
+    host_profile = toolchains.get_profile(
+        profile_name,
+        android_image=settings.sandbox_android_image,
+        android_emu_image=settings.sandbox_android_emu_image,
+        sandbox_enabled=False,
+        host_java_home=settings.sandbox_android_java_home,
+        host_android_home=settings.sandbox_android_home,
+        adb_server_socket=configured_adb if mode == sandbox_mod.SANDBOX_OFF else "",
+    )
+    image = repo.sandbox_image or profile.image or settings.sandbox_image
     base = "http://host.docker.internal" if mode == sandbox_mod.SANDBOX_FULL else "http://127.0.0.1"
     return sandbox_mod.SandboxConfig(
         mode=mode,
-        image=settings.sandbox_image,
+        profile=profile.name,
+        image=image,
         memory=settings.sandbox_memory,
         cpus=settings.sandbox_cpus,
         pids_limit=settings.sandbox_pids_limit,
@@ -140,8 +170,23 @@ def _sandbox_config(settings: Settings, repo: Repository) -> sandbox_mod.Sandbox
         init=settings.sandbox_init,
         proxy_port=settings.sandbox_proxy_port,
         home=settings.sandbox_home,
-        fail_closed=settings.sandbox_fail_closed,
-        host_services_base=base,
+        # Um perfil de toolchain pinado não pode cair silenciosamente para o
+        # host: isso reintroduziria exatamente a divergência que o perfil evita.
+        # O modo off continua sendo uma escolha explícita de diagnóstico.
+        fail_closed=(
+            settings.sandbox_fail_closed
+            or (profile.name != toolchains.PROFILE_GENERIC and mode != sandbox_mod.SANDBOX_OFF)
+        ),
+host_services_base=base,
+        environment=dict(profile.environment),
+        fallback_environment=dict(host_profile.environment),
+        fallback_preflight=host_profile.preflight,
+        fallback_device_preflight=host_profile.device_preflight,
+        preflight=profile.preflight,
+        device_preflight=profile.device_preflight,
+        mount_system_ro=profile.mount_system_ro,
+        kvm=profile.kvm,
+        bootstrap_extra=profile.bootstrap_extra,
     )
 
 
@@ -405,7 +450,23 @@ def _heartbeat_loop(path: str, stop, interval: float = 5.0, workspace_dir: str |
 def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None:
     log.info("worker iniciado (dir de trabalho: %s)", workspace_dir)
     hb_path = os.path.join(workspace_dir, "worker.heartbeat")
+    peak_prev = False
     while True:
+        # Janela de pico: não reclamar novas fases (o trabalho em andamento
+        # termina; nada novo começa). Evita custo dobrado no provedor.
+        peak = settings.in_peak_hours()
+        if peak and not peak_prev:
+            log.info(
+                "janela de pico ativa — pausando novas execuções (janelas UTC: %s)",
+                settings.peak_hours_windows,
+            )
+        elif not peak and peak_prev:
+            log.info("janela de pico encerrada — retomando novas execuções")
+        peak_prev = peak
+        if peak:
+            _touch_heartbeat(hb_path)
+            time.sleep(60)
+            continue
         _touch_heartbeat(hb_path)
         try:
             process_stop_files(workspace_dir)
@@ -467,12 +528,27 @@ def claim_next(session_factory) -> int | None:
             .filter(TaskStep.status == STEP_RUNNING)
             .scalar_subquery()
         )
+        # Ordem do pipeline: só reclama uma fase quando TODAS as fases ativas
+        # anteriores terminaram (`done`). Sem isso, uma fase pendente com
+        # `retry_at` futuro (limite do provedor) era pulada e a SEGUINTE era
+        # reclamada fora de ordem (ex.: avaliador rodando com o validador
+        # agendado para retomar depois).
+        earlier = aliased(TaskStep)
+        earlier_not_done = exists().where(
+            earlier.task_id == TaskStep.task_id,
+            earlier.archived.is_(False),
+            earlier.position < TaskStep.position,
+            earlier.status != STEP_DONE,
+        )
         step = (
             s.query(TaskStep)
             .join(Task)
             .filter(
                 TaskStep.status == STEP_PENDING,
                 TaskStep.archived.is_(False),
+                # Fases com `retry_at` no futuro (limite do provedor) não são
+                # reclamadas até o horário — retomada automática sem golpe.
+                (TaskStep.retry_at.is_(None)) | (TaskStep.retry_at <= utcnow()),
                 Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
                 TaskStep.task_id.not_in(running_task_ids),
                 # Modo human-in-the-loop: o auto-worker não reclama fases de tasks
@@ -480,6 +556,7 @@ def claim_next(session_factory) -> int | None:
                 # dirige via dispatcher).
                 Task.mode != TASK_MODE_MANUAL,
                 (TaskStep.execution_mode.is_(None)) | (TaskStep.execution_mode != STEP_MODE_MANUAL),
+                ~earlier_not_done,
             )
             .order_by(TaskStep.id)
             .first()
@@ -899,6 +976,8 @@ def _run_executor(
     repo_id: int | None = None,
     task_id: int | None = None,
     skills_dir: str | None = None,
+    require_device: bool = False,
+    skip_device_bootstrap: bool = False,
 ):
     """Executa a fase com o executor da task: `kimi` (kimi-code), `opencode` ou
     `codex` (OpenAI Codex CLI).
@@ -929,7 +1008,11 @@ def _run_executor(
         else None
     )
     sandbox = eff.sandbox
-    extra_env = {"AUTOIA_HOST_SERVICES_BASE": sandbox.host_services_base, "AUTOIA_SANDBOX": sandbox.mode}
+    # Execuções que NÃO precisam do device (missão, resumo, PM em background)
+    # não sobem o emulador no container: só o bootstrap do emulador é removido —
+    # o preflight de toolchain continua (rápido, sem emulador).
+    if skip_device_bootstrap and sandbox.enabled:
+        sandbox = replace(sandbox, bootstrap_extra="")
     # Resultado da varredura de segredos dos mounts ([] = limpo).
     sandbox_scan: list[str] = []
     if sandbox.enabled:
@@ -955,7 +1038,7 @@ def _run_executor(
                 outcome = exec_common.ExecOutcome()
                 outcome.aborted = True
                 outcome.abort_reason = (
-                    f"sandbox {sandbox.mode} obrigatório mas docker/imagem "
+                    f"infra_blocked: sandbox {sandbox.mode} obrigatório mas docker/imagem "
                     f"{sandbox.image} indisponíveis (fail-closed)"
                 )
                 outcome.sandbox_mode = sandbox.mode
@@ -965,7 +1048,13 @@ def _run_executor(
                 "isolamento (fallback transitório; AUTOIA_SANDBOX_FAIL_CLOSED=1 para falhar)",
                 sandbox.mode, sandbox.image,
             )
-            sandbox = SandboxConfig(mode=sandbox_mod.SANDBOX_OFF)
+            sandbox = replace(
+                sandbox,
+                mode=sandbox_mod.SANDBOX_OFF,
+                environment=dict(sandbox.fallback_environment),
+                preflight=sandbox.fallback_preflight,
+                device_preflight=sandbox.fallback_device_preflight,
+            )
         else:
             # Varredura de segredos dos mounts EFETIVOS (chaves SSH, credenciais…):
             # avisa sempre; com fail_closed, aborta a execução se algo sensível
@@ -989,6 +1078,38 @@ def _run_executor(
                     outcome.sandbox_mode = sandbox.mode
                     outcome.sandbox_scan = sandbox_scan
                     return outcome
+    extra_env = sandbox_mod.runtime_environment(
+        sandbox,
+        {
+            "AUTOIA_HOST_SERVICES_BASE": sandbox.host_services_base,
+            "AUTOIA_SANDBOX": sandbox.mode,
+        },
+    )
+    preflight_ok, preflight_detail = exec_common.run_toolchain_preflight(
+        sandbox,
+        cwd=cwd,
+        workspace_dir=eff.workspace_dir,
+        timeout=min(60, max(10, eff.run_timeout)),
+        require_device=require_device,
+    )
+    if not preflight_ok:
+        reason = f"infra_blocked: toolchain preflight falhou — {preflight_detail}"
+        outcome = exec_common.ExecOutcome(
+            aborted=True,
+            abort_reason=reason,
+            sandbox_mode=sandbox.mode,
+        )
+        if on_event:
+            on_event(
+                "infra_preflight_failed",
+                {
+                    "profile": sandbox.profile,
+                    "require_device": require_device,
+                    "detail": preflight_detail,
+                },
+                0.0,
+            )
+        return outcome
     try:
         gitops.lock_push(cwd)
     except gitops.GitError:
@@ -1303,6 +1424,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         repo_id=repo.id,
         task_id=task.id,
         skills_dir=skills_dir,
+        require_device=False,
     )
 
     with session_factory() as s:
@@ -1533,6 +1655,35 @@ def _can_replace_pending_subtasks(step: TaskStep, task: Task) -> bool:
     return True
 
 
+def _parse_provider_retry_at(reason: str) -> datetime:
+    """Quando retomar após limitação do provedor (usage/rate limit).
+
+    Tenta extrair o horário de "try again at <HH:MM> [AM/PM]" e converte para
+    UTC naive (mesma base de `utcnow()`/`retry_at`). Os executores (codex/kimi/
+    opencode) rodam no container do sandbox com TZ=UTC — o horário informado
+    pelo provedor JÁ é UTC, não hora local do host (interpretar como local
+    atrasava a retomada pelo fuso do host; ex.: -3h). Sem hora explícita,
+    backoff fixo de 5 minutos — o worker re-tenta sozinho.
+    """
+    match = re.search(r"try again at\s+(\d{1,2}):(\d{2})\s*(AM|PM|am|pm)?", reason)
+    if match:
+        try:
+            hh, mm = int(match.group(1)), int(match.group(2))
+            ampm = (match.group(3) or "").upper()
+            if ampm == "PM" and hh != 12:
+                hh += 12
+            elif ampm == "AM" and hh == 12:
+                hh = 0
+            now = utcnow()
+            target = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            return target
+        except (ValueError, TypeError):
+            pass
+    return utcnow() + timedelta(minutes=5)
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None, head_before: str | None = None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -1570,6 +1721,42 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
             return None
 
         if outcome.aborted:
+            if reason.startswith("provider_limit:"):
+                # Limite de uso do provedor (usage/rate limit) NÃO é defeito de
+                # código nem de infra: re-enfileira a fase para retomar SOZINHA
+                # quando o provedor liberar (retry_at no futuro). Não consome
+                # attempt nem faz bounce-back.
+                retry_at = _parse_provider_retry_at(reason)
+                _system_event(
+                    s, step, "provider_limit",
+                    {"reason": reason, "retry_at": retry_at.isoformat()},
+                )
+                task.status = TASK_IN_PROGRESS
+                task.error = None
+                step.status = STEP_PENDING
+                step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
+                step.retry_at = retry_at
+                step.started_at = None
+                step.finished_at = None
+                s.commit()
+                return {"task_id": task.id, "reason": reason}
+            if reason.startswith("infra_blocked:"):
+                _system_event(
+                    s,
+                    step,
+                    "infra_blocked",
+                    {"reason": reason, "profile": eff.sandbox.profile},
+                )
+                task.status = TASK_NEEDS_REVIEW
+                task.error = reason
+                # Infraestrutura ausente não deve fazer bounce-back para o
+                # developer nem consumir tentativas de código. O humano pode
+                # corrigir o ambiente e usar retry/continue na mesma fase.
+                step.status = STEP_GUARDRAIL_BLOCKED
+                step.error = reason
+                _finish(step)
+                s.commit()
+                return {"task_id": task.id, "reason": reason}
             if "orçamento" in reason:
                 _system_event(s, step, "budget_hit", {"reason": reason})
                 task.status = TASK_NEEDS_REVIEW
@@ -1900,6 +2087,37 @@ def _decide_subtask_implement(
             return None
 
         if abort_reason:
+            if abort_reason.startswith("provider_limit:"):
+                # Limite do provedor no meio de uma subtarefa: re-enfileira a fase
+                # (as subtarefas voltam a pendente) para retomar sozinha quando o
+                # provedor liberar — sem consumir tentativas.
+                retry_at = _parse_provider_retry_at(abort_reason)
+                _system_event(
+                    s, step, "provider_limit",
+                    {"reason": abort_reason, "retry_at": retry_at.isoformat()},
+                )
+                task.status = TASK_IN_PROGRESS
+                task.error = None
+                step.status = STEP_PENDING
+                step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
+                step.retry_at = retry_at
+                step.started_at = None
+                step.finished_at = None
+                for su in task.subtasks:
+                    if su.status in ("implementing", "verifying"):
+                        su.status = "pending"
+                        su.started_at = None
+                s.commit()
+                return {"task_id": task.id, "reason": abort_reason}
+            if abort_reason.startswith("infra_blocked:"):
+                _system_event(s, step, "infra_blocked", {"reason": abort_reason})
+                task.status = TASK_NEEDS_REVIEW
+                task.error = abort_reason
+                step.status = STEP_GUARDRAIL_BLOCKED
+                step.error = abort_reason
+                _finish(step)
+                s.commit()
+                return {"task_id": task.id, "reason": abort_reason}
             # Re-declaração de "já implementada" sem alterar código após falha na
             # verificação: falha a task na hora (não queima mais ciclos de tester).
             if abort_reason.startswith("subtask_done_rejected:"):
@@ -2027,31 +2245,19 @@ def _decide_subtask_verify(
             return None
 
         if result.startswith("sub:"):
-            # Algumas subtarefas falharam → bounce-back para implement
-            subs = [
-                s for s in sorted(task.subtasks, key=lambda x: x.position)
-                if s.status not in ("done",)
-            ]
-            for st in subs:
-                st.status = "pending"
-                st.verdict = None
-                st.finished_at = None
-                if st.attempt >= eff.max_attempts:
-                    st.status = "failed"
-                    st.error = f"tentativas excedidas ({eff.max_attempts})"
-
-            all_failed = all(s.status == "failed" for s in task.subtasks if s.position in [
-                int(p) for p in result.split(":")[1].split(",")
-            ])
-
-            if all_failed:
-                task.status = TASK_NEEDS_REVIEW
-                task.error = f"subtarefas falharam: {result}"
-                step.status = STEP_FAILED
-                step.error = task.error
-                _finish(step)
-                s.commit()
-                return {"task_id": task.id, "reason": task.error}
+            # Subtarefas NÃO têm limite próprio: o contador `attempt` da subtarefa
+            # é cumulativo entre implement e verify e nunca reseta — um limite por
+            # subtarefa travava a task para sempre (nem a retomada humana renovava
+            # o orçamento; a sub caía em "tentativas excedidas" na primeira
+            # reprovação seguinte). O limite real do loop é a tentativa da FASE
+            # implement (incrementada a cada bounce-back): esgotada, a task vai
+            # para revisão humana em vez de repetir sem fim. Intervenção humana
+            # reseta as tentativas (novo orçamento) — ver _rewind_pipeline etc.
+            for st in task.subtasks:
+                if st.status not in ("done",):
+                    st.status = "pending"
+                    st.verdict = None
+                    st.finished_at = None
 
             # Bounce-back: volta para o implement step
             previous = next(
@@ -2059,7 +2265,7 @@ def _decide_subtask_verify(
                  if st.position < step.position),
                 None,
             )
-            if previous is not None:
+            if previous is not None and previous.attempt < eff.max_attempts:
                 previous.status = STEP_PENDING
                 previous.attempt += 1
                 previous.error = None
@@ -2078,13 +2284,41 @@ def _decide_subtask_verify(
                 s.commit()
                 return None
 
-            task.status = TASK_FAILED
-            task.error = f"subtarefas falharam sem fase anterior: {result}"
+            task.status = TASK_NEEDS_REVIEW
+            task.error = (
+                f"subtarefas reprovadas e fase de correção esgotada "
+                f"({eff.max_attempts} tentativas): {result}"
+            )
             step.status = STEP_FAILED
             step.error = task.error
             _finish(step)
             s.commit()
             return {"task_id": task.id, "reason": task.error}
+
+        if result.startswith("provider_limit:"):
+            retry_at = _parse_provider_retry_at(result)
+            _system_event(
+                s, step, "provider_limit",
+                {"reason": result, "retry_at": retry_at.isoformat()},
+            )
+            task.status = TASK_IN_PROGRESS
+            task.error = None
+            step.status = STEP_PENDING
+            step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
+            step.retry_at = retry_at
+            step.started_at = None
+            step.finished_at = None
+            s.commit()
+            return {"task_id": task.id, "reason": result}
+        if result.startswith("infra_blocked:"):
+            _system_event(s, step, "infra_blocked", {"reason": result})
+            task.status = TASK_NEEDS_REVIEW
+            task.error = result
+            step.status = STEP_GUARDRAIL_BLOCKED
+            step.error = result
+            _finish(step)
+            s.commit()
+            return {"task_id": task.id, "reason": result}
 
         # Erro genérico (abort, etc.)
         step.status = STEP_FAILED

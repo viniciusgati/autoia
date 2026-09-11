@@ -182,6 +182,8 @@ def summarize_task(settings, session_factory, task_id: int) -> bool:
             model=model,
             on_event=None,
             kimi_cost_per_interaction=0.0,
+            # Resumo é LLM pura (interpreta eventos, escreve JSON): não sobe emulador.
+            skip_device_bootstrap=True,
         )
 
         data = verdicts.read_summary(checkout)

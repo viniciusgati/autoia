@@ -554,6 +554,110 @@ class TestSubtaskWorker:
             steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
             assert steps[2].status == "pending"  # implement step
 
+    def test_verify_revalida_subtarefa_pendente_por_provider_limit(self, flow, fake_kimi, settings, monkeypatch):
+        """Subtarefa deixada `pending` por limite do provedor (`provider_limit:`)
+        é revalidada ao reabrir o verify — antes a fase concluía sem validar
+        (o código nunca havia sido avaliado)."""
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            from app.models import SubTask
+            s.add(SubTask(
+                task_id=task_id, position=0, title="Sub 1",
+                description="fazer A", status="pending",
+                error="provider_limit: You've hit your usage limit",
+            ))
+            s.commit()
+
+        with session_factory() as s:
+            from app.models import STEP_DONE, TaskStep
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            for st in steps[:3]:
+                st.status = STEP_DONE
+            steps[3].status = "pending"  # verify
+            s.commit()
+
+        step_id = claim_next(session_factory)
+        assert step_id is not None
+        monkeypatch.setattr(settings, "kimi_bin", fake_kimi(
+            [{"role": "assistant", "content": "revalidado"}],
+            verdict="ready_pass",
+        ))
+        trigger = execute_step(settings, session_factory, step_id)
+        assert trigger is None
+
+        with session_factory() as s:
+            from app.models import SubTask, TaskStep
+            sub = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+            assert sub.status == "done", f"sub status={sub.status}"
+            assert sub.verdict == "PASS"
+            step = next(
+                st for st in s.query(TaskStep).filter(TaskStep.task_id == task_id).all()
+                if st.position == 3
+            )
+            assert step.status == "done"
+
+    def test_verify_subtask_fail_bounces_until_phase_exhausted(self, flow, fake_kimi, settings, monkeypatch):
+        """Subtarefa NÃO tem limite próprio: o bounce-back implement→verify repete
+        até a FASE implement esgotar `max_attempts` (aí vai para needs_review) —
+        a subtarefa nunca vira "tentativas excedidas" (travamento permanente)."""
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            from app.models import SUB_IMPLEMENTED, SubTask
+            s.add(SubTask(
+                task_id=task_id, position=0, title="Sub 1",
+                description="fazer A", status=SUB_IMPLEMENTED, summary="feito",
+            ))
+            s.commit()
+
+        # Pula po/qa; developer (2) e verify (3) pendentes
+        with session_factory() as s:
+            from app.models import STEP_DONE, TaskStep
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            for st in steps[:2]:
+                st.status = STEP_DONE
+            steps[2].status = "pending"
+            steps[3].status = "pending"
+            s.commit()
+
+        settings.max_attempts = 3
+        contents = ["x = 1\n", "x = 2\n", "x = 3\n"]
+        for i in range(6):
+            is_verify = i % 2 == 1
+            settings.kimi_bin = fake_kimi(
+                [{"role": "assistant", "content": "corrigindo" if not is_verify else "falhou"}],
+                verdict="fail" if is_verify else None,
+                write_file=None if is_verify else "feature.py",
+                write_content=None if is_verify else contents[i // 2],
+            )
+            step_id = claim_next(session_factory)
+            assert step_id is not None, f"iteração {i}: sem fase para reclamar"
+            trigger = execute_step(settings, session_factory, step_id)
+            if i < 5:
+                assert trigger is None, f"iteração {i}: trigger={trigger}"
+            else:
+                # Última reprovação: fase implement no teto → needs_review
+                assert trigger is not None, "esperava trigger de needs_review"
+                assert "esgotada" in trigger["reason"]
+
+        with session_factory() as s:
+            from app.models import SubTask, Task
+            t = s.get(Task, task_id)
+            assert t.status == "needs_review"
+            assert "esgotada" in (t.error or ""), t.error
+            sub = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+            assert sub.status == "pending", f"sub status={sub.status}"
+            assert "tentativas" not in (sub.error or ""), sub.error
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            assert steps[2].attempt == 3  # fase implement no teto de max_attempts
+
     def test_subtask_progress_summary(self):
         """Formata resumo de progresso das subtarefas."""
         from app.worker.runner import _subtask_progress_summary

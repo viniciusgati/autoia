@@ -239,7 +239,8 @@ def test_max_attempts_bounds_bounce_back(flow, fake_kimi):
 
 def test_bounceback_manual_ignora_limite(flow, settings):
     """Bounceback via API é ação MANUAL: liberado mesmo com o step no teto de
-    `max_attempts` (limite só vale para o bounce-back automático do worker)."""
+    `max_attempts` (limite só vale para o bounce-back automático do worker) — e
+    as tentativas voltam a 1 (ação humana = novo orçamento)."""
     task_id = flow["task"]["id"]
     with flow["session_factory"]() as s:
         t = s.get(Task, task_id)
@@ -262,7 +263,7 @@ def test_bounceback_manual_ignora_limite(flow, settings):
     assert data["status"] == "queued"
     dev = next(st for st in data["steps"] if st["position"] == 2)
     assert dev["status"] == "pending"
-    assert dev["attempt"] == settings.max_attempts + 1
+    assert dev["attempt"] == 1
 
 
 def test_agents_md_written_and_never_committed(flow, fake_kimi):

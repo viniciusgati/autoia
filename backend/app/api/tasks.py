@@ -883,8 +883,8 @@ def bounceback_task(
     # Salva nota como feedback da task
     if data.note:
         task.feedback = data.note
-    # Reseta o step alvo
-    target.attempt += 1
+    # Reseta o step alvo (ação humana = novo orçamento de tentativas)
+    target.attempt = 1
     target.status = STEP_PENDING
     target.error = None
     target.summary = None
@@ -896,6 +896,7 @@ def bounceback_task(
     for st in _active_steps(task):
         if st.position > data.target_position:
             st.status = STEP_PENDING
+            st.attempt = 1
             st.error = None
             st.summary = None
             st.verdict = None
@@ -962,7 +963,7 @@ def retry_step(
 
     if data and data.note:
         task.feedback = data.note
-    step.attempt += 1
+    step.attempt = 1  # ação humana = novo orçamento de tentativas
     step.status = STEP_PENDING
     step.error = None
     step.summary = None
@@ -1261,8 +1262,9 @@ def continue_blocked(
     task.block_options = []
 
     # Reabre a fase exata onde o desenvolvimento parou, preservando o histórico.
+    # Ação humana = novo orçamento de tentativas.
     step.status = STEP_PENDING
-    step.attempt += 1
+    step.attempt = 1
     step.error = None
     step.started_at = None
     step.finished_at = None
@@ -1300,10 +1302,14 @@ def continue_blocked(
 def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     """Reexecuta a partir de `target`: reabre o alvo e reseta os steps seguintes.
 
-    O histórico (RunEvent) nunca é apagado — novas execuções viram novas ocorrências
-    na timeline. Compartilhado pelo bounceback manual e pelo envio de instrução.
+    Intervenção humana = orçamento NOVO: as tentativas da fase (e das fases
+    seguintes) voltam a 1 — o contador é cumulativo e, sem reset, uma retomada
+    após esgotamento falhava na primeira reprovação seguinte (loop travado em
+    `needs_review` para sempre). O histórico (RunEvent) nunca é apagado — novas
+    execuções viram novas ocorrências na timeline. Compartilhado pelo bounceback
+    manual e pelo envio de instrução.
     """
-    target.attempt += 1
+    target.attempt = 1
     target.status = STEP_PENDING
     target.error = None
     target.summary = None
@@ -1313,6 +1319,7 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     for st in _active_steps(task):
         if st.position > target.position:
             st.status = STEP_PENDING
+            st.attempt = 1
             st.error = None
             st.summary = None
             st.verdict = None
@@ -1323,8 +1330,11 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
 
 
 def _reopen_step(step: TaskStep) -> None:
-    """Reabre UMA fase para re-execução (mantém a próxima inalterada)."""
-    step.attempt += 1
+    """Reabre UMA fase para re-execução (mantém a próxima inalterada).
+
+    Ação humana: tentaivas voltam a 1 (novo orçamento — ver _rewind_pipeline).
+    """
+    step.attempt = 1
     step.status = STEP_PENDING
     step.error = None
     step.started_at = None

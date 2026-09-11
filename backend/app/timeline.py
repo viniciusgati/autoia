@@ -299,15 +299,21 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
 
         if kind == "attempt_started":
             attempt = payload.get("attempt")
+            run = payload.get("run")
             robot = payload.get("robot") or (meta[1] if meta else "?")
             pos = meta[0] if meta else "?"
-            is_rerun = isinstance(attempt, int) and attempt > 1
+            # `run` é o contador REAL de execuções da fase (nunca reseta, mesmo
+            # quando a ação humana zera `attempt` = novo orçamento de tentativas).
+            is_rerun = isinstance(run, int) and run > 1
+            if not isinstance(run, int):  # eventos antigos sem `run`
+                is_rerun = isinstance(attempt, int) and attempt > 1
+            tentativa = run if isinstance(run, int) else attempt
             timeline.append(_event_base(
                 evt, meta, payload,
                 EV_PHASE,
                 "etapa iniciada" if not is_rerun else f"re-execução da fase {pos}",
                 (
-                    f"↺ re-execução da fase {pos} ({robot}) — tentativa {attempt}"
+                    f"↺ re-execução da fase {pos} ({robot}) — tentativa {tentativa}"
                     if is_rerun
                     else f"fase {pos} ({robot}) iniciada"
                 ),

@@ -20,6 +20,8 @@ const SETTINGS_FIELDS = [
   "auto_summary",
   "default_pipeline_id",
   "sandbox",
+  "sandbox_profile",
+  "sandbox_image",
   "task_targets",
   "external_context",
 ] as const;
@@ -83,6 +85,8 @@ export default function RepoConfig() {
         auto_summary: repo.auto_summary,
         default_pipeline_id: repo.default_pipeline_id,
         sandbox: repo.sandbox,
+        sandbox_profile: repo.sandbox_profile,
+        sandbox_image: repo.sandbox_image,
         task_targets: repo.task_targets,
         external_context: repo.external_context,
       });
@@ -349,6 +353,33 @@ export default function RepoConfig() {
                   <option value="fs">fs — arquivos e privilégios</option>
                   <option value="full">full — + rede allowlist</option>
                 </select>
+              </div>
+              <div className="form-field">
+                <label className="form-label">Perfil de toolchain <HelpTip>
+                  Perfil administrado que injeta a toolchain correta antes da execução.
+                  Para Android Compose use android-compose-37 após construir a imagem
+                  correspondente. Vazio usa o perfil global.
+                </HelpTip></label>
+                <select
+                  value={repo.sandbox_profile ?? ""}
+                  disabled={!canManage}
+                  onChange={(e) => updateRepo({ ...repo, sandbox_profile: e.target.value || null })}
+                >
+                  <option value="">— global (genérico) —</option>
+                  <option value="android-compose-37">android-compose-37 — Kotlin/Compose, SDK 37</option>
+                </select>
+              </div>
+              <div className="form-field">
+                <label className="form-label">Imagem Docker pinada <HelpTip>
+                  Opcional. Deve ser uma imagem previamente construída pelo administrador;
+                  não é baixada nem escolhida pelo robô.
+                </HelpTip></label>
+                <input
+                  value={repo.sandbox_image ?? ""}
+                  placeholder="ex: autoia-android-compose:2026-09"
+                  disabled={!canManage}
+                  onChange={(e) => updateRepo({ ...repo, sandbox_image: e.target.value || null })}
+                />
               </div>
             </div>
           </details>

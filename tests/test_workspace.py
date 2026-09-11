@@ -275,7 +275,8 @@ def test_workspace_reexecution_preserves_history(flow, fake_kimi):
     occ = data["occurrences"]
     assert len(occ) == 2
     assert occ[0]["position"] == 0 and occ[0]["attempt"] == 1
-    assert occ[1]["position"] == 0 and occ[1]["attempt"] == 2
+    # retry humano reseta o contador de tentativas; a ocorrência antiga permanece
+    assert occ[1]["position"] == 0 and occ[1]["attempt"] == 1
     assert occ[1]["status"] == "done"
     assert occ[0]["delivered_text"] == occ[1]["delivered_text"] or True  # ambos preservados
 
@@ -364,7 +365,7 @@ def test_instruction_blocked_continues(flow, fake_kimi):
         t = s.get(Task, task_id)
         step = next(st for st in t.steps if st.id == step_id)
         assert step.status == "pending"
-        assert step.attempt == 2
+        assert step.attempt == 1  # ação humana = novo orçamento
         kinds = {e.kind for e in s.query(RunEvent).filter(RunEvent.step_id == step_id).all()}
         assert {"user_intervention", "execution_resumed"} <= kinds
 
@@ -399,7 +400,7 @@ def test_instruction_rewind_with_position(flow, fake_kimi):
     step0 = next(st for st in data["steps"] if st["position"] == 0)
     step1 = next(st for st in data["steps"] if st["position"] == 1)
     assert step0["status"] == "pending"
-    assert step0["attempt"] == 2
+    assert step0["attempt"] == 1  # ação humana = novo orçamento
     assert step1["status"] == "pending"
 
 
@@ -448,7 +449,7 @@ def test_instruction_rewind_forca_parada_enquanto_running(flow, fake_kimi):
         assert qa.status == "pending"  # fase running entregue ao usuário
         po = next(st for st in t.steps if st.position == 0)
         assert po.status == "pending"
-        assert po.attempt == 2
+        assert po.attempt == 1  # ação humana = novo orçamento
 
 
 def test_retry_forca_parada_enquanto_outra_fase_running(flow, fake_kimi):
@@ -477,7 +478,7 @@ def test_retry_forca_parada_enquanto_outra_fase_running(flow, fake_kimi):
         assert qa.status == "pending"  # fase running entregue ao usuário
         po = next(st for st in t.steps if st.position == 0)
         assert po.status == "pending"
-        assert po.attempt == 2
+        assert po.attempt == 1  # ação humana = novo orçamento
 
 
 def test_decision_request_blocks_and_answers(flow, fake_kimi):
@@ -514,4 +515,4 @@ def test_decision_request_blocks_and_answers(flow, fake_kimi):
     with flow["session_factory"]() as s:
         step = next(st for st in s.get(Task, task_id).steps if st.id == step_id)
         assert step.status == "pending"
-        assert step.attempt == 2
+        assert step.attempt == 1  # ação humana = novo orçamento

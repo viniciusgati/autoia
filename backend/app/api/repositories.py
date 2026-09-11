@@ -155,6 +155,8 @@ def create_repository(
         default_pipeline_id=data.default_pipeline_id,
         auto_summary=data.auto_summary,
         sandbox=data.sandbox,
+        sandbox_profile=data.sandbox_profile,
+        sandbox_image=data.sandbox_image,
         task_targets=targets,
         external_context=data.external_context,
     )

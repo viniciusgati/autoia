@@ -61,8 +61,9 @@ def test_agent_block_declares_blocked(flow, fake_kimi):
 
 
 def test_continue_blocked_resumes_in_place(flow, fake_kimi):
-    """POST /blocked/continue: reabre a MESMA fase (attempt+1), grava a instrução
-    separadamente e registra a intervenção na timeline (RunEvent)."""
+    """POST /blocked/continue: reabre a MESMA fase com tentativas resetadas (ação
+    humana = novo orçamento), grava a instrução separadamente e registra a
+    intervenção na timeline (RunEvent)."""
     settings = flow["settings"]
     settings.kimi_bin = fake_kimi(HARMLESS, write_file="autoia_blocked.json", write_content=BLOCKED_JSON)
     settings.task_budget = 100.0
@@ -74,7 +75,6 @@ def test_continue_blocked_resumes_in_place(flow, fake_kimi):
         t = s.get(Task, task_id)
         blocked_step = sorted(t.steps, key=lambda x: x.position)[0]
         blocked_step_id = blocked_step.id
-        attempt_before = blocked_step.attempt
 
     resp = flow["client"].post(
         f"/api/tasks/{task_id}/blocked/continue",
@@ -90,7 +90,7 @@ def test_continue_blocked_resumes_in_place(flow, fake_kimi):
         t = s.get(Task, task_id)
         step = next(st for st in t.steps if st.id == blocked_step_id)
         assert step.status == "pending"
-        assert step.attempt == attempt_before + 1
+        assert step.attempt == 1  # reset: ação humana = novo orçamento
         evs = (
             s.query(RunEvent)
             .filter(RunEvent.step_id == blocked_step_id)
@@ -161,12 +161,12 @@ def test_retry_unlocked_when_blocked(flow, settings):
     assert data["feedback"] == "resolva o conflito dando prioridade ao que já está testado"
     merger = next(st for st in data["steps"] if st["position"] == 5)
     assert merger["status"] == "pending"
-    assert merger["attempt"] == settings.max_attempts + 1
+    assert merger["attempt"] == 1  # ação humana = novo orçamento
 
 
 def test_retry_manual_ignora_limite_em_qualquer_estado(flow, settings):
     """O retry é ação MANUAL: não fica preso ao `max_attempts` (limite do bounce-back
-    automático), mesmo com a task fora do estado 'blocked'."""
+    automático), mesmo com a task fora do estado 'blocked' — e reseta as tentativas."""
     task_id = flow["task"]["id"]
     with flow["session_factory"]() as s:
         t = s.get(Task, task_id)
@@ -184,4 +184,4 @@ def test_retry_manual_ignora_limite_em_qualquer_estado(flow, settings):
     assert data["status"] == "queued"
     merger = next(st for st in data["steps"] if st["position"] == 5)
     assert merger["status"] == "pending"
-    assert merger["attempt"] == settings.max_attempts + 1
+    assert merger["attempt"] == 1  # ação humana = novo orçamento

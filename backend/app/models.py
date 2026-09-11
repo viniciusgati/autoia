@@ -121,6 +121,13 @@ class Repository(Base):
     # Modo de sandbox de execução do projeto: None = herda o global (AUTOIA_SANDBOX);
     # "off" | "fs" | "full" sobrescreve para este repositório.
     sandbox: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    # Perfil de toolchain do projeto (ex.: "android-compose-37"). None herda o
+    # perfil global. O perfil escolhe imagem, JAVA_HOME/ANDROID_HOME e preflight;
+    # não permite que a task injete mounts ou imagens arbitrárias.
+    sandbox_profile: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    # Override administrativo da imagem definida pelo perfil. Mantido separado do
+    # perfil para permitir uma imagem pinada por projeto sem duplicar o perfil.
+    sandbox_image: Mapped[str | None] = mapped_column(String(200), nullable=True)
 
     # Controle de features
     allow_auto_tasks: Mapped[bool] = mapped_column(default=False)
@@ -543,6 +550,11 @@ class TaskStep(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime | None] = mapped_column(nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Próximo instante em que a fase pode ser reclamada pelo worker. Usado para
+    # retry automático de limitação do provedor (usage/rate limit): a fase volta
+    # a `pending` com `retry_at` no futuro — o claim ignora até passar — e a task
+    # retoma SOZINHA quando o provedor libera. NULL = sem espera.
+    retry_at: Mapped[datetime | None] = mapped_column(nullable=True)
     # Fase substituída por uma mudança de pipeline (`change-pipeline`): fica ARQUIVADA
     # (histórico/RunEvent preservado), mas é ignorada pelo worker e pela UI atual.
     archived: Mapped[bool] = mapped_column(Boolean, default=False)

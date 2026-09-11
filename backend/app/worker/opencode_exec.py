@@ -140,6 +140,9 @@ def run_opencode(
         proc = subprocess.Popen(
             spawn_cmd,
             cwd=cwd,
+            # stdin isolado: o worker não deve oferecer input interativo ao CLI
+            # (ver o comentário equivalente em codex_exec.py).
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,

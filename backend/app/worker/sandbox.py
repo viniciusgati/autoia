@@ -66,6 +66,7 @@ class SandboxConfig:
     """Configuração efetiva do sandbox para uma execução (repo > global)."""
 
     mode: str = SANDBOX_OFF
+    profile: str = "generic"
     backend: str = BACKEND_DOCKER
     image: str = "autoia-sandbox"
     memory: str = "4g"
@@ -86,6 +87,23 @@ class SandboxConfig:
     host_services_base: str = "http://127.0.0.1"
     # Hosts extras do proxy permitidos nesta execução (ex.: remote git do projeto).
     extra_egress_hosts: list[str] = field(default_factory=list)
+    # Variáveis fornecidas pelo perfil administrado (JAVA_HOME, ANDROID_HOME...).
+    environment: dict[str, str] = field(default_factory=dict)
+    # Ambiente equivalente no host para o fallback explícito quando a imagem
+    # não está disponível e fail_closed está desligado.
+    fallback_environment: dict[str, str] = field(default_factory=dict)
+    fallback_preflight: tuple[str, ...] = ()
+    fallback_device_preflight: tuple[str, ...] = ()
+    # Imagem self-contained não deve receber /usr e /lib do host por cima.
+    mount_system_ro: bool = True
+    # Comandos executados no mesmo ambiente antes da CLI do agente.
+    preflight: tuple[str, ...] = ()
+    device_preflight: tuple[str, ...] = ()
+    # Passa /dev/kvm ao container (emulador Android acelerado por hardware).
+    kvm: bool = False
+    # Comandos extras do bootstrap (antes da CLI), ex.: subir o emulador no
+    # próprio container do sandbox. Vazios para perfis sem bootstrap.
+    bootstrap_extra: str = ""
     # Configuração de ulimit aplicada quando NÃO sandboxado (0 = sem limite).
     ulimit_as_mb: int = 0
     ulimit_nofile: int = 0
@@ -246,6 +264,7 @@ def cleanup_container(cidfile: str | None) -> None:
 _HOME_CLI_DIRS: list[tuple[str, str]] = [
     (".config/opencode", "ro"),   # credenciais/config (leitura necessária)
     (".local/share/opencode", "rw"),  # estado/sessões (1,8 G)
+    (".codex", "rw"),              # config/credenciais + sessões do Codex CLI
     (".kimi-code", "rw"),         # binário + sessões + plugins
     (".kimi-webbridge", "rw"),    # daemon webbridge
     (".nvm", "ro"),               # runtime node do opencode (symlink)
@@ -336,6 +355,7 @@ def _mount_specs(
     workspace_dir: str,
     cli_bins: list[str],
     home: str,
+    mount_system_ro: bool = True,
 ) -> tuple[list[str], bool]:
     """Lista de specs de bind mount (`origem:destino[:modo]`) e flag `source_under_tmp`
     (True se alguma origem rw fica sob /tmp — nesse caso /tmp vira bind, não tmpfs)."""
@@ -368,11 +388,13 @@ def _mount_specs(
             continue
         add(parent, "rw")
 
-    # Toolchain do host: somente-leitura.
-    for d in _SYSTEM_RO_DIRS:
-        add(d, "ro")
+    # Toolchain do host: somente-leitura. Perfis self-contained (Android) usam
+    # JDK/SDK da própria imagem e não podem receber /usr do host por cima.
+    if mount_system_ro:
+        for d in _SYSTEM_RO_DIRS:
+            add(d, "ro")
 
-    source_under_tmp = any(s.startswith("/tmp/") for s in rw_sources)
+    source_under_tmp = any(s == "/tmp" or s.startswith("/tmp/") for s in rw_sources)
     return specs, source_under_tmp
 
 
@@ -410,7 +432,13 @@ def scan_secret_mounts(
     if config.mode == SANDBOX_OFF:
         return []
     home = config.home or _host_home()
-    mounts, _ = _mount_specs(checkout, workspace_dir, [cli_bin or ""], home)
+    mounts, _ = _mount_specs(
+        checkout,
+        workspace_dir,
+        [cli_bin or ""],
+        home,
+        mount_system_ro=config.mount_system_ro,
+    )
     return _secret_violations(mounts, home)
 
 
@@ -430,12 +458,29 @@ def _container_env(config: SandboxConfig, extra_env: dict | None) -> dict[str, s
     ] + ["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"]:
         if d not in path_entries:
             path_entries.append(d)
+    # Perfis podem apontar para toolchains dentro da imagem. Acrescentamos os
+    # binários antes do PATH herdado para que `java`, `adb` e Gradle usem a
+    # versão pinada, inclusive quando a execução está em modo off.
+    profile_bins: list[str] = []
+    for key in ("JAVA_HOME", "ANDROID_HOME"):
+        root = config.environment.get(key)
+        if root:
+            profile_bins.extend(
+                [
+                    os.path.join(root, "bin"),
+                    os.path.join(root, "platform-tools"),
+                    os.path.join(root, "cmdline-tools", "latest", "bin"),
+                ]
+            )
     env = {
         "PATH": ":".join(path_entries),
         "HOME": home,
         "AUTOIA_HOST_SERVICES_BASE": config.host_services_base,
         "AUTOIA_SANDBOX": config.mode,
     }
+    if profile_bins:
+        env["PATH"] = ":".join(profile_bins + [env["PATH"]])
+    env.update(config.environment)
     if config.mode == SANDBOX_FULL:
         proxy = f"http://host.docker.internal:{config.proxy_port}"
         env["HTTP_PROXY"] = proxy
@@ -448,6 +493,16 @@ def _container_env(config: SandboxConfig, extra_env: dict | None) -> dict[str, s
     return env
 
 
+def runtime_environment(config: SandboxConfig, extra_env: dict | None = None) -> dict[str, str]:
+    """Ambiente determinístico para execução direta ou dentro do container.
+
+    O nome é público porque o modo `off` também pode usar um perfil de toolchain:
+    nesse caso JAVA_HOME/ANDROID_HOME precisam chegar ao subprocesso mesmo sem
+    Docker.
+    """
+    return _container_env(config, extra_env)
+
+
 def build_sandbox_command(
     cmd: list[str],
     *,
@@ -457,12 +512,16 @@ def build_sandbox_command(
     cli_bin: str | None,
     extra_env: dict | None = None,
     cidfile: str | None = None,
+    include_bootstrap: bool = True,
 ) -> list[str] | None:
     """Monta o comando que roda `cmd` dentro do sandbox (docker).
 
     Retorna None quando o sandbox está desligado (`off`) — o executor usa o comando
     direto. Com o sandbox ligado, retorna a lista de args do `docker run`; o stdout
     continua sendo o JSONL da CLI (o worker consome igual).
+
+    `include_bootstrap` desliga o bootstrap do perfil (ex.: no preflight, que roda
+    num container descartável — não faz sentido subir o emulador lá).
     """
     if config.mode == SANDBOX_OFF:
         return None
@@ -470,14 +529,24 @@ def build_sandbox_command(
     checkout = os.path.abspath(checkout)
     workspace_dir = os.path.abspath(workspace_dir)
     home = config.home or _host_home()
-    mounts, source_under_tmp = _mount_specs(checkout, workspace_dir, [cli_bin or ""], home)
+    mounts, source_under_tmp = _mount_specs(
+        checkout,
+        workspace_dir,
+        [cli_bin or ""],
+        home,
+        mount_system_ro=config.mount_system_ro,
+    )
 
     uid, gid = os.getuid(), os.getgid()
     docker_cmd = [
         resolve_docker_bin(),
         "run",
         "--rm",
-        "--name", f"autoia-sbx-{os.getpid()}-{int(time.time() * 1000)}",
+        # Nome ÚNICO por chamada: (pid, ms) colide quando dois containers sobem
+        # no mesmo processo no mesmo milissegundo (execução da fase + missão em
+        # paralelo) → `docker run` falha com "name already in use". time_ns + um
+        # contador de thread evita a colisão.
+        "--name", f"autoia-sbx-{os.getpid()}-{time.time_ns()}-{threading.get_ident()}",
     ]
     if config.init:
         docker_cmd += _docker_init_flags(workspace_dir)
@@ -493,6 +562,19 @@ def build_sandbox_command(
     if config.read_only:
         docker_cmd += ["--read-only"]
 
+    # Emulador Android acelerado por hardware dentro do container: passa /dev/kvm
+    # e o grupo do device (gid do host) para o uid do worker conseguir abri-lo.
+    # Sem /dev/kvm no host, o emulador roda por software (-accel auto cai para
+    # software) — mais lento, porém sem quebrar a execução.
+    if config.kvm and os.path.exists("/dev/kvm"):
+        docker_cmd += ["--device", "/dev/kvm"]
+        try:
+            kvm_gid = os.stat("/dev/kvm").st_gid
+        except OSError:
+            kvm_gid = 0
+        if kvm_gid:
+            docker_cmd += ["--group-add", str(kvm_gid)]
+
     if config.mode == SANDBOX_FULL:
         # Rede bridge + host-gateway: serviços do host via host.docker.internal;
         # egress passa pelo proxy de allowlist (HTTP(S)_PROXY no contêiner).
@@ -504,12 +586,40 @@ def build_sandbox_command(
     if source_under_tmp:
         # Alguma origem rw (checkout/fake) fica sob /tmp do host — bind de /tmp em
         # vez de tmpfs (senão os arquivos do host ficam invisíveis no contêiner).
-        docker_cmd += ["-v", "/tmp:/tmp:rw"]
+        # Se o próprio checkout/workspace já é /tmp, o mount específico acima já
+        # ocupa esse destino; repetir o bind faz o Docker abortar com
+        # "Duplicate mount point: /tmp".
+        if not any(spec.startswith("/tmp:/tmp:") for spec in mounts):
+            docker_cmd += ["-v", "/tmp:/tmp:rw"]
     else:
         # tmpfs com `exec`: o docker monta tmpfs com `noexec` por padrão, o que
         # quebraria execução de scripts/binários temporários (ex.: pytest cria
         # fakes executáveis em /tmp → PermissionError).
         docker_cmd += ["--tmpfs", f"/tmp:rw,size={config.tmpfs_size},mode=1777,exec"]
+
+    # Toolchains Android precisam que o adb crie ~/.android (e eventualmente
+    # outros arquivos de estado) durante o preflight. O home do host continua
+    # sendo usado como caminho estável para as CLIs, mas vira tmpfs dentro do
+    # container: os subdiretórios explicitamente permitidos acima são montados
+    # por bind, enquanto o restante fica efêmero e gravável.
+    if config.environment.get("AUTOIA_TOOLCHAIN_PROFILE"):
+        docker_cmd += ["--tmpfs", f"{home}:rw,size=256m,mode=1777"]
+        # Caches de build Android (ex.: `GRADLE_USER_HOME`) NÃO podem morar no
+        # tmpfs /tmp — o cache de transforms estoura o limite (1g) e o build
+        # falha com "No space left on device" (o gradle re-baixa dependências a
+        # cada execução). Redireciona para um cache persistente no disco do host
+        # sob o workspace do repositório (já bind-montado rw no mesmo path), que
+        # também acelera builds subsequentes.
+        gradle_home = config.environment.get("GRADLE_USER_HOME", "")
+        if gradle_home.startswith("/tmp/") and checkout:
+            try:
+                host_cache = os.path.join(os.path.dirname(checkout), "gradle-cache")
+                os.makedirs(host_cache, exist_ok=True)
+            except OSError:
+                host_cache = ""  # falha (ex.: tests sem dir real) → mantém tmpfs
+            if host_cache:
+                extra_env = dict(extra_env or {})
+                extra_env.setdefault("GRADLE_USER_HOME", host_cache)
 
     for key, value in _container_env(config, extra_env).items():
         docker_cmd += ["--env", f"{key}={value}"]
@@ -517,7 +627,36 @@ def build_sandbox_command(
         docker_cmd += ["--cidfile", cidfile]
     for spec in mounts:
         docker_cmd += ["-v", spec]
-    docker_cmd += [config.image, *cmd]
+    if config.environment.get("AUTOIA_TOOLCHAIN_PROFILE"):
+        # O histórico/handoff pode conter caminhos absolutos do host (por
+        # exemplo, JAVA_HOME=/home/vinicius/.jdks/...); dentro da imagem esses
+        # caminhos precisam apontar para a toolchain pinada, não para o host.
+        # Como o HOME é tmpfs, os aliases são efêmeros e não alteram o checkout.
+        bootstrap_extra = config.bootstrap_extra if include_bootstrap else ""
+        if bootstrap_extra:
+            # AVD do emulador no TMPFS /tmp do próprio container (fresco a cada
+            # execução): evita conflito entre containers paralelos (fase + missão
+            # usando a mesma AVD → "Running multiple emulators with the same AVD")
+            # e não acumula userdata (~GB) no disco do host. O tmpfs some com o
+            # container. Log do emulador no mesmo lugar.
+            docker_cmd += [
+                "--env", "AUTOIA_ANDROID_AVD_HOME=/tmp/autoia-avd",
+                "--env", "AUTOIA_EMULATOR_LOG=/tmp/autoia-avd/emulator.log",
+            ]
+        bootstrap = (
+            'set -eu; '
+            'mkdir -p "$HOME/Android" "$HOME/.jdks" "$HOME/android-studio"; '
+            'ln -sfn "$ANDROID_HOME" "$HOME/Android/Sdk"; '
+            'ln -sfn "$JAVA_HOME" "$HOME/.jdks/jbr-21.0.11"; '
+            'ln -sfn "$JAVA_HOME" "$HOME/android-studio/jbr"; '
+            + (bootstrap_extra if bootstrap_extra else "")
+            # bootstrap_extra termina em nova linha (bloco `if/fi`); `;` solto
+            # após nova linha é erro de sintaxe — usar nova linha antes do exec.
+            + ("\nexec \"$@\"" if bootstrap_extra else 'exec "$@"')
+        )
+        docker_cmd += [config.image, "/bin/bash", "-lc", bootstrap, "autoia", *cmd]
+    else:
+        docker_cmd += [config.image, *cmd]
     return docker_cmd
 
 
@@ -529,13 +668,21 @@ def build_bwrap_command(
     cli_bin: str | None,
     home: str,
     extra_env: dict | None = None,
+    mount_system_ro: bool = True,
+    environment: dict[str, str] | None = None,
 ) -> list[str]:
     """Variante bubblewrap (fallback leve): isolamento de FS com a mesma árvore de
     mounts, sem rede externa (`--unshare-net`). Não suporta allowlist de egress —
     rede do contêiner fica só loopback."""
     checkout = os.path.abspath(checkout)
     workspace_dir = os.path.abspath(workspace_dir)
-    mounts, _ = _mount_specs(checkout, workspace_dir, [cli_bin or ""], home)
+    mounts, _ = _mount_specs(
+        checkout,
+        workspace_dir,
+        [cli_bin or ""],
+        home,
+        mount_system_ro=mount_system_ro,
+    )
     bwrap = [
         "bwrap",
         "--unshare-all",
@@ -555,7 +702,15 @@ def build_bwrap_command(
         else:
             bwrap += ["--bind", src, dest]
     bwrap += ["--chdir", checkout]
-    env = _container_env(SandboxConfig(mode=SANDBOX_FS, home=home), extra_env)
+    env = _container_env(
+        SandboxConfig(
+            mode=SANDBOX_FS,
+            home=home,
+            environment=dict(environment or {}),
+            mount_system_ro=mount_system_ro,
+        ),
+        extra_env,
+    )
     for key, value in env.items():
         bwrap += ["--setenv", key, value]
     bwrap += ["--", *cmd]
@@ -581,15 +736,31 @@ def add_proxy_hosts(hosts: list[str]) -> None:
 
 
 def ensure_egress_proxy(port: int, whitelist: list[str] | None = None) -> int:
-    """Garante o proxy de egress rodando no host (daemon thread). Retorna a porta."""
+    """Garante o proxy de egress rodando no host (daemon thread). Retorna a porta.
+
+    O proxy é POR PROCESSO (variável de módulo): num worker multi-processo, dois
+    processos podem tentar bindar a mesma porta simultaneamente (ex.: a execução
+    de uma fase e a geração de missão em paralelo). Se a porta já estiver ocupada
+    por um proxy equivalente (mesma allowlist), REUSA-a em vez de falhar a fase —
+    a execução segue com o proxy já existente.
+    """
     global _proxy_server
     with _proxy_lock:
         if whitelist:
             _proxy_allowlist.update(h.lower() for h in whitelist)
         if _proxy_server is None:
-            # Bind 0.0.0.0: o contêiner chega no host via host-gateway (bridge). A
-            # proteção é a allowlist fail-closed — fora dela, 403/recusa.
-            server = ThreadingHTTPServer(("0.0.0.0", port), _EgressHandler)
+            try:
+                # Bind 0.0.0.0: o contêiner chega no host via host-gateway (bridge). A
+                # proteção é a allowlist fail-closed — fora dela, 403/recusa.
+                server = ThreadingHTTPServer(("0.0.0.0", port), _EgressHandler)
+            except OSError:
+                # Porta já em uso por outro processo do worker (proxy equivalente).
+                # Não é um erro: reutiliza o proxy existente e segue a execução.
+                log.warning(
+                    "proxy de egress 0.0.0.0:%s já em uso — reutilizando o proxy existente",
+                    port,
+                )
+                return port
             _proxy_server = server
             threading.Thread(
                 target=server.serve_forever, daemon=True, name="autoia-egress-proxy"

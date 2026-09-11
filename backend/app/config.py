@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .worker.project import DEFAULT_DATABASE_RULE
@@ -91,6 +92,9 @@ DEFAULT_WHITELISTED_HOSTS: list[str] = [
     "registry.yarnpkg.com",
     "files.pythonhosted.org",
     "pypi.org",
+    # O executor Codex usa a sessão ChatGPT e o endpoint de respostas por
+    # HTTPS/WebSocket quando o sandbox full está ativo.
+    "chatgpt.com",
 ]
 
 
@@ -111,6 +115,11 @@ def _list(key: str, default: list[str]) -> list[str]:
     if raw is None:
         return list(default)
     return json.loads(raw)
+
+
+def _hhmm_to_minutes(value: str) -> int:
+    h, _, m = value.strip().partition(":")
+    return int(h) * 60 + int(m)
 
 
 def _frontend_dist_default() -> str | None:
@@ -211,9 +220,51 @@ class Settings:
     #   "full" -> contêiner + rede bridge com proxy de egress allowlist (fail-closed)
     # O modo pode ser sobrescrito por repositório (`Repository.sandbox`).
     sandbox: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX", "off"))
+    # Perfil global de toolchain. Repositórios podem sobrescrever com
+    # Repository.sandbox_profile; os perfis válidos são definidos pelo worker.
+    sandbox_profile: str = field(
+        default_factory=lambda: _env("AUTOIA_SANDBOX_PROFILE", "generic")
+    )
     # Imagem base mínima (debian slim etc.). O restante da toolchain vem de mounts ro
     # do host — não precisa de imagem por ecossistema.
     sandbox_image: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX_IMAGE", "autoia-sandbox"))
+    # Imagem versionada do perfil Android Compose. O perfil continua desabilitado
+    # até o operador construir/puxar essa imagem explicitamente.
+    sandbox_android_image: str = field(
+        default_factory=lambda: _env(
+            "AUTOIA_SANDBOX_ANDROID_IMAGE", "autoia-android-compose:2026-09"
+        )
+    )
+    # Imagem do perfil `android-emulator-*`: toolchain de build + emulador +
+    # system image, self-contained (o emulador bota DENTRO do container com KVM).
+    sandbox_android_emu_image: str = field(
+        default_factory=lambda: _env(
+            "AUTOIA_SANDBOX_ANDROID_EMU_IMAGE", "autoia-android-emu:2026-09"
+        )
+    )
+    # Caminhos usados pelo perfil Android quando o sandbox está deliberadamente
+    # desligado (modo legado/diagnóstico). Em container, o perfil usa /opt/java e
+    # /opt/android-sdk dentro da imagem.
+    sandbox_android_java_home: str = field(
+        default_factory=lambda: _env(
+            "AUTOIA_ANDROID_JAVA_HOME",
+            os.environ.get("JAVA_HOME")
+            or os.path.join(os.path.expanduser("~"), "android-studio", "jbr"),
+        )
+    )
+    sandbox_android_home: str = field(
+        default_factory=lambda: _env(
+            "AUTOIA_ANDROID_HOME",
+            os.environ.get("ANDROID_HOME")
+            or os.path.join(os.path.expanduser("~"), "Android", "Sdk"),
+        )
+    )
+    # Socket opcional do servidor ADB. Em `full`, o padrão aponta para o host
+    # Docker; em `fs`, para o loopback compartilhado. Deixe vazio para usar um
+    # servidor ADB local ao processo (útil no modo off/fallback).
+    sandbox_android_adb_server: str = field(
+        default_factory=lambda: _env("AUTOIA_ANDROID_ADB_SERVER", "")
+    )
     sandbox_memory: str = field(default_factory=lambda: _env("AUTOIA_SANDBOX_MEMORY", "4g"))
     sandbox_cpus: float = field(default_factory=lambda: _float("AUTOIA_SANDBOX_CPUS", 2.0))
     sandbox_pids_limit: int = field(default_factory=lambda: _int("AUTOIA_SANDBOX_PIDS_LIMIT", 256))
@@ -242,6 +293,43 @@ class Settings:
     sandbox_fail_closed: bool = field(
         default_factory=lambda: _env("AUTOIA_SANDBOX_FAIL_CLOSED", "0") == "1"
     )
+    # ── Janela de pico (sem cobrança dupla) ───────────────────────────────────────
+    # Durante a janela de pico os workers NÃO reclamam novas execuções (steps de
+    # task, estágios de chamado, ações de chat) — o trabalho já em andamento
+    # termina normalmente. Útil para provedores com tarifa dobrada no horário de
+    # pico (ex.: DeepSeek cobra o dobro em 01:00–04:00 e 06:00–10:00 UTC,
+    # seg–sex; fins de semana inteiros off-peak). Formato `HH:MM-HH:MM,...` em UTC;
+    # suporta janelas que cruzam a meia-noite (ex.: 22:00-02:00). Vazio desliga.
+    peak_hours_windows: str = field(
+        default_factory=lambda: _env("AUTOIA_PEAK_HOURS_WINDOWS", "01:00-04:00,06:00-10:00")
+    )
+    # Dias da semana (seg–sex) em que a janela de pico se aplica. 0 = todos os dias.
+    peak_hours_weekdays_only: bool = field(
+        default_factory=lambda: _env("AUTOIA_PEAK_HOURS_WEEKDAYS_ONLY", "1") == "1"
+    )
+
+    def in_peak_hours(self, now: datetime | None = None) -> bool:
+        """True se `now` (default: UTC atual, naive) estiver dentro da janela de pico."""
+        now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+        if not self.peak_hours_windows:
+            return False
+        if self.peak_hours_weekdays_only and now.weekday() >= 5:
+            return False
+        minutes = now.hour * 60 + now.minute
+        for window in self.peak_hours_windows.split(","):
+            window = window.strip()
+            if not window:
+                continue
+            start_s, _, end_s = window.partition("-")
+            start = _hhmm_to_minutes(start_s)
+            end = _hhmm_to_minutes(end_s)
+            if start <= end:
+                if start <= minutes < end:
+                    return True
+            else:  # cruza a meia-noite
+                if minutes >= start or minutes < end:
+                    return True
+        return False
 
     def ensure_dirs(self) -> None:
         for d in (

@@ -15,7 +15,9 @@ from .sandbox import (
     build_sandbox_command,
     cleanup_container,
     resolve_cli_path,
+    runtime_environment,
 )
+from .toolchains import preflight_script
 
 # Registro global de subprocessos ativos (kimi/opencode), mapeando cada processo
 # ao `repository_id` do projeto que ele executa (None quando não se aplica) e ao
@@ -268,6 +270,7 @@ def build_spawn_command(
     workspace_dir: str | None = None,
     extra_env: dict[str, str] | None = None,
     cidfile: str | None = None,
+    include_bootstrap: bool = True,
 ) -> tuple[list[str], dict[str, str] | None]:
     """Monta o comando final do executor: sandbox (docker/bwrap) ou direto + ulimits.
 
@@ -291,6 +294,8 @@ def build_spawn_command(
                 cli_bin=resolved or cli_bin,
                 home=sandbox.home or os.path.expanduser("~"),
                 extra_env=extra_env,
+                mount_system_ro=sandbox.mount_system_ro,
+                environment=sandbox.environment,
             )
         else:
             final = build_sandbox_command(
@@ -301,6 +306,7 @@ def build_spawn_command(
                 cli_bin=resolved or cli_bin,
                 extra_env=extra_env,
                 cidfile=cidfile,
+                include_bootstrap=include_bootstrap,
             )
         return final or inner, None
     final = apply_resource_limits(
@@ -311,3 +317,66 @@ def build_spawn_command(
         env.update(extra_env)
         return final, env
     return final, None
+
+
+def run_toolchain_preflight(
+    config: SandboxConfig,
+    *,
+    cwd: str,
+    workspace_dir: str,
+    timeout: int = 30,
+    require_device: bool = False,
+) -> tuple[bool, str]:
+    """Valida JDK/SDK/dispositivo no mesmo ambiente que rodará o agente.
+
+    Retorna `(ok, detalhe)`. O código 70 representa toolchain ausente e 71
+    representa dispositivo ausente; o chamador converte ambos em
+    `infra_blocked`, sem bounce-back de código.
+    """
+    script = preflight_script(config, require_device=require_device)
+    if not script:
+        return True, ""
+    extra_env = runtime_environment(config)
+    command, env = build_spawn_command(
+        ["/bin/bash", "-lc", script],
+        cwd=cwd,
+        sandbox=config,
+        cli_bin="/bin/bash",
+        workspace_dir=workspace_dir,
+        extra_env=extra_env,
+        # O preflight roda num container DESCARTÁVEL: não faz sentido subir o
+        # emulador do perfil aqui (seria boot duplo). O bootstrap (que garante o
+        # device) roda apenas no container de execução da fase.
+        include_bootstrap=False,
+    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            _signal_group(proc, signal.SIGTERM)
+            try:
+                stdout, stderr = proc.communicate(timeout=2)
+            except subprocess.TimeoutExpired:
+                _signal_group(proc, signal.SIGKILL)
+                stdout, stderr = proc.communicate()
+            detail = "\n".join(
+                part.strip() for part in (stdout or "", stderr or "") if part.strip()
+            )
+            return False, f"preflight excedeu {timeout}s" + (f": {detail}" if detail else "")
+    except OSError as exc:
+        return False, f"preflight não iniciou: {exc}"
+    detail = "\n".join(
+        part.strip() for part in (stdout or "", stderr or "") if part.strip()
+    )
+    if proc.returncode != 0:
+        return False, detail or f"preflight saiu com código {proc.returncode}"
+    return True, detail

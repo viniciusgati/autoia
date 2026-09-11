@@ -183,9 +183,47 @@ def test_error_event_aborts(tmp_path):
     outcome, events, _ = _run(tmp_path, lines)
 
     assert outcome.aborted
-    assert "codex:" in outcome.abort_reason
+    assert "provider_limit:" in outcome.abort_reason
     assert "rate limit" in outcome.abort_reason
     assert any(k == "system" and "error" in p for k, p, _ in events)
+
+
+def test_usage_limit_classificado_como_provider_limit(tmp_path):
+    """Mensagem de usage limit do provedor NÃO é "codex saiu com código 2": vira
+    `provider_limit:` para o runner agendar retomada automática."""
+    lines = [
+        {"type": "turn.failed", "error": "You've hit your usage limit. try again at 6:54 PM"},
+    ]
+    outcome, events, _ = _run(tmp_path, lines)
+    assert outcome.aborted
+    assert outcome.abort_reason.startswith("provider_limit:")
+    assert "usage limit" in outcome.abort_reason
+    assert any(k == "system" and "error" in p for k, p, _ in events)
+
+
+def test_usage_limit_no_stderr_classificado_como_provider_limit(tmp_path):
+    """Se o CLI morre antes de emitir evento JSONL, o usage limit no stderr ainda
+    é classificado como `provider_limit:` (retry agendado)."""
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    script = tmp_path / "fake_codex_stderr_limit"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "sys.stderr.write('error: You have hit your usage limit, try again later\\n')\n"
+        "sys.stderr.flush()\n"
+        "sys.exit(2)\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    outcome = codex_exec.run_codex(
+        "prompt", cwd=str(cwd), codex_bin=str(script), log_path=str(tmp_path / "r.log"),
+        timeout=30, max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        cost_per_interaction=0.01, on_event=lambda k, p, c: None,
+    )
+    assert outcome.aborted
+    assert outcome.exit_code == 2
+    assert outcome.abort_reason.startswith("provider_limit:")
+    assert "usage limit" in outcome.abort_reason
 
 
 def test_turn_failed_aborts(tmp_path):
@@ -194,6 +232,45 @@ def test_turn_failed_aborts(tmp_path):
 
     assert outcome.aborted
     assert "máximo de turnos" in outcome.abort_reason
+
+
+def test_turn_failed_sem_motivo_preserva_tipo_do_evento(tmp_path):
+    """`turn.failed`/`error` com payload vazio não podem mais virar o genérico
+    "erro do codex" sem contexto: o rótulo preserva o tipo do evento."""
+    lines = [{"type": "turn.failed"}]
+    outcome, events, _ = _run(tmp_path, lines)
+
+    assert outcome.aborted
+    assert "codex:" in outcome.abort_reason
+    assert "turn.failed" in outcome.abort_reason
+    sys = next(p for k, p, _ in events if k == "system")
+    assert "turn.failed" in sys["error"]
+
+
+def test_error_motivo_aninhado_em_item(tmp_path):
+    """O motivo pode vir em `item.error` (não só no `error` de topo)."""
+    lines = [
+        {
+            "type": "error",
+            "item": {"type": "command_execution", "error": "comando rejeitado"},
+        }
+    ]
+    outcome, _, _ = _run(tmp_path, lines)
+
+    assert outcome.aborted
+    assert "comando rejeitado" in outcome.abort_reason
+
+
+def test_turn_failed_loga_linha_bruta(tmp_path):
+    """Antes de abortar, a linha JSONL original do evento de erro é preservada
+    no log (campos como rollback/code somem no payload resumido)."""
+    line = {"type": "turn.failed", "error": "explodiu", "rollback": {"reason": "x"}}
+    _, _, cwd = _run(tmp_path, [line])
+    log = (cwd.parent / "run.log").read_text(encoding="utf-8")
+
+    assert '"type": "turn.failed"' in log
+    assert "rollback" in log
+
 
 
 def test_exit_code_mapping(tmp_path):
@@ -224,8 +301,12 @@ def test_exit_code_mapping(tmp_path):
 
 
 def test_resume_uses_exec_resume(tmp_path):
-    """Re-execução com `resume_session_id` → `codex exec resume <id> <prompt>`,
-    sem `--cd`/`--sandbox` (o cwd do processo já é o checkout)."""
+    """Re-execução com `resume_session_id` → `codex exec resume <id> <prompt>`.
+
+    O subcomando `resume` NÃO aceita `--sandbox`/`--skip-git-repo-check`/`--model`
+    (passar qualquer um faz o CLI sair com "unexpected argument", exit 2). A
+    política de sandbox e o modelo vão por `-c` (override de config):
+    `-c 'sandbox_mode="danger-full-access"'` e `-c 'model="..."'`."""
     lines = [_thread_started(thread_id="thr_abc"), _agent_message("ok")]
     fake = _make_fake(tmp_path, lines)
     cwd = tmp_path / "checkout"
@@ -244,9 +325,91 @@ def test_resume_uses_exec_resume(tmp_path):
     argv = (cwd / "argv.txt").read_text().split()
     assert argv[1] == "exec"
     assert argv[2] == "resume"
-    assert argv[argv.index("--model") + 1] == "gpt-5.6-luna"
+    assert 'sandbox_mode="danger-full-access"' in argv
+    assert 'model="gpt-5.6-luna"' in argv
     # prompt é o último posicional, depois do session id
     assert argv[-1] == "continuar"
     assert "thr_abc" in argv
+    # resume não aceita os flags do `exec` normal
     assert "--sandbox" not in argv
-    assert "--cd" not in argv
+    assert "--skip-git-repo-check" not in argv
+    assert "--model" not in argv
+
+
+def test_resume_fallback_quando_sessao_morta(tmp_path):
+    """`codex exec resume` com thread/sessão ausente NÃO derruba a fase: o
+    executor detecta "thread/session not found" no stderr, recomeça do zero com
+    uma sessão nova e emite `codex_resume_fallback` (a automação não pode travar
+    numa sessão de retomada perdida)."""
+    script = tmp_path / "fake_codex_fallback"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "with open('argv.txt', 'a') as f:\n"
+        "    f.write(' '.join(sys.argv) + '\\n')\n"
+        "if 'resume' in sys.argv:\n"
+        "    sys.stderr.write('ERROR codex_core::session: failed to record rollout items: "
+        "thread thr_morta not found\\n')\n"
+        "    sys.stderr.flush()\n"
+        "    sys.exit(2)\n"
+        "print('{\"type\": \"thread.started\", \"thread_id\": \"thr_nova\"}')\n"
+        "print('{\"type\": \"item.completed\", \"item\": {\"type\": \"agent_message\", "
+        "\"text\": \"avaliado do zero\"}}')\n"
+        "sys.exit(0)\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    events: list[tuple[str, dict, float]] = []
+
+    def on_event(kind, payload, cost):
+        events.append((kind, payload, cost))
+        return None
+
+    outcome = codex_exec.run_codex(
+        "continuar", cwd=str(cwd), codex_bin=str(script), log_path=str(tmp_path / "b.log"),
+        timeout=30, max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        cost_per_interaction=0.01, resume_session_id="thr_morta",
+        on_event=on_event,
+    )
+    # fallback: sessão nova concluiu com sucesso
+    assert not outcome.aborted
+    assert outcome.exit_code == 0
+    assert outcome.session_id == "thr_nova"
+    assert outcome.final_text == "avaliado do zero"
+    # duas execuções: resume falho + fresh
+    argv = (cwd / "argv.txt").read_text().splitlines()
+    assert len(argv) == 2
+    assert "exec resume" in argv[0] and "thr_morta" in argv[0]
+    assert "exec resume" not in argv[1]
+    # evento do fallback registrado na timeline
+    assert any(k == "system" and "codex_resume_fallback" in p for k, p, _ in events)
+
+
+def test_resume_sem_indicacao_de_sessao_morta_nao_faz_fallback(tmp_path):
+    """Sem o padrão "thread/session not found" no stderr, uma falha no resume é
+    falha de verdade (exit != 0) — não recomeça do zero às cegas."""
+    script = tmp_path / "fake_codex_resume_err"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "with open('argv.txt', 'a') as f:\n"
+        "    f.write(' '.join(sys.argv) + '\\n')\n"
+        "sys.stderr.write('provider unavailable\\n')\n"
+        "sys.stderr.flush()\n"
+        "sys.exit(2)\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    outcome = codex_exec.run_codex(
+        "continuar", cwd=str(cwd), codex_bin=str(script), log_path=str(tmp_path / "b.log"),
+        timeout=30, max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        cost_per_interaction=0.01, resume_session_id="thr_x", on_event=lambda k, p, c: None,
+    )
+    assert outcome.aborted
+    assert outcome.exit_code == 2
+    # sem fallback: apenas UMA execução (o resume falho) no argv.txt
+    argv = (cwd / "argv.txt").read_text().splitlines()
+    assert len(argv) == 1
+    assert "exec resume" in argv[0] and "thr_x" in argv[0]

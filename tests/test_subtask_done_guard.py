@@ -212,3 +212,38 @@ def test_rededaracao_apos_falha_de_infra_nao_e_rejeitada(sub_flow, tmp_path):
     state = _task_state(sub_flow, task_id)
     assert state["subtasks"][0]["status"] == "implemented"
     assert "subtask_done_rejected" not in (state["error"] or "")
+
+
+def test_falha_de_veredicto_antiga_nao_bloqueia_codigo_alterado(sub_flow):
+    """Uma reprovação antiga não pode bloquear uma revalidação após novo código."""
+    from app.models import RunEvent, SubTask, TaskStep
+    from app.worker.subtask import _subtask_previously_failed_verify
+
+    task_id = _start_task(sub_flow, _subtask_pipeline(sub_flow))
+    with sub_flow["session_factory"]() as s:
+        subtask = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+        subtask.summary = "HEAD: abc1234\nveredict: FAIL"
+        verify_step = (
+            s.query(TaskStep)
+            .filter(TaskStep.task_id == task_id)
+            .order_by(TaskStep.position)
+            .all()[1]
+        )
+        s.add(RunEvent(
+            step_id=verify_step.id,
+            seq=1,
+            kind="subtask_failed",
+            payload={
+                "position": 0,
+                "phase": "verify",
+                "reason": "veredicto FAIL",
+            },
+        ))
+        s.commit()
+
+    assert _subtask_previously_failed_verify(
+        sub_flow["session_factory"], task_id, 0, current_head="def5678"
+    ) is False
+    assert _subtask_previously_failed_verify(
+        sub_flow["session_factory"], task_id, 0, current_head="abc1234"
+    ) is True

@@ -166,7 +166,12 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   completo no contexto, até `max_attempts`. Falha **pós-merge** → **nunca** bounce
   (código já integrado): task `needs_review` + evento `post_merge_failed` + PM decide.
 - **Subtarefas**: fases `implement`/`verify` iteram sobre subtarefas (cada uma com seu
-  bounce-back). Re-execução da fase implement: subtarefas com tentativas esgotadas
+  bounce-back). **Subtarefa NÃO tem limite próprio de tentativas** — o contador é
+  cumulativo entre implement e verify e, com limite, travava a task para sempre (nem a
+  retomada humana renovava o orçamento). O limite real do loop é a **tentativa da fase
+  implement** (incrementada a cada bounce-back; esgotada, a task vai a `needs_review`
+  com `subtarefas reprovadas e fase de correção esgotada`). Re-execução da fase
+  implement: subtarefas com tentativas esgotadas
   (`failed`) ou presas em `implementing` (worker morto no meio) voltam a `pending` —
   sem isso, reabrir o developer com só subtarefas `failed`/`done` terminaria a fase em
   `phase_done` sem executar nada (ignorando a instrução em silêncio). Se ainda assim
@@ -204,6 +209,13 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `AUTOIA_CODEX_MODELS`).
 - **Orçamento**: custo por interação (`AUTOIA_COST_PER_INTERACTION`, kimi) ou custo real
   (opencode); estourou → `needs_review`. `RunEvent.cost` acumula em `Task.cost_spent`.
+- **Janela de pico** (`Settings.in_peak_hours`, env `AUTOIA_PEAK_HOURS_WINDOWS`
+  `HH:MM-HH:MM,...` em UTC, default `01:00-04:00,06:00-10:00` seg–sex; vazio desliga;
+  `AUTOIA_PEAK_HOURS_WEEKDAYS_ONLY=1|0`): durante a janela os workers **não reclamam**
+  novas execuções (steps de task, estágios de chamado, ações de chat) — o trabalho já em
+  andamento termina, mas nada novo começa. Defaults seguem o horário de pico do DeepSeek
+  (tarifa dobrada); trava aplicada nos loops `worker_loop`/`chamado_worker_loop`/
+  `chat_worker_loop` antes do claim, com heartbeat mantido fresco durante a pausa.
 - **Watchdogs de execução** (em `kimi_exec`/`opencode_exec`): o guardrail de comandos
   arriscados foi **removido** — a detecção era pós-emissão (o comando já rodava quando a
   `tool_call` chegava no stream), não impedia o dano e gerava falsos positivos que
@@ -257,8 +269,11 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 - **Bloqueio + retomada por instrução**: agente escreve `autoia_blocked.json`
   (`reason_type`/`reason`/`question`) quando não consegue continuar sozinho → worker marca
   fase e task como `blocked` (não é falha). `POST /api/tasks/{id}/blocked/continue` grava
-  `Task.resume_instruction` (separada do contexto original), reabre a MESMA fase
-  (attempt+1) e registra `user_intervention`/`execution_resumed` na timeline. A instrução
+  `Task.resume_instruction` (separada do contexto original), reabre a MESMA fase e
+  registra `user_intervention`/`execution_resumed` na timeline. **Ação humana = novo
+  orçamento de tentativas**: instruction/retry/bounceback manual resetam `attempt` das
+  fases para 1 (o `run` da timeline nunca reseta e mantém o histórico) — sem isso, uma
+  retomada após esgotamento falhava na primeira reprovação seguinte. A instrução
   entra no handoff/prompt da retomada. `Task.details` = detalhes adicionados pelo usuário
   durante o fluxo (entram no handoff das próximas fases).
 - **Pedir decisão ao usuário** (`autoia_decision.json`, contrato `DECISION_TOOL` no

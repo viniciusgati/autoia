@@ -213,7 +213,7 @@ def test_retry_step(app_client, registered_repo, settings):
     response = app_client.post(f"/api/tasks/{task['id']}/steps/0/retry")
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["steps"][0]["attempt"] == 2
+    assert body["steps"][0]["attempt"] == 1  # ação humana = novo orçamento
     assert body["steps"][0]["status"] == "pending"
     assert body["status"] == "queued"
 

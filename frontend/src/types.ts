@@ -19,6 +19,10 @@ export interface Repository {
   auto_summary: boolean;
   /** Modo de sandbox de execução do projeto: null (herda global) | "off" | "fs" | "full". */
   sandbox: string | null;
+  /** Perfil de toolchain allowlisted (ex.: android-compose-37). */
+  sandbox_profile: string | null;
+  /** Imagem Docker pinada pelo administrador para o projeto. */
+  sandbox_image: string | null;
   /** Repositórios onde este projeto pode criar tarefas (allowlist de saída;
    *  vazio = restritivo, só o próprio projeto). */
   task_targets: string[];

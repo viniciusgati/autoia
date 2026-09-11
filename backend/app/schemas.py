@@ -28,6 +28,10 @@ class RepositoryCreate(BaseModel):
     auto_summary: bool = False
     # Modo de sandbox de execução do projeto: None herda o global; "off"|"fs"|"full".
     sandbox: str | None = None
+    # Perfil de toolchain seguro e allowlisted (ex.: android-compose-37).
+    sandbox_profile: str | None = None
+    # Imagem pinada pelo administrador para este projeto (opcional).
+    sandbox_image: str | None = None
     # Repositórios onde este projeto pode criar tarefas (allowlist de saída;
     # vazio = restritivo, só o próprio projeto).
     task_targets: list[str] = []
@@ -52,6 +56,8 @@ class RepositoryUpdate(BaseModel):
     default_pipeline_id: int | None = None
     auto_summary: bool | None = None
     sandbox: str | None = None
+    sandbox_profile: str | None = None
+    sandbox_image: str | None = None
     task_targets: list[str] | None = None
     external_context: str | None = None
 
@@ -78,6 +84,8 @@ class RepositoryOut(BaseModel):
     default_pipeline_id: int | None = None
     auto_summary: bool = False
     sandbox: str | None = None
+    sandbox_profile: str | None = None
+    sandbox_image: str | None = None
     # Repositórios onde este projeto pode criar tarefas (allowlist de saída;
     # vazio = restritivo). Reexista a NULL de bancos criados antes da coluna.
     task_targets: list[str] = []

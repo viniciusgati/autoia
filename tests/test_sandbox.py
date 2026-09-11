@@ -140,6 +140,27 @@ def test_build_sandbox_command_full_network_proxy(tmp_path):
     assert "HTTPS_PROXY=http://host.docker.internal:18888" in joined
 
 
+def test_toolchain_android_recebe_home_temporario_gravavel():
+    """O adb não pode escrever no home somente-leitura do host dentro do container."""
+    cfg = _cfg(
+        "full",
+        image="autoia-android-compose:2026-09",
+        profile="android-compose-37",
+        environment={
+            "AUTOIA_TOOLCHAIN_PROFILE": "android-compose-37",
+            "JAVA_HOME": "/opt/java/openjdk",
+            "ANDROID_HOME": "/opt/android-sdk",
+        },
+    )
+    cmd = sb.build_sandbox_command(
+        ["codex", "exec", "--json"], config=cfg,
+        checkout="/workspace/task", workspace_dir="/workspace",
+        cli_bin="/home/teste/.nvm/bin/codex",
+    )
+    assert "--tmpfs /home/teste:rw,size=256m,mode=1777" in " ".join(cmd)
+    assert 'ln -sfn "$ANDROID_HOME" "$HOME/Android/Sdk"' in " ".join(cmd)
+
+
 def test_build_sandbox_command_tmpfs_quando_nada_sob_tmp():
     # fontes fora de /tmp → /tmp é tmpfs limitado (dirs inexistentes não viram
     # mount, então não há origem sob /tmp e a decisão cai em tmpfs)
@@ -256,6 +277,28 @@ def test_egress_proxy_permite_host_docker_internal():
         sock = socket_tunnel(port, "host.docker.internal", 1)
         assert sock is None  # conexão ao alvo falhou, mas o filtro deixou passar
     finally:
+        sb.stop_egress_proxy()
+
+
+def test_ensure_egress_proxy_reusa_porta_ocupada_por_outro_processo():
+    """Porta do proxy já ocupada (outro processo do worker) NÃO derruba a fase:
+    `ensure_egress_proxy` reutiliza o proxy existente e retorna a porta em vez de
+    falhar com 'Address already in use' (worker multi-processo roda a execução da
+    fase e a geração de missão em paralelo — cada processo tem seu próprio
+    `_proxy_server`)."""
+    import socket
+
+    sb.stop_egress_proxy()
+    # Simula o proxy de outro processo: socket já bindado/listening na porta.
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    blocker.bind(("0.0.0.0", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    try:
+        assert sb.ensure_egress_proxy(port) == port
+    finally:
+        blocker.close()
         sb.stop_egress_proxy()
 
 
@@ -1002,3 +1045,93 @@ def test_subtask_executor_fail_closed_aborta_sem_docker(tmp_path, monkeypatch):
     assert outcome.aborted
     assert "fail-closed" in (outcome.abort_reason or "")
     assert outcome.sandbox_mode == "fs"
+
+
+def test_build_sandbox_command_passa_kvm_ao_container(tmp_path, monkeypatch):
+    """Perfil com `kvm=True` passa `/dev/kvm` + o gid do device ao container
+    (uid do worker precisa do grupo para abrir o dispositivo)."""
+    checkout = str(tmp_path / "checkout")
+    ws = str(tmp_path / "ws")
+    os.makedirs(checkout)
+    os.makedirs(ws)
+    real_exists = sb.os.path.exists
+    real_stat = sb.os.stat
+    monkeypatch.setattr(
+        sb.os.path, "exists", lambda p: (p == "/dev/kvm") or real_exists(p)
+    )
+    def _stat(path, *a, **k):
+        if path == "/dev/kvm":
+            return type("S", (), {"st_gid": 993, "st_mode": 0o20666})()
+        return real_stat(path, *a, **k)
+    monkeypatch.setattr(sb.os, "stat", _stat)
+    cfg = _cfg("full", image="autoia-android-emu:2026-09", profile="android-emulator-35", kvm=True)
+    cmd = sb.build_sandbox_command(
+        ["codex", "exec", "--json"], config=cfg,
+        checkout=checkout, workspace_dir=ws, cli_bin="/usr/bin/codex",
+    )
+    joined = " ".join(cmd)
+    assert "--device /dev/kvm" in joined
+    assert "--group-add 993" in joined
+
+
+def test_build_sandbox_command_sem_kvm_nao_passa_device(tmp_path):
+    checkout = str(tmp_path / "checkout")
+    ws = str(tmp_path / "ws")
+    os.makedirs(checkout)
+    os.makedirs(ws)
+    cfg = _cfg("full", image="autoia-android-emu:2026-09", profile="android-emulator-35", kvm=False)
+    cmd = sb.build_sandbox_command(
+        ["codex", "exec", "--json"], config=cfg,
+        checkout=checkout, workspace_dir=ws, cli_bin="/usr/bin/codex",
+    )
+    joined = " ".join(cmd)
+    assert "--device /dev/kvm" not in joined
+    assert "--group-add" not in joined
+
+
+def test_build_sandbox_command_bootstrap_emulador_so_com_perfil(tmp_path):
+    """Perfil do emulador injeta o bootstrap + aponta a área do AVD para disco do
+    host (bind-montado rw), não para o tmpfs do HOME."""
+    checkout = str(tmp_path / "checkout")
+    ws = str(tmp_path / "ws")
+    os.makedirs(checkout)
+    os.makedirs(ws)
+    cfg = _cfg(
+        "full",
+        image="autoia-android-emu:2026-09",
+        profile="android-emulator-35",
+        environment={"AUTOIA_TOOLCHAIN_PROFILE": "android-emulator-35", "AUTOIA_ANDROID_EMULATOR": "1"},
+        bootstrap_extra='if [ "${AUTOIA_ANDROID_EMULATOR:-}" = "1" ]; then\n  echo boot\nfi\n',
+    )
+    cmd = sb.build_sandbox_command(
+        ["codex", "exec", "--json"], config=cfg,
+        checkout=checkout, workspace_dir=ws, cli_bin="/usr/bin/codex",
+    )
+    joined = " ".join(cmd)
+    assert "--env AUTOIA_ANDROID_AVD_HOME=/tmp/autoia-avd" in joined
+    assert "echo boot" in joined
+    assert 'exec "$@"' in joined
+
+
+def test_build_sandbox_command_bootstrap_omitido_no_preflight(tmp_path):
+    """Preflight (container descartável) não sobe o emulador: `include_bootstrap=False`
+    omite o bootstrap_extra — evita boot duplo por execução."""
+    checkout = str(tmp_path / "checkout")
+    ws = str(tmp_path / "ws")
+    os.makedirs(checkout)
+    os.makedirs(ws)
+    cfg = _cfg(
+        "full",
+        image="autoia-android-emu:2026-09",
+        profile="android-emulator-35",
+        environment={"AUTOIA_TOOLCHAIN_PROFILE": "android-emulator-35", "AUTOIA_ANDROID_EMULATOR": "1"},
+        bootstrap_extra='if [ "${AUTOIA_ANDROID_EMULATOR:-}" = "1" ]; then\n  echo boot\nfi\n',
+    )
+    cmd = sb.build_sandbox_command(
+        ["codex", "exec", "--json"], config=cfg,
+        checkout=checkout, workspace_dir=ws, cli_bin="/usr/bin/codex",
+        include_bootstrap=False,
+    )
+    joined = " ".join(cmd)
+    assert "echo boot" not in joined
+    assert 'exec "$@"' in joined

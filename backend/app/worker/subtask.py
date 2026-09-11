@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+from dataclasses import replace
 
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -38,7 +40,7 @@ from ..models import (
     Task,
     TaskStep,
 )
-from . import codex_exec, exec_common, gitops, kimi_exec, opencode_exec
+from . import codex_exec, exec_common, gitops, kimi_exec, opencode_exec, sandbox as sandbox_mod
 from .sandbox import (
     SANDBOX_OFF,
     SandboxConfig,
@@ -56,10 +58,21 @@ def _sub_sandbox(settings) -> SandboxConfig | None:
     return sb if isinstance(sb, SandboxConfig) else None
 
 
-def _sub_extra_env(settings) -> dict[str, str]:
-    sb = _sub_sandbox(settings)
+def _sub_extra_env(settings, sandbox: SandboxConfig | None = None) -> dict[str, str]:
+    """Ambiente do sandbox efetivamente escolhido para esta execução.
+
+    O argumento explícito é importante no fallback: quando a imagem Docker não
+    existe, o chamador troca o perfil de container pelo perfil do host e o
+    preflight precisa receber o mesmo JAVA_HOME/ANDROID_HOME.
+    """
+    sb = sandbox or _sub_sandbox(settings)
     base = sb.host_services_base if sb else "http://127.0.0.1"
     mode = sb.mode if sb else "off"
+    if sb:
+        return sandbox_mod.runtime_environment(
+            sb,
+            {"AUTOIA_HOST_SERVICES_BASE": base, "AUTOIA_SANDBOX": mode},
+        )
     return {"AUTOIA_HOST_SERVICES_BASE": base, "AUTOIA_SANDBOX": mode}
 
 
@@ -89,13 +102,13 @@ def _run_subtask_executor(
     task_stop_file: str | None,
     sandbox: SandboxConfig | None,
     model: str | None = None,
+    require_device: bool = False,
     on_event,
 ):
     """Dispatch do executor da task (kimi/opencode/codex) para UMA execução de
     subtarefa — espelha o `_run_executor` do runner, mas o ciclo de subtarefas
     gerencia o próprio lock_push/sandbox (por isso não reusa o runner)."""
     workspace_dir = getattr(settings, "workspace_dir", None)
-    extra_env = _sub_extra_env(settings)
     # Fallback do sandbox (mesmo contrato do runner): sem docker/imagem e sem
     # fail_closed, executa sem isolamento com aviso no log — sem isso, o ciclo
     # de subtarefas falhava em cadeia em ambientes sem daemon docker (ex.: CI)
@@ -106,7 +119,7 @@ def _run_subtask_executor(
                 outcome = exec_common.ExecOutcome()
                 outcome.aborted = True
                 outcome.abort_reason = (
-                    f"sandbox {sandbox.mode} obrigatório mas docker/imagem "
+                    f"infra_blocked: sandbox {sandbox.mode} obrigatório mas docker/imagem "
                     f"{sandbox.image} indisponíveis (fail-closed)"
                 )
                 outcome.sandbox_mode = sandbox.mode
@@ -117,7 +130,41 @@ def _run_subtask_executor(
                 "AUTOIA_SANDBOX_FAIL_CLOSED=1 para falhar)",
                 sandbox.mode, sandbox.image,
             )
-            sandbox = SandboxConfig(mode=SANDBOX_OFF)
+            sandbox = replace(
+                sandbox,
+                mode=SANDBOX_OFF,
+                environment=dict(sandbox.fallback_environment),
+                preflight=sandbox.fallback_preflight,
+                device_preflight=sandbox.fallback_device_preflight,
+            )
+    if sandbox is None:
+        sandbox = SandboxConfig(mode=SANDBOX_OFF)
+    extra_env = _sub_extra_env(settings, sandbox)
+    preflight_ok, preflight_detail = exec_common.run_toolchain_preflight(
+        sandbox,
+        cwd=cwd,
+        workspace_dir=workspace_dir or cwd,
+        timeout=min(60, max(10, settings.run_timeout)),
+        require_device=require_device,
+    )
+    if not preflight_ok:
+        reason = f"infra_blocked: toolchain preflight falhou — {preflight_detail}"
+        outcome = exec_common.ExecOutcome(
+            aborted=True,
+            abort_reason=reason,
+            sandbox_mode=sandbox.mode,
+        )
+        if on_event:
+            on_event(
+                "infra_preflight_failed",
+                {
+                    "profile": sandbox.profile,
+                    "require_device": require_device,
+                    "detail": preflight_detail,
+                },
+                0.0,
+            )
+        return outcome
     if executor == "opencode":
         return opencode_exec.run_opencode(
             prompt,
@@ -717,26 +764,53 @@ def _subtask_marked_done(checkout: str, position_1based: int) -> bool:
     return False
 
 
-def _subtask_previously_failed_verify(session_factory, task_id: int, position: int) -> bool:
+_HEAD_IN_REPORT = re.compile(r"\bHEAD:\s*([0-9a-f]{7,40})\b", re.IGNORECASE)
+
+
+def _report_head(value: object) -> str | None:
+    """Extrai o HEAD registrado no relatório de uma verificação antiga."""
+    match = _HEAD_IN_REPORT.search(str(value or ""))
+    return match.group(1).lower() if match else None
+
+
+def _subtask_previously_failed_verify(
+    session_factory,
+    task_id: int,
+    position: int,
+    current_head: str | None = None,
+) -> bool:
     """True se a subtarefa já reprovou na verificação por VEREDICTO REAL (FAIL/AUSENTE)
     em tentativa anterior — ou seja, o código foi apontado como defeituoso e devolvido
     ao developer por correção.
 
     Falhas de INFRAESTRUTURA na verificação (guardrail, timeout, kimi saiu com erro)
     NÃO contam como defeito: o código não foi avaliado, então o developer pode
-    legitimamente re-declarar a subtarefa como já implementada sem alterar nada."""
+    legitimamente re-declarar a subtarefa como já implementada sem alterar nada.
+
+    Se o HEAD atual é diferente do HEAD da última reprovação, a reprovação é
+    histórica: houve alteração de código depois dela e a declaração pode ser
+    reavaliada. Eventos antigos não tinham esse campo, então usamos o HEAD que
+    o relatório do tester eventualmente registrou; se não houver evidência,
+    mantemos o comportamento estrito da guarda.
+    """
     with session_factory() as s:
         step_ids = [
             sid for (sid,) in s.query(TaskStep.id).filter(TaskStep.task_id == task_id).all()
         ]
         if not step_ids:
             return False
+        subtask_row = (
+            s.query(SubTask)
+            .filter(SubTask.task_id == task_id, SubTask.position == position)
+            .first()
+        )
         events = (
             s.query(RunEvent)
             .filter(
                 RunEvent.step_id.in_(step_ids),
                 RunEvent.kind == "subtask_failed",
             )
+            .order_by(RunEvent.id.desc())
             .all()
         )
     for ev in events:
@@ -747,6 +821,11 @@ def _subtask_previously_failed_verify(session_factory, task_id: int, position: i
             continue
         reason = str(payload.get("reason") or "")
         if "veredicto" in reason.lower():
+            failed_head = str(payload.get("head") or "").strip().lower() or None
+            if failed_head is None and subtask_row is not None:
+                failed_head = _report_head(subtask_row.summary)
+            if current_head and failed_head and current_head.lower() != failed_head:
+                return False
             return True
     return False
 
@@ -926,7 +1005,9 @@ def _run_one_implement(
             # Re-declarar "já implementada" sem alterar nada encobre a falha e
             # queima ciclos de tester — nesse caso, falha a subtarefa na hora.
             if (
-                _subtask_previously_failed_verify(session_factory, task_id, st.position)
+                _subtask_previously_failed_verify(
+                    session_factory, task_id, st.position, current_head=head_before,
+                )
                 and not _done_declaration_has_changes(checkout, head_before)
             ):
                 reason = (
@@ -1029,12 +1110,33 @@ def run_verify_subtasks(
     failed_positions: list[int] = []
 
     with session_factory() as s:
-        to_verify = (
+        candidates = (
             s.query(SubTask)
-            .filter(SubTask.task_id == task_id, SubTask.status.in_([SUB_IMPLEMENTED]))
+            .filter(
+                SubTask.task_id == task_id,
+                SubTask.status.in_([SUB_IMPLEMENTED, SUB_PENDING]),
+            )
             .order_by(SubTask.position)
             .all()
         )
+        # Uma falha de infraestrutura deixa a subtarefa pending porque o código
+        # não foi avaliado. Ao reabrir o verify, ela precisa voltar para a fila
+        # de validação; uma reprovação por veredicto continua exigindo o ciclo
+        # implement → verify e não é revalidada automaticamente.
+        infra_prefixes = (
+            "infra_blocked:",
+            "provider_limit:",  # limite do provedor: retomada automática revalida
+            "timeout",
+            "kimi saiu",
+            "opencode saiu",
+            "codex saiu",
+            "worker reiniciado",
+        )
+        to_verify = [
+            st for st in candidates
+            if st.status == SUB_IMPLEMENTED
+            or str(st.error or "").lower().startswith(infra_prefixes)
+        ]
         already_done = (
             s.query(SubTask)
             .filter(SubTask.task_id == task_id, SubTask.status == SUB_DONE)
@@ -1138,6 +1240,7 @@ def _run_one_verify(
             task_stop_file=task_stop_file,
             sandbox=sandbox,
             model=model,
+            require_device=False,
             on_event=on_event,
         )
     finally:
@@ -1192,11 +1295,16 @@ def _run_one_verify(
             st.status = SUB_PENDING
             st.summary = raw  # relatório do tester para o developer
             st.error = f"veredicto {label or 'AUSENTE'}"
+            try:
+                failure_head = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+            except gitops.GitError:
+                failure_head = None
             st.finished_at = func.now()
             _system_event(
                 s, step, "subtask_failed",
                 {"position": st.position, "title": st.title,
-                 "reason": f"veredicto {label or 'AUSENTE'}", "phase": "verify"},
+                 "reason": f"veredicto {label or 'AUSENTE'}", "phase": "verify",
+                 "head": failure_head},
             )
 
         s.commit()

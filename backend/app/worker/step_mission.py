@@ -114,6 +114,8 @@ def generate_mission(settings, session_factory, step_id: int, run: int) -> bool:
             model=(task.model or "").strip() or None,
             on_event=None,
             kimi_cost_per_interaction=0.0,
+            # Missão é LLM pura (lê estado, escreve JSON): não sobe o emulador.
+            skip_device_bootstrap=True,
         )
 
         data = verdicts.read_step_mission(checkout)

@@ -160,7 +160,21 @@ def claim_next_chat(session_factory) -> tuple[int, str] | None:
 def chat_worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None:
     log.info("chat-worker iniciado (dir de trabalho: %s)", workspace_dir)
     hb_path = os.path.join(workspace_dir, CHAT_HEARTBEAT_FILE)
+    peak_prev = False
     while True:
+        peak = settings.in_peak_hours()
+        if peak and not peak_prev:
+            log.info(
+                "janela de pico ativa — pausando novas execuções de chat (janelas UTC: %s)",
+                settings.peak_hours_windows,
+            )
+        elif not peak and peak_prev:
+            log.info("janela de pico encerrada — retomando novas execuções de chat")
+        peak_prev = peak
+        if peak:
+            _touch(hb_path)
+            time.sleep(60)
+            continue
         _touch(hb_path)
         try:
             claimed = claim_next_chat(session_factory)

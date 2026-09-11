@@ -112,7 +112,7 @@ export default function RepoDashboard() {
           <div className="config-summary">
             <div>
               <span className="task-head-label">Sandbox</span>
-              <span>{repo.sandbox ? repo.sandbox : "global (off)"}</span>
+              <span>{repo.sandbox ? repo.sandbox : "global (off)"}{repo.sandbox_profile ? ` · ${repo.sandbox_profile}` : ""}</span>
             </div>
             <div>
               <span className="task-head-label">Orçamento por tarefa</span>

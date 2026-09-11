@@ -54,6 +54,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
         ("auto_summary", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("sandbox", "VARCHAR(10)"),
+        ("sandbox_profile", "VARCHAR(80)"),
+        ("sandbox_image", "VARCHAR(200)"),
         ("task_targets", "JSON"),
         ("external_context", "TEXT"),
     ],
@@ -103,6 +105,9 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # do workspace no commit REAL da task — sem grep de mensagem na história
         # (que pegava commits de outras tasks já mescladas na main).
         ("commit_sha", "VARCHAR(64)"),
+        # Próximo instante em que a fase pode ser reclamada (retry após limite
+        # de uso do provedor): o claim ignora steps com retry_at no futuro.
+        ("retry_at", "DATETIME"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),
