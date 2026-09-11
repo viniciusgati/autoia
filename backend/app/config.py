@@ -95,6 +95,13 @@ DEFAULT_WHITELISTED_HOSTS: list[str] = [
     # O executor Codex usa a sessão ChatGPT e o endpoint de respostas por
     # HTTPS/WebSocket quando o sandbox full está ativo.
     "chatgpt.com",
+    # O executor opencode (Bun CLI) fala com o gateway `zen` do provider
+    # opencode-go (`https://opencode.ai/zen/go/v1/chat/completions`).
+    "opencode.ai",
+    "api.opencode.ai",
+    # Providers de modelo oferecidos no seletor do opencode (fora do opencode-go).
+    "api.deepseek.com",
+    "api.moonshot.cn",
 ]
 
 

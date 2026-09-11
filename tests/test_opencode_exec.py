@@ -56,9 +56,9 @@ def _finish(cost: float, reason: str = "stop"):
     }
 
 
-def _run(tmp_path, lines, timeout: float = 30, max_identical_calls: int = 3, risky_patterns: list[str] | None = None, sleep: float = 0.0, **kwargs):
+def _run(tmp_path, lines, timeout: float = 30, max_identical_calls: int = 3, risky_patterns: list[str] | None = None, sleep: float = 0.0, cwd_override: str | None = None, **kwargs):
     cwd = tmp_path / "checkout"
-    cwd.mkdir()
+    cwd.mkdir(exist_ok=True)
     log_path = str(tmp_path / "run.log")
     events: list[tuple[str, dict, float]] = []
 
@@ -68,13 +68,13 @@ def _run(tmp_path, lines, timeout: float = 30, max_identical_calls: int = 3, ris
 
     outcome = opencode_exec.run_opencode(
         "prompt-x",
-        cwd=str(cwd),
+        cwd=cwd_override or str(cwd),
         opencode_bin=_make_fake(tmp_path, lines, sleep=sleep),
         log_path=log_path,
         timeout=timeout,
         max_identical_calls=max_identical_calls,
         risky_patterns=risky_patterns or [],
-        checkout_path=str(cwd),
+        checkout_path=cwd_override or str(cwd),
         on_event=on_event,
         **kwargs,
     )
@@ -161,6 +161,23 @@ def test_model_passed_as_flag(tmp_path):
     argv = (cwd / "argv.txt").read_text()
     assert "-m" in argv
     assert "provider/modelo-x" in argv
+
+
+def test_dir_sempre_absoluto(tmp_path, monkeypatch):
+    """Regressão (task 127): o `--dir` vai dentro do container (workdir absoluto)
+    — um cwd relativo (`data/workspaces/...`) não resolve lá. Deve virar absoluto."""
+    import os
+
+    lines = [_text("ok"), _finish(0.001)]
+    monkeypatch.chdir(tmp_path)
+    rel = "data/workspaces/4/task_127"
+    os.makedirs(rel)
+    _run(tmp_path, lines, cwd_override=rel)
+    argv = (tmp_path / rel / "argv.txt").read_text()
+    assert "--dir" in argv
+    abs_dir = argv.split("--dir", 1)[1].split()[0]
+    assert os.path.isabs(abs_dir)
+    assert abs_dir == os.path.abspath(rel)
 
 
 def test_captures_session_id_and_resumes(tmp_path):

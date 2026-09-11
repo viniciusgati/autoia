@@ -111,6 +111,10 @@ def run_opencode(
     stall → re-execução) — o comando ganha `--session <id>` para continuar a mesma
     conversa (contexto/cache preservados), espelhando o `-S <id>` do kimi.
     """
+    # cwd ABSOLUTO: o workspace do worker pode ser relativo (`data/workspaces/...`),
+    # mas o `--dir` vai dentro do container (workdir absoluto) — um caminho
+    # relativo não resolve lá ("Failed to change directory", task 127).
+    cwd = os.path.abspath(cwd)
     cmd = [opencode_bin, "run", prompt, "--format", "json", "--dir", cwd]
     if resume_session_id:
         # Retoma a MESMA sessão da execução anterior (contexto/cache preservados).

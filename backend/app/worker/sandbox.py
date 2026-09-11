@@ -272,6 +272,13 @@ _HOME_CLI_DIRS: list[tuple[str, str]] = [
     (".cache", "rw"),             # caches de build (pip, etc.)
 ]
 
+# Pais dos binds acima que o docker cria como root:root 0755 ao montar os binds
+# (ex.: `.local/share/opencode` cria `~/.local`) — o uid do container não
+# consegue criar mais nada lá (o opencode morre com EACCES em `~/.local/state`).
+# Vira tmpfs 1777 gravável no build do comando; os binds específicos seguem
+# montados por cima.
+_HOME_TMPFS_PARENTS: tuple[str, ...] = (".config", ".local")
+
 # Paths sensíveis (relativos ao home ou absolutos) que NUNCA podem entrar nos mounts
 # do sandbox — nem ro, nem rw. Chaves/credenciais do host ficam fora do alcance do
 # robô; a meta é "não danifica e não exfiltra". Os dirs de estado autorizados das
@@ -596,6 +603,13 @@ def build_sandbox_command(
         # quebraria execução de scripts/binários temporários (ex.: pytest cria
         # fakes executáveis em /tmp → PermissionError).
         docker_cmd += ["--tmpfs", f"/tmp:rw,size={config.tmpfs_size},mode=1777,exec"]
+
+    # Pais dos binds de estado das CLIs (`~/.config`, `~/.local`): o docker os
+    # cria como root:root 0755 ao montar os binds e o uid do container não
+    # consegue criar mais nada lá (opencode → EACCES em `~/.local/state`).
+    # tmpfs 1777 devolve a gravabilidade; os binds específicos seguem por cima.
+    for sub in _HOME_TMPFS_PARENTS:
+        docker_cmd += ["--tmpfs", f"{home}/{sub}:rw,size=64m,mode=1777"]
 
     # Toolchains Android precisam que o adb crie ~/.android (e eventualmente
     # outros arquivos de estado) durante o preflight. O home do host continua

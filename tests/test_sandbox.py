@@ -161,6 +161,33 @@ def test_toolchain_android_recebe_home_temporario_gravavel():
     assert 'ln -sfn "$ANDROID_HOME" "$HOME/Android/Sdk"' in " ".join(cmd)
 
 
+def test_toolchain_pais_dos_binds_de_estado_gravalveis():
+    """Regressão (task 127): o docker cria os pais dos binds de estado das CLIs
+    (~/.config, ~/.local) como root 0755 ao montar os binds — o opencode morria
+    com EACCES em `~/.local/state`. Os pais viram tmpfs 1777 gravável; os binds
+    específicos seguem montados por cima."""
+    cfg = _cfg(
+        "full",
+        image="autoia-android-compose:2026-09",
+        profile="android-compose-37",
+        environment={
+            "AUTOIA_TOOLCHAIN_PROFILE": "android-compose-37",
+            "JAVA_HOME": "/opt/java/openjdk",
+            "ANDROID_HOME": "/opt/android-sdk",
+        },
+    )
+    cmd = sb.build_sandbox_command(
+        ["opencode", "run", "oi", "--format", "json"], config=cfg,
+        checkout="/workspace/task", workspace_dir="/workspace",
+        cli_bin="/home/teste/.nvm/bin/opencode",
+    )
+    joined = " ".join(cmd)
+    assert "--tmpfs /home/teste/.config:rw,size=64m,mode=1777" in joined
+    assert "--tmpfs /home/teste/.local:rw,size=64m,mode=1777" in joined
+    # e sem a regressão não existe (o tmpfs do /tmp segue presente)
+    assert "--tmpfs /tmp" in joined
+
+
 def test_build_sandbox_command_tmpfs_quando_nada_sob_tmp():
     # fontes fora de /tmp → /tmp é tmpfs limitado (dirs inexistentes não viram
     # mount, então não há origem sob /tmp e a decisão cai em tmpfs)
