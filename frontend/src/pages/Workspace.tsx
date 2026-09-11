@@ -864,8 +864,8 @@ export default function Workspace() {
                     act(() =>
                       api.updateTaskStory(taskId, {
                         executor: value,
-                        // Modelo só faz sentido no codex: trocar de executor limpa.
-                        model: value === "codex" ? task.model ?? null : null,
+                        // Modelo só faz sentido em codex/opencode: trocar para kimi limpa.
+                        model: value === "codex" || value === "opencode" ? task.model ?? null : null,
                       }),
                     );
                   }}
@@ -875,12 +875,13 @@ export default function Workspace() {
                   <option value="codex">codex</option>
                 </select>
               </label>
-              {task.executor === "codex" && (
-                <label className="ws-executor" title="modelo do codex (vazio = padrão do codex)">
+              {(task.executor === "codex" || task.executor === "opencode") && (
+                <label className="ws-executor" title={`modelo do ${task.executor} (vazio = padrão do ${task.executor})`}>
                   modelo:
                   <ModelSelect
                     value={task.model ?? ""}
                     disabled={executorDisabled}
+                    source={task.executor}
                     onChange={(value) =>
                       act(() => api.updateTaskStory(taskId, { model: value || null }))
                     }

@@ -185,15 +185,16 @@ export default function Chamados() {
                   <option value="codex">codex</option>
                 </select>
               </div>
-              {form.executor === "codex" && (
+              {form.executor === "codex" || form.executor === "opencode" ? (
                 <div className="form-field">
                   <label className="form-label">Modelo</label>
                   <ModelSelect
                     value={form.model}
                     onChange={(model) => setForm((f) => ({ ...f, model }))}
+                    source={form.executor}
                   />
                 </div>
-              )}
+              ) : null}
             </div>
             {formError && <p className="form-error">{formError}</p>}
             <div className="form-actions">

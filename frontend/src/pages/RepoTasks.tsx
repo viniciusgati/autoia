@@ -179,10 +179,10 @@ export default function RepoTasks() {
               <option value="codex">codex</option>
             </select>
           </div>
-          {executor === "codex" && (
+          {(executor === "codex" || executor === "opencode") && (
             <div className="form-field">
               <label className="form-label">Modelo</label>
-              <ModelSelect value={model} onChange={setModel} />
+              <ModelSelect value={model} onChange={setModel} source={executor} />
             </div>
           )}
         </div>

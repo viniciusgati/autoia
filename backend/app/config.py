@@ -142,7 +142,20 @@ class Settings:
     codex_bin: str = field(default_factory=lambda: _env("AUTOIA_CODEX_BIN", "codex"))
     # Modelo default do executor opencode (usado quando o robô não define `Robot.model`).
     opencode_model: str = field(
-        default_factory=lambda: _env("AUTOIA_OPENCODE_MODEL", "deepseek/deepseek-v4-flash")
+        default_factory=lambda: _env("AUTOIA_OPENCODE_MODEL", "opencode-go/deepseek-v4-flash")
+    )
+    # Modelos oferecidos no seletor de modelo do frontend quando o `opencode
+    # models` não responde (sem binário/erro). CSV na env AUTOIA_OPENCODE_MODELS.
+    opencode_models: list[str] = field(
+        default_factory=lambda: _list(
+            "AUTOIA_OPENCODE_MODELS",
+            [
+                "opencode-go/deepseek-v4-flash",
+                "opencode-go/deepseek-v4.1-flash",
+                "opencode-go/deepseek-v4-pro",
+                "opencode-go/deepseek-v4-flash-vision-exp",
+            ],
+        )
     )
     # Modelo default do executor codex (OpenAI Codex CLI); usado quando nem a task/
     # chamado nem o `Robot.model` definem modelo. Vazio = o codex usa o `model` do

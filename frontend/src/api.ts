@@ -479,6 +479,9 @@ export const api = {
   // Modelos disponíveis para o executor codex (dropdown; fonte: `codex debug
   // models`, com fallback na lista configurável do backend).
   codexModels: () => request<{ models: string[]; source: string }>("/api/system/codex/models"),
+  // Modelos disponíveis para o executor opencode (dropdown; fonte: `opencode
+  // models`, com fallback na lista configurável do backend).
+  openCodeModels: () => request<{ models: string[]; source: string }>("/api/system/opencode/models"),
 };
 
 // Cache curto em memória da lista de modelos do codex (vários seletores na UI).
@@ -494,4 +497,19 @@ export async function getCodexModels(): Promise<string[]> {
     _codexModelsCache = [];
   }
   return _codexModelsCache;
+}
+
+// Cache curto em memória da lista de modelos do opencode (vários seletores).
+let _openCodeModelsCache: string[] | null = null;
+
+/** Lista de modelos do opencode com cache em memória; vazio em erro/indisponível. */
+export async function getOpenCodeModels(): Promise<string[]> {
+  if (_openCodeModelsCache !== null) return _openCodeModelsCache;
+  try {
+    const data = await api.openCodeModels();
+    _openCodeModelsCache = data.models;
+  } catch {
+    _openCodeModelsCache = [];
+  }
+  return _openCodeModelsCache;
 }

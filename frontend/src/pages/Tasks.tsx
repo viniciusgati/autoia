@@ -114,7 +114,7 @@ export default function Tasks() {
               onChange={(e) => {
                 const value = e.target.value;
                 setExecutor(value);
-                if (value !== "codex") setModel("");
+                if (value !== "codex" && value !== "opencode") setModel("");
               }}
             >
               <option value="kimi">kimi code</option>
@@ -122,10 +122,10 @@ export default function Tasks() {
               <option value="codex">codex</option>
             </select>
           </div>
-          {executor === "codex" && (
+          {(executor === "codex" || executor === "opencode") && (
             <div className="form-field">
               <label className="form-label">Modelo</label>
-              <ModelSelect value={model} onChange={setModel} />
+              <ModelSelect value={model} onChange={setModel} source={executor} />
             </div>
           )}
         </div>

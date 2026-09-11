@@ -271,12 +271,12 @@ export default function Robots({ repoId }: Props) {
                     value={editModel}
                     onChange={(e) => setEditModel(e.target.value)}
                   >
-                    <option value="">Padrão do sistema (deepseek-v4-flash)</option>
-                    <option value="deepseek/deepseek-v4-flash">deepseek-v4-flash (barato/rápido)</option>
-                    <option value="deepseek/deepseek-v4-pro">deepseek-v4-pro (mais capaz)</option>
-                    <option value="deepseek/deepseek-chat">deepseek-chat</option>
-                    <option value="deepseek/deepseek-reasoner">deepseek-reasoner</option>
-                    {editModel && !["", "deepseek/deepseek-v4-flash", "deepseek/deepseek-v4-pro", "deepseek/deepseek-chat", "deepseek/deepseek-reasoner"].includes(editModel) && (
+                    <option value="">Padrão do sistema (opencode-go/deepseek-v4-flash)</option>
+                    <option value="opencode-go/deepseek-v4-flash">opencode-go/deepseek-v4-flash (barato/rápido)</option>
+                    <option value="opencode-go/deepseek-v4.1-flash">opencode-go/deepseek-v4.1-flash</option>
+                    <option value="opencode-go/deepseek-v4-pro">opencode-go/deepseek-v4-pro (mais capaz)</option>
+                    <option value="opencode-go/deepseek-v4-flash-vision-exp">opencode-go/deepseek-v4-flash-vision-exp</option>
+                    {editModel && !["", "opencode-go/deepseek-v4-flash", "opencode-go/deepseek-v4.1-flash", "opencode-go/deepseek-v4-pro", "opencode-go/deepseek-v4-flash-vision-exp"].includes(editModel) && (
                       <option value={editModel}>{editModel} (custom)</option>
                     )}
                   </select>

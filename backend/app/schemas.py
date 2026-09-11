@@ -749,6 +749,14 @@ class CodexModelsOut(BaseModel):
     source: str = "config"
 
 
+class OpenCodeModelsOut(BaseModel):
+    """Modelos disponíveis para o executor opencode (populam o dropdown da UI)."""
+
+    models: list[str] = []
+    # Fonte da lista: "cli" (`opencode models`) ou "config" (AUTOIA_OPENCODE_MODELS).
+    source: str = "config"
+
+
 # ---------- Eventos ----------
 
 class RunEventOut(BaseModel):
