@@ -19,13 +19,89 @@ export function podeAtuar(
   return false;
 }
 
-/** Fase em destaque da task: a que está rodando, senão a próxima da fila. */
+const ATTENTION_STATUSES = new Set(["needs_review", "waiting_approval", "blocked", "failed"]);
+const FAILED_STEP_STATUSES = new Set(["failed", "guardrail_blocked", "blocked"]);
+
+/** O estado da tarefa prevalece sobre falhas históricas de fases já retomadas. */
+export function taskNeedsAttention(task: TaskListItem): boolean {
+  return ATTENTION_STATUSES.has(task.status);
+}
+
+export function taskStatusLabel(status: string): string {
+  const labels: Record<string, string> = {
+    created: "Não iniciada", queued: "Na fila", in_progress: "Em andamento",
+    done: "Concluída", failed: "Falhou", blocked: "Bloqueada",
+    needs_review: "Precisa de revisão", waiting_approval: "Aguardando aprovação",
+    paused: "Pausada", cancelled: "Cancelada", open: "Aguardando orientação",
+    pending: "Pendente", running: "Em execução", guardrail_blocked: "Execução interrompida",
+    skipped: "Dispensada",
+  };
+  return labels[status] ?? status;
+}
+
+export interface TaskAttention {
+  title: string;
+  detail: string;
+  nextStep: string;
+  tone: "error" | "warning";
+  step: TaskStepListItem | null;
+}
+
+function failedStep(task: TaskListItem): TaskStepListItem | null {
+  const failures = task.steps.filter((step) => FAILED_STEP_STATUSES.has(step.status));
+  return failures.find((step) => step.position === task.current_step)
+    ?? failures.sort((a, b) => (b.finished_at ?? b.started_at ?? "").localeCompare(a.finished_at ?? a.started_at ?? ""))[0]
+    ?? null;
+}
+
+function attentionStep(task: TaskListItem): TaskStepListItem | null {
+  return task.steps.find((step) => step.position === task.current_step && step.status !== "done")
+    ?? failedStep(task);
+}
+
+/** Diagnóstico usa apenas dados já disponíveis na listagem, sem inventar a causa. */
+export function taskAttention(task: TaskListItem): TaskAttention | null {
+  if (!taskNeedsAttention(task)) return null;
+  const step = attentionStep(task);
+  const taskError = task.error?.trim() ?? "";
+  const stepError = step?.error?.trim() ?? "";
+  const detail = taskError && stepError && taskError !== stepError
+    ? `${taskError}\n\n${stepError}` : taskError || stepError;
+  const isSubtask = /subtarefa/i.test(detail);
+  const isBudget = /orçamento|budget|limite de custo/i.test(detail);
+  const title = task.status === "waiting_approval" ? "Sua aprovação é necessária"
+    : task.status === "blocked" ? "A execução precisa de orientação"
+      : isSubtask ? "Uma subtarefa precisa de atenção"
+        : isBudget ? "O orçamento precisa de revisão"
+          : step ? `A fase ${step.position + 1} não foi concluída`
+            : task.status === "failed" ? "A execução falhou" : "A tarefa precisa de revisão";
+  const nextStep = task.status === "waiting_approval" ? "Revise a entrega no workspace para decidir se ela pode continuar."
+    : task.status === "blocked" ? "Leia o motivo do bloqueio e envie uma orientação no workspace."
+      : isSubtask ? "Confira o relatório da subtarefa no workspace e oriente a correção."
+        : step?.post_merge ? "Revise a falha após a integração e indique a correção no workspace."
+          : isBudget ? "Confira o consumo e decida como retomar a tarefa no workspace."
+            : "Confira a evidência da falha no workspace antes de orientar a próxima execução.";
+  return {
+    title,
+    detail: detail || (task.status === "waiting_approval"
+      ? "A tarefa está aguardando sua decisão para avançar."
+      : "O motivo detalhado não veio na listagem. Abra o workspace para consultar as fases e subtarefas."),
+    nextStep,
+    tone: task.status === "failed" || task.status === "blocked" ? "error" : "warning",
+    step,
+  };
+}
+
+/** A fase atual é identificada pela posição, nunca pelo índice no array. */
 export function faseAtual(task: TaskListItem): TaskStepListItem | null {
   const steps = [...task.steps].sort((a, b) => a.position - b.position);
+  if (task.status === "done") return steps.filter((step) => step.status === "done").slice(-1)[0] ?? null;
   return (
     steps.find((s) => s.status === "running") ??
+    (taskNeedsAttention(task) ? attentionStep(task) : null) ??
+    steps.find((s) => s.position === task.current_step && s.status !== "done") ??
     steps.find((s) => s.status === "pending") ??
-    steps[task.current_step] ??
+    steps.find((s) => s.position === task.current_step) ??
     null
   );
 }
@@ -41,8 +117,8 @@ export function etapaAtualLabel(task: TaskListItem): string {
       ? "rodando"
       : step.status === "pending"
         ? "na fila"
-        : step.status;
-  return `Fase ${step.position}/${steps.length} · ${nome} (tentativa ${step.attempt}) · ${estado}`;
+        : taskStatusLabel(step.status).toLowerCase();
+  return `Fase ${step.position + 1}/${steps.length} · ${nome} (tentativa ${step.attempt}) · ${estado}`;
 }
 
 /** Tempo decorrido desde o início da fase, legível ("3m 12s"). */

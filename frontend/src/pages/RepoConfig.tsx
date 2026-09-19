@@ -12,6 +12,7 @@ const SETTINGS_FIELDS = [
   "max_attempts",
   "max_pm_decisions",
   "run_timeout",
+  "no_progress_timeout",
   "task_budget",
   "cost_per_interaction",
   "risky_patterns_extra",
@@ -77,6 +78,7 @@ export default function RepoConfig() {
         max_attempts: repo.max_attempts,
         max_pm_decisions: repo.max_pm_decisions,
         run_timeout: repo.run_timeout,
+        no_progress_timeout: repo.no_progress_timeout,
         task_budget: repo.task_budget,
         cost_per_interaction: repo.cost_per_interaction,
         risky_patterns_extra: repo.risky_patterns_extra,
@@ -107,8 +109,9 @@ export default function RepoConfig() {
   const nameValid = (repo?.name ?? "").trim().length > 0;
   const attemptsValid = repo == null || repo.max_attempts == null || repo.max_attempts >= 1;
   const timeoutValid = repo == null || repo.run_timeout == null || repo.run_timeout > 0;
+  const noProgressValid = repo == null || repo.no_progress_timeout == null || repo.no_progress_timeout >= 0;
   const budgetValid = repo == null || repo.task_budget == null || repo.task_budget >= 0;
-  const formValid = nameValid && attemptsValid && timeoutValid && budgetValid;
+  const formValid = nameValid && attemptsValid && timeoutValid && noProgressValid && budgetValid;
   const dirty = repo != null && baseRepo != null && repoDirty(repo, baseRepo);
 
   // Só admin global ou admin do projeto altera a configuração (auth OFF → libera).
@@ -211,6 +214,16 @@ export default function RepoConfig() {
                     onChange={(e) => updateRepo({ ...repo, run_timeout: e.target.value ? Number(e.target.value) : null })}
                   />
                   {!timeoutValid && <div className="form-error">Timeout deve ser maior que zero</div>}
+                </div>
+                <div className={`form-field ${noProgressValid ? "" : "form-field-invalid"}`} style={{ flex: 1, minWidth: 120 }}>
+                  <label className="form-label">Sem progresso (seg) <HelpTip>Watchdog: se o executor ficar este tempo sem emitir NENHUMA saída, é morto (timeout → bounce-back). 0 desliga. Perfis Android ganham 900s automaticamente (suítes instrumentadas longas ficam mudas). Config global: AUTOIA_NO_PROGRESS_TIMEOUT.</HelpTip></label>
+                  <input type="number" min={0} step={60}
+                    value={repo.no_progress_timeout ?? ""}
+                    placeholder="global (300)"
+                    disabled={!canManage}
+                    onChange={(e) => updateRepo({ ...repo, no_progress_timeout: e.target.value ? Number(e.target.value) : null })}
+                  />
+                  {!noProgressValid && <div className="form-error">Não pode ser negativo</div>}
                 </div>
               </div>
               <div className="form-inline">

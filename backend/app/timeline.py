@@ -564,6 +564,14 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             ))
             continue
 
+        if kind == "stale_merge_aborted":
+            timeline.append(_event_base(
+                evt, meta, payload, EV_SYSTEM, "merge pendurado abortado",
+                f"🔄 {payload.get('reason') or 'merge pendurado de execução anterior abortado automaticamente'}",
+                status="blocked",
+            ))
+            continue
+
         # Evento genérico do worker (worker_recovered, summary_generated, etc.)
         timeline.append(_event_base(
             evt, meta, payload, EV_SYSTEM, kind,

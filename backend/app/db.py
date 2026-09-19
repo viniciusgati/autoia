@@ -45,6 +45,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("max_attempts", "INTEGER"),
         ("max_pm_decisions", "INTEGER"),
         ("run_timeout", "INTEGER"),
+        ("no_progress_timeout", "INTEGER"),
         ("task_budget", "FLOAT"),
         ("cost_per_interaction", "FLOAT"),
         ("risky_patterns_extra", "TEXT"),

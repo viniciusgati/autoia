@@ -9,6 +9,9 @@ export interface Repository {
   max_attempts: number | null;
   max_pm_decisions: number | null;
   run_timeout: number | null;
+  /** Watchdog "sem progresso" (segundos sem saída antes do kill; 0 desliga;
+   *  null herda o global). Projetos Android ganham 900s automaticamente. */
+  no_progress_timeout: number | null;
   task_budget: number | null;
   cost_per_interaction: number | null;
   risky_patterns_extra: string | null;

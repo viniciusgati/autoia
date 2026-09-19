@@ -664,12 +664,13 @@ class TestSubtaskWorker:
 
         # Cria task fake com subtarefas em diferentes estados
         class FakeSub:
-            def __init__(self, position, title, status, summary="", verdict=None):
+            def __init__(self, position, title, status, summary="", verdict=None, error=None):
                 self.position = position
                 self.title = title
                 self.status = status
                 self.summary = summary
                 self.verdict = verdict
+                self.error = error
 
         class FakeTask:
             subtasks = [

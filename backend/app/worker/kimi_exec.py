@@ -58,6 +58,7 @@ def run_kimi(
     whitelisted_hosts: list[str] = (),
     cost_per_interaction: float,
     no_progress_timeout: int = 0,
+    max_repeated_searches: int = 0,
     resume_session_id: str | None = None,
     repo_id: int | None = None,
     stop_file: str | None = None,
@@ -151,6 +152,7 @@ def run_kimi(
         final_text = ""
         last_call_key: tuple | None = None
         identical_count = 0
+        semantic_tracker = guardrails.SemanticLoopTracker(max_repeated_searches)
 
         def _persist(kind: str, payload: dict, cost: float = 0.0) -> str | None:
             nonlocal seq
@@ -202,6 +204,12 @@ def run_kimi(
                             violation = guardrails.GuardrailViolation(
                                 pattern="identical-calls",
                                 detail=f"{key[0]} repetido {identical_count}x seguidas",
+                            )
+                        if violation is None:
+                            fn = (tc.get("function") or {})
+                            violation = semantic_tracker.register(
+                                fn.get("name") or "",
+                                fn.get("arguments") or "",
                             )
 
                         cost = cost_per_interaction if index == 0 else 0.0

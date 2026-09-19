@@ -3,36 +3,41 @@ import { Link } from "react-router-dom";
 import { api } from "../api";
 import StatusIcon from "../components/StatusIcon";
 import TaskCard from "../components/TaskCard";
-import { formatToolCall } from "../lib/events";
+import { formatToolCall, sessionEventLine } from "../lib/events";
 import { fmtBudget } from "../lib/money";
 import { usePolling } from "../lib/polling";
+import { faseAtual, taskNeedsAttention, tempoDecorrido } from "../lib/tasks";
 import type { Execution, Repository, RunEvent, TaskListItem } from "../types";
 
-/** Página global "Execução": seções em colunas horizontais ocupando 100% da tela.
- *  Sessões ativas mostram apenas o comando atual + hora da chamada; propostas,
- *  atenção humana, fila e paradas ficam em colunas ao lado. */
-
-const ATENCAO = ["needs_review", "waiting_approval", "blocked"];
-const PARADAS = ["paused", "created"];
+const STOPPED_STATUSES = ["paused", "created", "open"];
+const SUPPLEMENTAL_STATUSES = ["failed", ...STOPPED_STATUSES];
 
 export default function ExecutionPage() {
   const [data, setData] = useState<Execution | null>(null);
+  const [recentTasks, setRecentTasks] = useState<TaskListItem[]>([]);
   const [repos, setRepos] = useState<Repository[]>([]);
   const [filter, setFilter] = useState<number | null>(null);
+  const [search, setSearch] = useState("");
   const [error, setError] = useState("");
 
   const repoNames = useMemo(() => {
-    const m: Record<number, string> = {};
-    for (const r of repos) m[r.id] = r.name;
-    return m;
+    const names: Record<number, string> = {};
+    for (const repo of repos) names[repo.id] = repo.name;
+    return names;
   }, [repos]);
 
   const load = async (signal?: AbortSignal) => {
-    try {
-      setData(await api.getExecution(filter ?? undefined, signal));
-    } catch (e) {
-      if (!signal?.aborted) setError(String(e));
-    }
+    const results = await Promise.allSettled([
+      api.getExecution(filter ?? undefined, signal),
+      api.listTasks(filter ?? undefined, signal),
+    ]);
+    if (signal?.aborted) return;
+    const [execution, tasks] = results;
+    if (execution.status === "fulfilled") setData(execution.value);
+    if (tasks.status === "fulfilled") setRecentTasks(tasks.value);
+    setError(execution.status === "rejected" ? `Não foi possível atualizar as execuções: ${String(execution.reason)}`
+      : tasks.status === "rejected" ? "Não foi possível atualizar as falhas recentes. Tente novamente."
+        : "");
   };
 
   useEffect(() => {
@@ -41,194 +46,115 @@ export default function ExecutionPage() {
 
   usePolling(load, 5000, [filter]);
 
-  if (error) return <p className="error">{error}</p>;
-  if (!data) return <p>Carregando…</p>;
+  if (!data) return <div className="exec-empty">{error ? <p className="error" role="alert">{error}</p> : "Carregando execuções…"}</div>;
 
-  const running = data.tasks.filter((t) => t.steps.some((s) => s.status === "running"));
-  const atencao = data.tasks.filter((t) => ATENCAO.includes(t.status));
-  const paradas = data.tasks.filter(
-    (t) => PARADAS.includes(t.status) && !running.some((r) => r.id === t.id),
-  );
-  const emFila = data.tasks.filter(
-    (t) =>
-      t.status === "queued" &&
-      !running.some((r) => r.id === t.id) &&
-      !atencao.some((a) => a.id === t.id),
+  // O endpoint de execução entrega apenas estados ativos. A listagem existente
+  // complementa com falhas recentes e tarefas manuais, sem alterar o backend.
+  const merged = new Map(recentTasks.filter((task) => SUPPLEMENTAL_STATUSES.includes(task.status)).map((task) => [task.id, task]));
+  for (const task of data.tasks) merged.set(task.id, task);
+  const term = search.trim().toLocaleLowerCase("pt-BR");
+  const tasks = [...merged.values()]
+    .filter((task) => filter == null || task.repository_id === filter)
+    .filter((task) => !term || `${task.id} ${task.title} ${task.error ?? ""} ${repoNames[task.repository_id] ?? ""}`.toLocaleLowerCase("pt-BR").includes(term))
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at) || b.id - a.id);
+  const atencao = tasks.filter(taskNeedsAttention);
+  const running = tasks.filter((task) => !taskNeedsAttention(task) && task.steps.some((step) => step.status === "running"));
+  const runningIds = new Set(running.map((task) => task.id));
+  const emFila = tasks.filter((task) => ["queued", "in_progress"].includes(task.status) && !runningIds.has(task.id));
+  const paradas = tasks.filter((task) => STOPPED_STATUSES.includes(task.status) && !runningIds.has(task.id));
+
+  const cards = (items: TaskListItem[]) => (
+    <div className="exec-cards task-grid">
+      {items.map((task) => <TaskCard key={task.id} task={task} detailPath={`/${task.repository_id}/tasks`} repoName={repoNames[task.repository_id]} onChanged={() => void load()} onError={setError} />)}
+    </div>
   );
 
   return (
-    <div className="resumo">
-      <div className="resumo-header">
-        <h2>Execução</h2>
-        <span className="muted">
-          {data.worker.alive ? (
-            <span className="worker-status" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-              <span className="worker-dot worker-dot-on" /> worker ativo
-            </span>
-          ) : (
-            <span className="worker-status" style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-              <span className="worker-dot worker-dot-off" /> worker offline
-            </span>
-          )}
-          {" · "}
-          {running.length} em execução · {atencao.length} precisam de humano
+    <div className="resumo exec-page">
+      <header className="exec-hero">
+        <div>
+          <span className="task-card-eyebrow">CENTRAL DE ACOMPANHAMENTO</span>
+          <h2>Execução</h2>
+          <p className="muted">Veja o que precisa de uma decisão e acompanhe o trabalho em andamento.</p>
+        </div>
+        <span className="worker-status">
+          <span className={`worker-dot ${data.worker.alive ? "worker-dot-on" : "worker-dot-off"}`} />
+          {data.worker.alive ? "Execução automática disponível" : "Worker sem sinal recente"}
         </span>
+      </header>
+
+      {error && <div className="section-error" role="alert">{error} <button className="btn-sm" onClick={() => void load()}>Atualizar</button></div>}
+
+      <nav className="exec-summary" aria-label="Resumo das execuções">
+        <a className="exec-metric exec-metric-attention" href="#exec-attention"><span>Precisam de atenção</span><strong>{atencao.length}</strong><small>Revisões, bloqueios e falhas recentes</small></a>
+        <a className="exec-metric" href="#exec-running"><span>Em execução</span><strong>{running.length}</strong><small>Fases trabalhando agora</small></a>
+        <a className="exec-metric" href="#exec-queue"><span>Na fila</span><strong>{emFila.length}</strong><small>Aguardando uma nova execução</small></a>
+        <a className="exec-metric" href="#exec-stopped"><span>Para continuar</span><strong>{paradas.length}</strong><small>Pausadas, novas ou em modo manual</small></a>
+      </nav>
+
+      <div className="exec-toolbar">
+        <label><span>Projeto</span><select value={filter ?? ""} onChange={(event) => setFilter(event.target.value ? Number(event.target.value) : null)}>
+          <option value="">Todos os projetos</option>
+          {repos.map((repo) => <option key={repo.id} value={repo.id}>{repo.name}</option>)}
+        </select></label>
+        <label className="task-card-search"><span>Buscar tarefas</span><input type="search" placeholder="Título, número ou motivo da falha" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+        <span className="muted small">Atualização automática · 5 s</span>
       </div>
 
-      <div className="form-inline" style={{ marginBottom: 14, alignItems: "center" }}>
-        <label className="form-label" style={{ margin: 0 }}>Projeto:</label>
-        <select
-          value={filter ?? ""}
-          onChange={(e) => setFilter(e.target.value ? Number(e.target.value) : null)}
-          style={{ maxWidth: 260 }}
-        >
-          <option value="">— todos os projetos —</option>
-          {repos.map((r) => (
-            <option key={r.id} value={r.id}>{r.name}</option>
-          ))}
-        </select>
-      </div>
+      {!data.worker.alive && emFila.length > 0 && <div className="exec-recovery-note">Há tarefas na fila e o worker está sem sinal recente. Elas continuam aguardando execução.</div>}
 
       <div className="exec-board">
-        {/* Sessões ativas */}
-        <h3 className="resumo-section">Sessões ativas</h3>
-        {running.length === 0 ? (
-          <p className="muted small">Nada em execução.</p>
-        ) : (
-          <div className="exec-cards">
-            {running.map((task) => {
-              const step = task.steps.find((s) => s.status === "running");
-              const events = step ? data.current_events[String(step.id)] ?? [] : [];
-              return (
-                <RunningSession key={task.id} task={task} events={events} repoNames={repoNames} />
-              );
-            })}
-          </div>
-        )}
+        <section className="exec-section" id="exec-attention">
+          <div className="exec-section-head"><div><h3>Precisa da sua atenção <span>{atencao.length}</span></h3><p>Comece pelo motivo da parada. No workspace, confira a evidência e oriente a correção.</p></div></div>
+          {atencao.length ? cards(atencao) : <div className="exec-empty">Nenhuma pendência ou falha encontrada nas tarefas carregadas{term ? " para esta busca" : ""}.</div>}
+        </section>
 
-        {/* Atenção humana */}
-        <h3 className="resumo-section">Atenção humana</h3>
-        {atencao.length === 0 ? (
-          <p className="muted small">Nada precisa de humano.</p>
-        ) : (
-          <div className="exec-cards task-grid">
-            {atencao.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                detailPath={`/${task.repository_id}/tasks`}
-                repoName={repoNames[task.repository_id]}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        )}
+        <section className="exec-section" id="exec-running">
+          <div className="exec-section-head"><div><h3>Em execução <span>{running.length}</span></h3><p>A atividade mais recente de cada fase, com acesso direto ao workspace.</p></div></div>
+          {running.length ? <div className="exec-cards">{running.map((task) => {
+            const step = task.steps.find((item) => item.status === "running");
+            return <RunningSession key={task.id} task={task} events={step ? data.current_events[String(step.id)] ?? [] : []} repoNames={repoNames} />;
+          })}</div> : <div className="exec-empty">Nenhuma fase em execução neste momento{term ? " para esta busca" : ""}.</div>}
+        </section>
 
-        {/* Na fila */}
-        <h3 className="resumo-section">Na fila</h3>
-        {emFila.length === 0 ? (
-          <p className="muted small">Nada aguardando worker.</p>
-        ) : (
-          <div className="exec-cards task-grid">
-            {emFila.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                detailPath={`/${task.repository_id}/tasks`}
-                repoName={repoNames[task.repository_id]}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        )}
+        <section className="exec-section" id="exec-queue">
+          <div className="exec-section-head"><div><h3>Na fila <span>{emFila.length}</span></h3><p>O trabalho está aguardando o início da próxima fase.</p></div></div>
+          {emFila.length ? cards(emFila) : <div className="exec-empty">Nenhuma tarefa aguardando execução.</div>}
+        </section>
 
-        {/* Paradas */}
-        <h3 className="resumo-section">Paradas</h3>
-        {paradas.length === 0 ? (
-          <p className="muted small">Nenhuma tarefa parada.</p>
-        ) : (
-          <div className="exec-cards task-grid">
-            {paradas.map((task) => (
-              <TaskCard
-                key={task.id}
-                task={task}
-                detailPath={`/${task.repository_id}/tasks`}
-                repoName={repoNames[task.repository_id]}
-                onChanged={load}
-                onError={setError}
-              />
-            ))}
-          </div>
-        )}
+        <section className="exec-section" id="exec-stopped">
+          <div className="exec-section-head"><div><h3>Para continuar <span>{paradas.length}</span></h3><p>Tarefas recentes que aguardam início, retomada ou uma orientação sua.</p></div></div>
+          {paradas.length ? cards(paradas) : <div className="exec-empty">Nenhuma tarefa aguardando retomada.</div>}
+        </section>
       </div>
     </div>
   );
 }
 
-/** Card de sessão ativa (compacto): só o comando atual com a hora da chamada. */
-function RunningSession({
-  task,
-  events,
-  repoNames,
-}: {
-  task: TaskListItem;
-  events: RunEvent[];
-  repoNames: Record<number, string>;
-}) {
-  const runningStep = task.steps.find((s) => s.status === "running") ?? null;
-  // events vêm em ordem decrescente — o primeiro tool_call é o mais recente.
-  const toolCall = [...events].find((e) => e.kind === "tool_call") ?? null;
-  const comando = toolCall ? formatToolCall(toolCall) : "aguardando interação…";
-  const hora = toolCall
-    ? new Date(toolCall.ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" })
-    : null;
-  const repoName = repoNames[task.repository_id];
+function RunningSession({ task, events, repoNames }: { task: TaskListItem; events: RunEvent[]; repoNames: Record<number, string> }) {
+  const runningStep = faseAtual(task);
+  const currentEvents = [...events].sort((a, b) => b.seq - a.seq);
+  const boundary = currentEvents.find((event) => event.kind === "attempt_started");
+  const eventsThisRun = boundary ? currentEvents.filter((event) => event.seq >= boundary.seq) : currentEvents.filter((event) => !runningStep?.started_at || new Date(event.ts).getTime() >= new Date(runningStep.started_at).getTime());
+  const toolCall = eventsThisRun.find((event) => event.kind === "tool_call");
+  const activity = eventsThisRun.find((event) => ["assistant_text", "tool_call", "subtask_start", "subtask_implemented", "subtask_verified", "subtask_failed", "subtask_bounce_back"].includes(event.kind));
+  const command = toolCall ? formatToolCall(toolCall) : null;
+  const time = activity ? new Date(activity.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null;
+  const workspacePath = `/${task.repository_id}/tasks/${task.id}/workspace`;
 
   return (
-    <div className="session-card">
-      <div className="session-head">
-        <Link to={`/${task.repository_id}/tasks/${task.id}`} className="resumo-title">
-          #{task.id} {task.title}
-        </Link>
-        <StatusIcon status={task.status} />
+    <article className="session-card exec-session-card">
+      <div className="task-card-eyebrow"><span>#{task.id} · {repoNames[task.repository_id] ?? "Projeto"}</span><span className="task-card-status"><StatusIcon status="running" />Em execução</span></div>
+      <div className="session-head"><Link to={workspacePath} className="resumo-title">{task.title}</Link></div>
+      <div className="task-card-stage">
+        <span className="muted small">Fase em andamento</span>
+        <strong>{runningStep ? `Fase ${runningStep.position + 1} · ${runningStep.robot?.name ?? "Agente"}` : "Preparando execução"}</strong>
+        {runningStep && <span className="muted small">Tentativa {runningStep.attempt}{runningStep.started_at ? ` · ${tempoDecorrido(runningStep)}` : ""}</span>}
       </div>
-
-      {repoName && <div className="muted small">projeto: {repoName}</div>}
-
-      <div className="session-grid" style={{ gridTemplateColumns: "1fr" }}>
-        <div className="session-field">
-          <span className="session-label">Etapa</span>
-          <span className="session-value">{runningStep?.robot?.name ?? etapaAtual(task)}</span>
-        </div>
-        <div className="session-field">
-          <span className="session-label">Comando atual</span>
-          <span className="session-value mono" title={comando}>
-            {comando}
-          </span>
-        </div>
-      </div>
-
-      {hora && (
-        <div className="session-command-time">
-          <span className="mono">{hora}</span> — chamada do comando
-        </div>
-      )}
-
-      <div className="session-foot">
-        <span className="muted small">gasto {fmtBudget(task.cost_spent, task.budget_limit)}</span>
-        <Link to={`/${task.repository_id}/tasks/${task.id}`} className="link-btn">
-          ver detalhes →
-        </Link>
-      </div>
-    </div>
+      {runningStep && runningStep.attempt > 1 && <div className="exec-recovery-note">Nova tentativa em andamento. Acompanhe o resultado desta execução no workspace.</div>}
+      <div className="exec-session-activity"><span className="session-label">Última atividade{time ? ` · ${time}` : ""}</span><p>{activity ? sessionEventLine(activity) || "O agente está trabalhando." : "Aguardando a primeira atividade desta execução…"}</p></div>
+      {command && <details className="exec-session-command"><summary>Ver última ferramenta utilizada</summary><pre>{command}</pre></details>}
+      <div className="session-foot"><span className="muted small">Orçamento {fmtBudget(task.cost_spent, task.budget_limit)}</span><Link to={workspacePath} className="link-btn">Acompanhar →</Link></div>
+    </article>
   );
-}
-
-function etapaAtual(task: TaskListItem): string {
-  const step = task.steps.find((s) => s.status === "running")
-    ?? [...task.steps].sort((a, b) => a.position - b.position)
-      .find((s) => s.status === "pending");
-  return step?.robot?.name ?? "—";
 }

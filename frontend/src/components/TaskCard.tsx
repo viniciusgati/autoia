@@ -6,23 +6,8 @@ import { CheckIcon, EyeIcon, PauseIcon, PlayIcon, UndoIcon, WorkspaceIcon, XIcon
 import PhaseStepper from "./PhaseStepper";
 import StatusIcon from "./StatusIcon";
 import { fmtBudget } from "../lib/money";
-import { faseAtual, formatDuration } from "../lib/tasks";
+import { faseAtual, formatDuration, taskAttention, taskNeedsAttention, taskStatusLabel } from "../lib/tasks";
 import type { TaskListItem } from "../types";
-
-/** Tarefa que precisa de ação humana (revisão/aprovação/bloqueio). */
-function precisaHumano(task: TaskListItem): string | null {
-  if (task.status === "needs_review") return "aguardando revisão humana";
-  if (task.status === "waiting_approval") return "aguardando aprovação humana";
-  if (task.status === "blocked") return "bloqueada — requer atenção";
-  if (
-    task.status !== "done" &&
-    task.status !== "failed" &&
-    task.steps.some((s) => s.status === "guardrail_blocked")
-  ) {
-    return "guardrail bloqueou execução";
-  }
-  return null;
-}
 
 export default function TaskCard({
   task,
@@ -41,17 +26,19 @@ export default function TaskCard({
   const [busy, setBusy] = useState(false);
   const { user } = useAuth();
 
-  const alert = precisaHumano(task);
-  const hasGuardrail = task.steps.some((s) => s.status === "guardrail_blocked");
-  const isErr = task.status === "blocked" || (hasGuardrail && !alert?.includes("revisão"));
+  const attention = taskAttention(task);
+  const workspacePath = `${detailPath}/${task.id}/workspace`;
   const step = faseAtual(task);
   const etapa = step
-    ? `F${step.position} · ${step.robot?.name ?? "?"}${step.post_merge ? " · pós-merge" : ""}`
+    ? `Fase ${step.position + 1} · ${step.robot?.name ?? "Agente"}${step.post_merge ? " · pós-merge" : ""}`
     : task.status === "done"
       ? "concluída"
       : "—";
   const costPct = task.budget_limit > 0 ? task.cost_spent / task.budget_limit : 0;
-  const costHigh = costPct >= 0.8 && task.status !== "done";
+  const costHigh = costPct >= 0.8 && !["done", "cancelled", "failed"].includes(task.status);
+  const completed = task.steps.filter((item) => item.status === "done").length;
+  const detailPreview = attention?.detail.replace(/\s+/g, " ").trim() ?? "";
+  const hasLongDetail = detailPreview.length > 220;
   // Tempo total de execução: soma das durações das fases com timestamps completos.
   const totalMs = task.steps.reduce((acc, s) => {
     if (s.started_at && s.finished_at) {
@@ -82,38 +69,51 @@ export default function TaskCard({
   };
 
   return (
-    <div className={`task-card${alert ? (isErr ? " task-card-err" : " task-card-warn") : ""}${isMine ? " task-card-mine" : ""}`}>
+    <article className={`task-card${attention ? (attention.tone === "error" ? " task-card-err" : " task-card-warn") : ""}${isMine ? " task-card-mine" : ""}`}>
+      <div className="task-card-eyebrow">
+        <span>#{task.id}{repoName && ` · ${repoName}`}</span>
+        {isMine && <span className="badge badge-mine">Sua tarefa</span>}
+      </div>
       <div className="task-card-head">
-        <Link to={`${detailPath}/${task.id}`} className="task-card-title" title={`#${task.id} ${task.title}`}>
-          #{task.id} {task.title}
+        <Link to={workspacePath} className="task-card-title" title={`#${task.id} ${task.title}`}>
+          {task.title}
         </Link>
-        <div className="task-card-head-right">
-          {isMine && (
-            <span className="badge badge-mine" title="você é o responsável por esta tarefa">
-              sua tarefa
-            </span>
-          )}
+      </div>
+      <div className="task-card-progress-label">
+        <span className={`task-card-status task-card-status-${task.status}`}>
           <StatusIcon status={task.status} />
-        </div>
+          {taskStatusLabel(task.status)}
+        </span>
+        <span className="muted small">{completed}/{task.steps.length} fases</span>
       </div>
 
-      {alert ? (
-        <div className={`task-card-alert${isErr ? " task-card-alert-err" : ""}`}>⚠ {alert}</div>
-      ) : (
-        <div className="task-card-alert task-card-alert-empty" aria-hidden="true" />
+      {attention && (
+        <div className={`task-card-diagnosis task-card-diagnosis-${attention.tone}`}>
+          <span className="task-card-diagnosis-label">{attention.title}</span>
+          <p>{hasLongDetail ? `${detailPreview.slice(0, 220)}…` : detailPreview}</p>
+          {hasLongDetail && (
+            <details className="task-card-diagnosis-details">
+              <summary>Ver motivo completo</summary>
+              <div>{attention.detail}</div>
+            </details>
+          )}
+          <div className="task-card-next"><strong>Próximo passo</strong>{attention.nextStep}</div>
+        </div>
       )}
 
       <div className="task-card-stage">
-        <span className="muted small">etapa atual</span>
+        <span className="muted small">{task.status === "done" ? "Última fase concluída" : attention?.step ? "Onde parou" : "Etapa atual"}</span>
         <span className="task-card-stage-name">{etapa}</span>
+        {step && task.status !== "done" && (
+          <span className="muted small">{taskStatusLabel(step.status)}{step.attempt > 1 ? ` · tentativa ${step.attempt}` : ""}</span>
+        )}
       </div>
 
-      <PhaseStepper task={task} muted showLabels />
+      <div className="task-card-progress"><PhaseStepper task={task} muted showLabels /></div>
 
       <div className="task-card-meta">
-        {repoName && <span className="muted">{repoName}</span>}
         <span className="task-card-responsible" title="responsável pela tarefa">
-          {task.responsible?.name ?? "Não atribuída"}
+          {task.responsible?.name ?? "Sem responsável"}
         </span>
         <span className="task-card-executor" title={`executor: ${task.executor}`}>
           {task.executor === "codex" ? "codex" : task.executor === "opencode" ? "opencode" : "kimi"}
@@ -123,10 +123,15 @@ export default function TaskCard({
             {formatDuration(totalMs)}
           </span>
         )}
-        <span className={`mono small${costHigh ? " task-card-cost-warn" : " muted"}`}>
-          {fmtBudget(task.cost_spent, task.budget_limit)}
-        </span>
       </div>
+      <div className={`task-card-budget${costHigh ? " task-card-cost-warn" : ""}`}>
+        <div className="task-card-progress-label"><span>Orçamento{costHigh ? " · atenção ao limite" : ""}</span><span className="mono">{fmtBudget(task.cost_spent, task.budget_limit)}</span></div>
+        {task.budget_limit > 0 && <div className="task-card-budget-track" aria-label={`${Math.round(costPct * 100)}% do orçamento utilizado`}><span style={{ width: `${Math.min(100, Math.max(0, costPct * 100))}%` }} /></div>}
+      </div>
+
+      <Link to={`${workspacePath}${attention ? "#diagnostico" : ""}`} className="task-card-primary">
+        <WorkspaceIcon size={16} />{attention ? "Entender e resolver" : task.status === "done" ? "Ver entrega" : "Abrir workspace"}<span aria-hidden="true">→</span>
+      </Link>
 
       <div className="task-card-actions">
         {task.status === "created" && (
@@ -172,6 +177,20 @@ export default function TaskCard({
             </button>
           </>
         )}
+        {(task.status === "failed" || task.status === "done") && (
+          <button
+            className="icon-btn icon-btn-danger"
+            title="cancelar tarefa"
+            onClick={() => {
+              if (window.confirm(`Cancelar a tarefa #${task.id}?`)) {
+                run(() => api.cancelTask(task.id));
+              }
+            }}
+            disabled={busy}
+          >
+            <XIcon size={15} />
+          </button>
+        )}
         {task.status === "needs_review" && (
           <>
             <button
@@ -204,29 +223,27 @@ export default function TaskCard({
             </button>
           </>
         )}
-        <Link to={`${detailPath}/${task.id}/workspace`} className="icon-btn" title="workspace (acompanhar)">
-          <WorkspaceIcon size={15} />
-        </Link>
-        <Link to={`${detailPath}/${task.id}`} className="icon-btn" title="ver detalhes">
+        <Link to={`${detailPath}/${task.id}`} className="task-card-technical" title="Abrir detalhes técnicos">
           <EyeIcon size={15} />
+          Detalhes técnicos
         </Link>
       </div>
-    </div>
+    </article>
   );
 }
 
 /** Opções de filtro por status/grupo de status. */
 const FILTROS: { value: string; label: string; match: (t: TaskListItem) => boolean }[] = [
-  { value: "todas", label: "todas", match: () => true },
+  { value: "todas", label: "Todas", match: () => true },
+  { value: "humano", label: "Precisam de atenção", match: taskNeedsAttention },
   {
     value: "ativas",
-    label: "em andamento",
+    label: "Em andamento",
     match: (t) => t.status === "queued" || t.status === "in_progress",
   },
-  { value: "humano", label: "precisam de humano", match: (t) => precisaHumano(t) !== null },
-  { value: "criadas", label: "criadas", match: (t) => t.status === "created" },
-  { value: "concluidas", label: "concluídas", match: (t) => t.status === "done" },
-  { value: "falharam", label: "falharam", match: (t) => t.status === "failed" },
+  { value: "paradas", label: "Aguardando início", match: (t) => ["created", "paused", "open"].includes(t.status) },
+  { value: "concluidas", label: "Concluídas", match: (t) => t.status === "done" },
+  { value: "falharam", label: "Falharam", match: (t) => t.status === "failed" },
 ];
 
 export function TaskCardGrid({
@@ -243,20 +260,28 @@ export function TaskCardGrid({
   onError: (message: string) => void;
 }) {
   const [filtro, setFiltro] = useState("todas");
+  const [search, setSearch] = useState("");
   if (tasks.length === 0) return null;
-  const sorted = [...tasks].sort((a, b) => b.id - a.id);
+  const sorted = [...tasks].sort((a, b) => Number(taskNeedsAttention(b)) - Number(taskNeedsAttention(a)) || b.id - a.id);
   const ativo = FILTROS.find((f) => f.value === filtro) ?? FILTROS[0];
-  const filtrados = sorted.filter(ativo.match);
+  const term = search.trim().toLocaleLowerCase("pt-BR");
+  const searched = sorted.filter((task) => !term || `${task.id} ${task.title} ${task.error ?? ""} ${repoNames?.[task.repository_id] ?? ""}`.toLocaleLowerCase("pt-BR").includes(term));
+  const filtrados = searched.filter(ativo.match);
   return (
     <>
+      <div className="task-card-grid-toolbar">
+        <label className="task-card-search"><span>Buscar tarefas</span><input type="search" placeholder="Título, número ou motivo da falha" value={search} onChange={(event) => setSearch(event.target.value)} /></label>
+        <span className="muted small">{filtrados.length} de {tasks.length} tarefas · atenção primeiro</span>
+      </div>
       <div className="task-filters">
         {FILTROS.map((f) => {
-          const count = sorted.filter(f.match).length;
+          const count = searched.filter(f.match).length;
           const selected = f.value === ativo.value;
           return (
             <button
               key={f.value}
               className={`task-filter${selected ? " task-filter-active" : ""}`}
+              aria-pressed={selected}
               onClick={() => setFiltro(f.value)}
             >
               {f.label} <span className="task-filter-count">{count}</span>
@@ -265,7 +290,7 @@ export function TaskCardGrid({
         })}
       </div>
       {filtrados.length === 0 ? (
-        <p className="muted">Nenhuma tarefa neste filtro.</p>
+        <div className="exec-empty">Nenhuma tarefa encontrada. Tente outro filtro ou termo de busca.</div>
       ) : (
         <div className="task-grid">
           {filtrados.map((task) => (

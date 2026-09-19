@@ -669,7 +669,7 @@ export default function TaskDetail() {
 
         <div className="task-head-row">
           <ResponsavelControl task={task} repoId={repoIdNum} onAssigned={setTask} />
-          {["created", "queued", "in_progress", "paused", "needs_review", "waiting_approval", "blocked"].includes(
+          {["created", "queued", "in_progress", "paused", "needs_review", "waiting_approval", "blocked", "failed", "done"].includes(
             task.status,
           ) && (
             <div className="task-head-actions">

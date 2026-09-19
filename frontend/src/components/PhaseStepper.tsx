@@ -25,18 +25,18 @@ export default function PhaseStepper({ task, muted, showLabels }: Props) {
                 : "pending";
         const isRerun = step.status === "pending" && step.attempt > 1;
         const displayState = isRerun ? "rerun" : state;
-        const tooltip = `Fase ${step.position}/${steps.length} · ${
+        const tooltip = `Fase ${step.position + 1}/${steps.length} · ${
           step.robot?.name ?? "?"
         }${step.post_merge ? " · pós-merge" : ""} · ${step.status}${
           isRerun ? " (re-execução)" : ""
         } (tentativa ${step.attempt})`;
-        const name = step.robot?.name ?? `F${step.position}`;
+        const name = step.robot?.name ?? `F${step.position + 1}`;
         return (
           <span className="stepper-item" key={step.id}>
             {step.post_merge && <span className="stepper-post" title="fase pós-merge" />}
             <span className="stepper-dot-group">
               <span className={`stepper-dot stepper-${displayState}`} title={tooltip}>
-                {state === "done" ? "✓" : state === "failed" ? "✕" : isRerun ? "↺" : step.position}
+                {state === "done" ? "✓" : state === "failed" ? "✕" : isRerun ? "↺" : step.position + 1}
               </span>
               {showLabels && (
                 <span className="stepper-label" title={name}>

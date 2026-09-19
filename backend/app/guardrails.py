@@ -140,6 +140,15 @@ _READONLY_GIT_SUBCOMMANDS = {
     "ls-files", "ls-tree", "remote", "config", "blame",
 }
 
+# Verbos de shell cuja intenção é BUSCA/inspeção de arquivos ou termos — base do
+# detector de loop semântico (repetição da MESMA busca é sinal de agente perdido).
+_SEARCH_COMMANDS = {"find", "grep", "rg", "ag", "locate", "findstr", "tree", "which", "type"}
+
+# Ferramentas de busca do agente (opencode/kimi) que entram no detector.
+_SEARCH_TOOLS = {"read", "glob", "grep"}
+
+_QUOTED_TOKEN_RE = re.compile(r"""['"]([^'"]{2,})['"]""", re.IGNORECASE)
+
 
 # Padrões de rede cujo bloqueio pode ser afrouxado por `whitelisted_hosts`
 # (curl/wget para hosts de registro de pacotes é legítimo em build/CI).
@@ -233,3 +242,103 @@ def check_tool_call(
                 detail=f"{name} {path} (fora de {checkout_path})",
             )
     return None
+
+
+def _path_target(path: str) -> str:
+    """Alvo de um path/pattern de leitura para o detector de loop: os 3 últimos
+    componentes, minúsculos.
+
+    Basename sozinho colide homônimos legítimos (ex.: `page.tsx` em rotas
+    diferentes do Next.js — a task 143 morreu por ler 7 `page.tsx` distintos),
+    e o caminho completo depende do checkout (absoluto no opencode, relativo no
+    kimi). Os 3 últimos componentes diferenciam arquivos iguais em diretórios
+    diferentes e ainda colapsam relativo/absoluto do mesmo arquivo.
+    """
+    parts = [p for p in path.rstrip("/\\").replace("\\", "/").split("/") if p]
+    if not parts:
+        return ""
+    return "/".join(parts[-3:]).lower()[:120]
+
+
+def _search_fingerprint(tool: str, arguments) -> str | None:
+    """Fingerprint da INTENÇÃO de busca de uma tool call, para o detector de loop.
+
+    Retorna uma string que identifica o alvo procurado (arquivo/termo/direcionário),
+    ou None quando a chamada não é uma busca (não entra no detector). Chamadas de
+    busca com o MESMO alvo — mesmo que por caminhos/argumentos diferentes — geram o
+    MESMO fingerprint (ex.: `find /home -name "autoia_verdict.txt"` e
+    `find / -name "autoia_verdict.txt"` colapsam em `bash:find:autoia_verdict.txt`).
+    """
+    if not isinstance(tool, str) or not tool.strip():
+        return None
+    tool = tool.strip().lower()
+
+    if tool in _SEARCH_TOOLS:
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+        if not isinstance(arguments, dict):
+            return None
+        if tool == "grep":
+            term = arguments.get("pattern") or arguments.get("query")
+            if not isinstance(term, str) or not term.strip():
+                return None
+            return f"{tool}:{term.strip()[:120].lower()}"
+        path = arguments.get("path") or arguments.get("filePath") or arguments.get("pattern")
+        if not isinstance(path, str) or not path.strip():
+            return None
+        return f"{tool}:{_path_target(path)}"
+
+    if tool in ("bash", "shell"):
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments)
+            except (json.JSONDecodeError, TypeError):
+                arguments = {}
+        command = (arguments or {}).get("command") if isinstance(arguments, dict) else None
+        if not isinstance(command, str) or not command.strip():
+            return None
+        tokens = command.lstrip().split()
+        verb = tokens[0].lower().split("/")[-1]
+        if verb not in _SEARCH_COMMANDS:
+            return None
+        quoted = _QUOTED_TOKEN_RE.findall(command)
+        if quoted:
+            return f"{verb}:{quoted[-1].strip().lower()[:120]}"
+        for token in reversed(tokens[1:]):
+            cleaned = token.strip("'\"").rstrip("/\\")
+            if cleaned and not cleaned.startswith("-") and cleaned not in ("|", "&&", ";", "||"):
+                return f"{verb}:{os.path.basename(cleaned).lower()[:120]}"
+        return verb
+    return None
+
+
+class SemanticLoopTracker:
+    """Detecta repetição de INTENÇÃO de busca dentro de UMA execução do executor.
+
+    Complementa o watchdog de tool calls idênticas (`max_identical_calls`): este
+    conta o MESMO alvo procurado N vezes (mesmo com comandos/caminhos diferentes),
+    sinal clássico de agente perdido caçando relatório/arquivo inexistente.
+    `max_repeats` = limite; 0 desliga. Retorna uma `GuardrailViolation` ao estourar.
+    """
+
+    def __init__(self, max_repeats: int):
+        self.max_repeats = max(0, int(max_repeats or 0))
+        self._counts: dict[str, int] = {}
+
+    def register(self, tool: str, arguments) -> GuardrailViolation | None:
+        if self.max_repeats <= 0:
+            return None
+        fp = _search_fingerprint(tool, arguments)
+        if fp is None:
+            return None
+        count = self._counts.get(fp, 0) + 1
+        self._counts[fp] = count
+        if count >= self.max_repeats:
+            return GuardrailViolation(
+                pattern="repeated-search",
+                detail=f"busca repetida {count}x pelo mesmo alvo: {fp}",
+            )
+        return None

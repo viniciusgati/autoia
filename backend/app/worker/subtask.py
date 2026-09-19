@@ -50,6 +50,24 @@ from .sandbox import (
 
 log = logging.getLogger("autoia.worker.subtask")
 
+# Classificação da reprovação de uma VERIFICAÇÃO (verify/validador) de subtarefa:
+# - `fail`: veredicto REAL de defeito (FAIL) — o código foi avaliado e reprovado;
+#   é o ÚNICO caso que devolve a subtarefa ao developer (bounce-back).
+# - `inconclusive`: a verificação não conseguiu avaliar o código (veredicto
+#   AUSENTE, timeout, executor morreu, erro de ambiente) — NÃO há defeito a
+#   corrigir; a subtarefa é re-verificada (retry) sem bounce-back.
+VERIFY_CLASS_FAIL = "fail"
+VERIFY_CLASS_INCONCLUSIVE = "inconclusive"
+
+# Aborts que NÃO são "inconclusivos" (não admitem retry da verificação): limite
+# de provedor, infra bloqueada, parada do usuário e orçamento — voltam direto.
+_HARD_VERIFY_ABORTS = (
+    "provider_limit:",
+    "infra_blocked:",
+    "execução interrompida",
+    "orçamento estourado",
+)
+
 
 def _sub_sandbox(settings) -> SandboxConfig | None:
     """Sandbox efetivo do ciclo de subtarefas (só aplica quando é um SandboxConfig;
@@ -178,6 +196,7 @@ def _run_subtask_executor(
             whitelisted_hosts=settings.whitelisted_hosts,
             model=model or settings.opencode_model,
             no_progress_timeout=settings.no_progress_timeout,
+            max_repeated_searches=getattr(settings, "max_repeated_searches", 0),
             repo_id=repo_id,
             stop_file=stop_file,
             task_stop_file=task_stop_file,
@@ -218,6 +237,7 @@ def _run_subtask_executor(
         risky_patterns=settings.risky_patterns,
         checkout_path=checkout_path,
         cost_per_interaction=settings.cost_per_interaction,
+        max_repeated_searches=getattr(settings, "max_repeated_searches", 0),
         repo_id=repo_id,
         stop_file=stop_file,
         task_stop_file=task_stop_file,
@@ -439,6 +459,7 @@ def _build_subtask_verify_prompt(
     except gitops.GitError:
         pass
 
+    parts.append(_VERIFY_TMP_ARTIFACTS)
     parts.append(prompts.HANDOFF_READ)
     parts.append(prompts.CONTRACT_VERIFY)
     parts.append(prompts.HANDOFF_DOCUMENT)
@@ -446,6 +467,15 @@ def _build_subtask_verify_prompt(
     parts.append(prompts.GUARDRAIL_INSTRUCTIONS)
 
     return "\n\n".join(p for p in parts if p)
+
+
+_VERIFY_TMP_ARTIFACTS = (
+    "## Artefatos temporários (screenshots, logs de teste)\n"
+    "Grave-os SEMPRE dentro do checkout (ex.: `autoia_screenshots/`) e leia de lá.\n"
+    "NÃO escreva em `/tmp` (ou fora do workspace) e tente ler de volta: o executor\n"
+    "nega a leitura fora do workspace e a execução MORRE sem escrever o veredicto —\n"
+    "a verificação fica INCONCLUSIVA e é repetida em vez de avaliada."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -779,13 +809,15 @@ def _subtask_previously_failed_verify(
     position: int,
     current_head: str | None = None,
 ) -> bool:
-    """True se a subtarefa já reprovou na verificação por VEREDICTO REAL (FAIL/AUSENTE)
-    em tentativa anterior — ou seja, o código foi apontado como defeituoso e devolvido
-    ao developer por correção.
+    """True se a subtarefa já reprovou na verificação por VEREDICTO REAL DE DEFEITO
+    (FAIL) em tentativa anterior — ou seja, o código foi avaliado, apontado como
+    defeituoso e devolvido ao developer por correção.
 
-    Falhas de INFRAESTRUTURA na verificação (guardrail, timeout, kimi saiu com erro)
-    NÃO contam como defeito: o código não foi avaliado, então o developer pode
-    legitimamente re-declarar a subtarefa como já implementada sem alterar nada.
+    Falhas de INFRAESTRUTURA na verificação (veredicto AUSENTE, timeout, executor
+    saiu com erro, permissão negada) NÃO contam como defeito: o código não foi
+    avaliado, então o developer pode legitimamente re-declarar a subtarefa como já
+    implementada sem alterar nada (caso da task 127: validador morreu numa leitura
+    fora do workspace e o veredicto ficou "AUSENTE" — re-declaração era CORRETA).
 
     Se o HEAD atual é diferente do HEAD da última reprovação, a reprovação é
     histórica: houve alteração de código depois dela e a declaração pode ser
@@ -820,13 +852,23 @@ def _subtask_previously_failed_verify(
         if payload.get("phase") != "verify" or payload.get("position") != position:
             continue
         reason = str(payload.get("reason") or "")
-        if "veredicto" in reason.lower():
-            failed_head = str(payload.get("head") or "").strip().lower() or None
-            if failed_head is None and subtask_row is not None:
-                failed_head = _report_head(subtask_row.summary)
-            if current_head and failed_head and current_head.lower() != failed_head:
-                return False
-            return True
+        # Classificação explícita (eventos novos): só `fail` é defeito real.
+        klass = str(payload.get("class") or "")
+        if klass == VERIFY_CLASS_INCONCLUSIVE:
+            continue
+        is_real_fail = (
+            klass == VERIFY_CLASS_FAIL
+            or ("veredicto fail" in reason.lower())
+            or ("needs_work" in reason.lower())
+        )
+        if not is_real_fail:
+            continue
+        failed_head = str(payload.get("head") or "").strip().lower() or None
+        if failed_head is None and subtask_row is not None:
+            failed_head = _report_head(subtask_row.summary)
+        if current_head and failed_head and current_head.lower() != failed_head:
+            return False
+        return True
     return False
 
 
@@ -1103,11 +1145,18 @@ def run_verify_subtasks(
 ) -> str | None:
     """Executa a fase verify para cada subtarefa implementada.
 
-    Retorna None se todas passaram, ou string com posição das que falharam
-    (ex.: "sub:1,3") para o bounce-back decidir.
+    Classificação da reprovação:
+    - FAIL (veredicto real de defeito) → volta ao developer (bounce-back);
+    - INCONCLUSIVE (veredicto AUSENTE/timeout/executor morreu — código não foi
+      avaliado) → re-verifica a MESMA subtarefa até `verify_retries`; esgotado,
+      marca `inconclusive:` e para com diagnóstico (sem bounce-back).
+
+    Retorna None se todas passaram; `sub:1,3` = posições FAIL para o bounce-back;
+    `inconclusive:1` = validação inconclusiva (task precisa de intervenção humana);
+    ou o abort duro (provider_limit/infra_blocked/parada do usuário/orçamento).
     """
     on_event = _make_on_event(session_factory, step.id, log_path)
-    failed_positions: list[int] = []
+    verify_retries = max(0, int(getattr(settings, "verify_retries", 0) or 0))
 
     with session_factory() as s:
         candidates = (
@@ -1131,6 +1180,7 @@ def run_verify_subtasks(
             "opencode saiu",
             "codex saiu",
             "worker reiniciado",
+            "inconclusive:",  # validação não avaliou o código: re-verifica
         )
         to_verify = [
             st for st in candidates
@@ -1147,21 +1197,56 @@ def run_verify_subtasks(
                 return None  # todas já verificadas em fase anterior
             return "nenhuma subtarefa para verificar"
 
-    for subtask in to_verify:
+    failed_positions: list[int] = []
+    inconclusive_positions: list[int] = []
+    retries_left: dict[int, int] = {}
+    queue = list(to_verify)
+    while queue:
+        subtask = queue.pop(0)
         abort_reason = _run_one_verify(
             settings, session_factory, step, task_id, subtask,
             checkout, base, branch, project_info, log_path, on_event,
         )
-        if abort_reason:
-            return abort_reason
-
         with session_factory() as s:
             st = s.get(SubTask, subtask.id)
-            if st and st.status not in (SUB_DONE,):
+            if st is None:
+                continue
+            if abort_reason:
+                if abort_reason.startswith(_HARD_VERIFY_ABORTS):
+                    return abort_reason
+                reason = abort_reason
+            else:
+                if st.status == SUB_DONE:
+                    continue
+                reason = st.error or f"veredicto {st.verdict or 'AUSENTE'}"
+
+            if st.verdict == verdicts.V_FAIL:
+                # Defeito REAL: devolve ao developer (bounce-back)
                 failed_positions.append(st.position)
+                continue
+
+            # INCONCLUSIVE: o código não foi avaliado — retry limitado da MESMA
+            # verificação, sem bounce-back (não há o que corrigir no código).
+            if retries_left.get(st.position, verify_retries) > 0:
+                retries_left[st.position] = retries_left.get(st.position, verify_retries) - 1
+                _system_event(
+                    s, step, "subtask_verify_retry",
+                    {"position": st.position, "title": st.title,
+                     "reason": reason, "attempt": st.attempt},
+                )
+                s.commit()
+                queue.append(subtask)
+                continue
+
+            st.error = f"inconclusive: {reason}"
+            st.finished_at = func.now()
+            s.commit()
+            inconclusive_positions.append(st.position)
 
     if failed_positions:
         return f"sub:{','.join(str(p) for p in failed_positions)}"
+    if inconclusive_positions:
+        return "inconclusive:" + ",".join(str(p) for p in inconclusive_positions)
     return None
 
 
@@ -1259,7 +1344,8 @@ def _run_one_verify(
             st.finished_at = func.now()
             _system_event(
                 s, step, "subtask_failed",
-                {"position": st.position, "title": st.title, "reason": reason, "phase": "verify"},
+                {"position": st.position, "title": st.title, "reason": reason,
+                 "phase": "verify", "class": VERIFY_CLASS_INCONCLUSIVE},
             )
             s.commit()
             return reason
@@ -1271,7 +1357,8 @@ def _run_one_verify(
             st.finished_at = func.now()
             _system_event(
                 s, step, "subtask_failed",
-                {"position": st.position, "title": st.title, "reason": reason, "phase": "verify"},
+                {"position": st.position, "title": st.title, "reason": reason,
+                 "phase": "verify", "class": VERIFY_CLASS_INCONCLUSIVE},
             )
             s.commit()
             return reason
@@ -1291,7 +1378,9 @@ def _run_one_verify(
                 {"position": st.position, "title": st.title, "verdict": "PASS"},
             )
         else:
-            # FAIL ou AUSENTE → volta para o developer refazer
+            # FAIL → volta para o developer refazer. AUSENTE (veredicto ausente:
+            # sessão morreu/permissão negada sem avaliar o código) → INCONCLUSIVA,
+            # re-verificada com retry — sem bounce-back de código.
             st.status = SUB_PENDING
             st.summary = raw  # relatório do tester para o developer
             st.error = f"veredicto {label or 'AUSENTE'}"
@@ -1304,7 +1393,8 @@ def _run_one_verify(
                 s, step, "subtask_failed",
                 {"position": st.position, "title": st.title,
                  "reason": f"veredicto {label or 'AUSENTE'}", "phase": "verify",
-                 "head": failure_head},
+                 "head": failure_head,
+                 "class": VERIFY_CLASS_FAIL if label == verdicts.V_FAIL else VERIFY_CLASS_INCONCLUSIVE},
             )
 
         s.commit()

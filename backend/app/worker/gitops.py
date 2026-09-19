@@ -138,12 +138,35 @@ def is_tracked(path: str, name: str) -> bool:
     return result.returncode == 0
 
 
+def abort_in_progress_merge(path: str) -> bool:
+    """Aborta um merge em andamento que ficou pendurado no checkout (MERGE_HEAD presente).
+
+    Um robô morto no meio de `git merge` (watchdog de progresso, guardrail, timeout)
+    deixa o índice com conflitos e `MERGE_HEAD` pendurado — qualquer `git checkout`
+    seguinte falha com "you need to resolve your current index first", travando TODAS
+    as fases da task até intervenção manual. Como a integração final é sempre feita
+    pelo worker (`merge_and_push`), um merge pendurado no checkout é lixo de execução
+    interrompida: abortá-lo restaura o último commit da branch (os commits do robô são
+    preservados). Retorna True se um merge pendurado foi abortado.
+    """
+    merge_head = os.path.join(path, ".git", "MERGE_HEAD")
+    if not os.path.exists(merge_head):
+        return False
+    run_git(path, "merge", "--abort", check=False)
+    # Garantia extra: se o abort não limpou tudo (estado corrompido), força reset do
+    # índice para o HEAD — descarta apenas o estado de merge pendurado.
+    if os.path.exists(merge_head):
+        run_git(path, "reset", "--hard", "HEAD", check=False)
+    return True
+
+
 def ensure_task_branch(path: str, branch: str, base: str) -> None:
     """Garante a branch de trabalho da tarefa existir localmente a partir de origin/<base>.
 
     Se a branch já existe (ex.: retry), apenas faz checkout — preserva os commits do robô.
     """
     run_git(path, "fetch", "origin")
+    abort_in_progress_merge(path)
     if branch_exists(path, branch):
         run_git(path, "checkout", branch)
     else:
@@ -157,6 +180,7 @@ def checkout_default(path: str, base: str) -> None:
     mudança local não commitada (lixo de fases de teste) é descartada com reset --hard.
     """
     run_git(path, "fetch", "origin")
+    abort_in_progress_merge(path)
     run_git(path, "reset", "--hard", f"origin/{base}")
     run_git(path, "checkout", base)
 

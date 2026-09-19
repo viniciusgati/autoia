@@ -146,6 +146,7 @@ def create_repository(
         max_attempts=data.max_attempts,
         max_pm_decisions=data.max_pm_decisions,
         run_timeout=data.run_timeout,
+        no_progress_timeout=data.no_progress_timeout,
         task_budget=data.task_budget,
         cost_per_interaction=data.cost_per_interaction,
         risky_patterns_extra=data.risky_patterns_extra,

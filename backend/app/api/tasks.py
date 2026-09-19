@@ -717,10 +717,8 @@ def cancel_task(
     """Cancela uma tarefa: terminal, o pipeline não avança nem integra mais."""
     task = _get_task_or_404(session, task_id)
     _ensure_can_act(session, task, user)
-    if task.status in (TASK_DONE, TASK_FAILED, TASK_CANCELLED):
-        raise HTTPException(
-            400, f"tarefa em estado terminal '{task.status}' não pode ser cancelada"
-        )
+    if task.status == TASK_CANCELLED:
+        raise HTTPException(400, "tarefa já cancelada")
     task.status = TASK_CANCELLED
     task.error = "cancelada pelo usuário"
     anchor = _anchor_step(task)

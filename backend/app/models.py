@@ -114,6 +114,11 @@ class Repository(Base):
     max_attempts: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_pm_decisions: Mapped[int | None] = mapped_column(Integer, nullable=True)
     run_timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Watchdog de "sem progresso" do projeto (segundos sem saída antes do kill).
+    # None herda o global (AUTOIA_NO_PROGRESS_TIMEOUT); 0 desliga o watchdog.
+    # Projetos com builds longos e silenciosos (ex.: Android instrumentado)
+    # precisam de um valor maior que o default de 300s.
+    no_progress_timeout: Mapped[int | None] = mapped_column(Integer, nullable=True)
     task_budget: Mapped[float | None] = mapped_column(Float, nullable=True)
     cost_per_interaction: Mapped[float | None] = mapped_column(Float, nullable=True)
     risky_patterns_extra: Mapped[str | None] = mapped_column(Text, nullable=True)

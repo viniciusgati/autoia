@@ -5,10 +5,12 @@ import { useAuth } from "../auth";
 import DiffView from "../components/DiffView";
 import ModelSelect from "../components/ModelSelect";
 import ResponsavelControl from "../components/ResponsavelControl";
+import { SubtaskCard, SubtaskDetailsModal, WorkspaceDiagnosis, WorkspaceEventDetails } from "../components/WorkspaceDiagnosis";
 import { useAdaptivePolling } from "../lib/polling";
 import { MSG_SEM_PERMISSAO, podeAtuar } from "../lib/tasks";
 import Markdown from "../lib/markdown";
 import { fmtCost } from "../lib/money";
+import { diagnoseSubtasks, suggestedCorrectionStep, type SubtaskDiagnosis } from "../lib/workspaceDiagnosis";
 import type { Epic, Project, RepositoryMember, StepFileDiff, Task, TaskMessage, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
@@ -17,8 +19,11 @@ function statusMeta(status: string): { label: string; cls: string } {
     case "created":
       return { label: "Não iniciada", cls: "badge-muted" };
     case "queued":
+      return { label: "Na fila", cls: "badge-muted" };
     case "in_progress":
       return { label: "Em execução", cls: "badge-run" };
+    case "open":
+      return { label: "Aguardando orientação", cls: "badge-warn" };
     case "paused":
       return { label: "Pausada", cls: "badge-warn" };
     case "waiting_approval":
@@ -62,7 +67,7 @@ function stopMeta(kind: string): { label: string; cls: string } {
     case "guardrail_blocked":
       return { label: "⛔ GUARDRAIL BLOQUEOU A EXECUÇÃO", cls: "ws-stop-guardrail" };
     case "timeout":
-      return { label: "⏱ TIMEOUT — o robô não respondeu", cls: "ws-stop-timeout" };
+      return { label: "Tempo limite da execução atingido", cls: "ws-stop-timeout" };
     case "exec_exit":
       return { label: "❌ ERRO DO EXECUTOR", cls: "" };
     case "git_error":
@@ -77,7 +82,7 @@ function stopMeta(kind: string): { label: string; cls: string } {
     case "task_blocked":
       return { label: "🟠 ETAPA PARADA — AGUARDANDO DECISÃO/INSTRUÇÃO", cls: "" };
     case "subtask_bounce_back":
-      return { label: "↩️ TAREFAS REPROVADAS NA VERIFICAÇÃO — voltam para o developer", cls: "ws-stop-timeout" };
+      return { label: "Validação de subtarefas não aprovada", cls: "ws-stop-timeout" };
     case "subtask_failed":
       return { label: "❌ SUBTAREFA FALHOU", cls: "" };
     default:
@@ -100,15 +105,6 @@ function occurrenceSubtasks(occ: WorkspaceOccurrence) {
   // excluindo o resumo "tarefas propostas pelo agente" (plural).
   return occ.system_activity.filter((a) => a.name.startsWith("tarefa "));
 }
-
-const SUB_LABELS: Record<string, { label: string; cls: string }> = {
-  pending: { label: "pendente", cls: "badge-muted" },
-  implementing: { label: "implementando", cls: "badge-run" },
-  implemented: { label: "implementada", cls: "badge-ok" },
-  verifying: { label: "verificando", cls: "badge-run" },
-  done: { label: "concluída", cls: "badge-ok" },
-  failed: { label: "falhou", cls: "badge-err" },
-};
 
 function fmtTime(iso: string | null): string {
   if (!iso) return "";
@@ -173,9 +169,11 @@ function ChatRow({ m }: { m: TaskMessage }) {
         <div className="chat-avatar chat-avatar-tool">ret</div>
         <div className="chat-body">
           <div className="chat-meta">resultado da ferramenta</div>
-          <div className="prewrap mono" style={{ fontSize: 12, opacity: 0.8 }}>
-            {String(m.payload.output ?? m.payload.content ?? "—").slice(0, 600)}
-          </div>
+          <details><summary>Ver resultado completo</summary>
+            <div className="prewrap mono" style={{ fontSize: 12, opacity: 0.8 }}>
+              {String(m.payload.output ?? m.payload.content ?? "—")}
+            </div>
+          </details>
         </div>
       </div>
     );
@@ -321,6 +319,12 @@ function OccurrenceDetailsModal({ occ, onClose }: {
           <button className="link-btn" onClick={onClose}>fechar</button>
         </div>
         <div className="modal-body">
+          {occ.stop && <section className="ws-subtask-detail-section">
+            <h4>Motivo registrado nesta execução</h4>
+            <Markdown text={occ.stop.reason || "Execução interrompida"} />
+            {occ.stop.detail && <div className="ws-subtask-report"><Markdown text={occ.stop.detail} /></div>}
+          </section>}
+          {occ.delivered_text && <section className="ws-subtask-detail-section"><h4>Resposta completa do agente</h4><div className="ws-subtask-report"><Markdown text={occ.delivered_text} /></div></section>}
           <section className="ws-occ-section">
             <h4 className="ws-section-title">Atividade do sistema ({occ.system_activity.length})</h4>
             <ul className="ws-sysact">
@@ -334,18 +338,10 @@ function OccurrenceDetailsModal({ occ, onClose }: {
             </ul>
           </section>
           <section className="ws-occ-section">
-            <h4 className="ws-section-title">Detalhes técnicos ({occ.events.length} eventos)</h4>
-            <ul className="ws-sysact">
-              {occ.events.length === 0 && <li className="muted small">sem eventos</li>}
-              {occ.events.map((e, i) => (
-                <li key={i} className="ws-sysact-item">
-                  <span className="muted small">{fmtTime(e.ts)}</span>
-                  <span className="ws-sysact-text" title={`${e.type} — ${e.summary}`}>
-                    [{e.type}] {e.name} — {e.summary}
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <h4 className="ws-section-title">Registros completos ({occ.events.length} eventos)</h4>
+            <p className="muted small">Abra um registro para consultar a entrada, a saída e o conteúdo original completos.</p>
+            {occ.events.length === 0 && <p className="muted small">Sem eventos registrados.</p>}
+            <WorkspaceEventDetails events={occ.events} />
           </section>
         </div>
       </div>
@@ -376,13 +372,14 @@ function TItem({ kind, title, when, children }: {
   );
 }
 
-function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile }: {
+function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile, superseded }: {
   occ: WorkspaceOccurrence;
   onChanged: () => void;
   onError: (msg: string) => void;
   canAct: boolean;
   onDetails: () => void;
   onFile: (file: string) => void;
+  superseded?: boolean;
 }) {
   const meta = occStatusMeta(occ.status);
   const running = occ.status === "running";
@@ -400,10 +397,15 @@ function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile }: 
   const stop = stopMeta(occ.stop?.kind ?? "");
 
   return (
-    <article className={`ws-occ ws-occ-${occ.status}`}>
+    <article id={`execucao-${occ.step_id}-${occ.run}`} className={`ws-occ ws-occ-${occ.status}${superseded ? " ws-occ-superseded" : ""}`}>
       <header className="ws-occ-head ws-occ-head-flat">
         <span className="ws-occ-pos">FASE {occ.position + 1}</span>
         <span className="ws-occ-robot">{occ.robot?.name ?? "?"}</span>
+        {superseded && (
+          <span className="badge badge-muted" title="Esta execução foi superada por uma re-execução posterior da mesma fase — histórico preservado">
+            ↻ superada
+          </span>
+        )}
         {occ.is_rerun && (
           <span className="badge badge-warn" title="Nova execução da mesma fase — o histórico anterior foi preservado">
             ↻ tentativa {occ.attempt}
@@ -462,6 +464,8 @@ function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile }: 
             <div className="ws-delivered">
               <Markdown text={deliveredText} />
             </div>
+            {occ.delivered?.issues.length ? <div className="ws-diagnosis-reason"><strong>Pontos de atenção desta execução</strong><ul>{occ.delivered.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul></div> : null}
+            {occ.delivered && occ.delivered_text && occ.delivered_text !== deliveredText && <details className="ws-subtask-detail-section"><summary>Ler resposta original completa do agente</summary><Markdown text={occ.delivered_text} /></details>}
           </TItem>
         )}
 
@@ -500,7 +504,7 @@ function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile }: 
           <h4 className="ws-section-title">Resultado de testes</h4>
           <div className="ws-tests">
             {occ.tests.passed != null && <span className="ws-test-ok">✓ {occ.tests.passed} testes passaram</span>}
-            {occ.tests.failed != null && <span className="ws-test-err">✕ {occ.tests.failed} testes falharam</span>}
+            {occ.tests.failed != null && <span className={occ.tests.failed > 0 ? "ws-test-err" : "ws-test-neutral"}>{occ.tests.failed > 0 ? `✕ ${occ.tests.failed} ${occ.tests.failed === 1 ? "teste falhou" : "testes falharam"}` : "Nenhum teste reprovado"}</span>}
             {occ.tests.verdict && <span>Veredicto: <b>{occ.tests.verdict}</b></span>}
           </div>
         </section>
@@ -578,6 +582,7 @@ export default function Workspace() {
   const [summaryBusy, setSummaryBusy] = useState(false);
   // Modal de detalhes (atividade do sistema + eventos técnicos) de uma execução.
   const [detailsOcc, setDetailsOcc] = useState<WorkspaceOccurrence | null>(null);
+  const [subtaskPosition, setSubtaskPosition] = useState<number | null>(null);
   // Modal de diff de UM arquivo alterado (position/branch vêm da ocorrência).
   const [fileDiff, setFileDiff] = useState<{
     position: number;
@@ -590,9 +595,20 @@ export default function Workspace() {
   const [projects, setProjects] = useState<Project[]>([]);
   const [epics, setEpics] = useState<Epic[]>([]);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  // Segue automaticamente o fim da página conforme a execução avança; pausa
-  // quando o usuário rola para cima (ler histórico) e volta quando chega ao fim.
-  const [followLatest, setFollowLatest] = useState(true);
+  const openedTaskRef = useRef<number | null>(null);
+  // Acompanhamento ao vivo é opt-in e pausa quando o usuário lê o histórico.
+  const [followLatest, setFollowLatest] = useState(false);
+
+  useEffect(() => {
+    if (ws?.task.id !== taskId || openedTaskRef.current === taskId) return;
+    openedTaskRef.current = taskId;
+    setFollowLatest(false);
+    if (window.location.hash === "#diagnostico") {
+      document.getElementById("diagnostico")?.scrollIntoView({ block: "start" });
+    } else {
+      window.scrollTo({ top: 0 });
+    }
+  }, [taskId, ws?.task.id]);
 
   // Membros do projeto: define admin do projeto (permissão de atuação) e
   // alimenta o controle de atribuição de responsável.
@@ -670,22 +686,24 @@ export default function Workspace() {
 
   // Mantém o fim da página sempre visível enquanto a execução evolui.
   useEffect(() => {
-    if (!followLatest) return;
+    if (!followLatest || !wsActive) return;
     window.scrollTo({ top: document.documentElement.scrollHeight });
-  }, [ws, followLatest]);
+  }, [ws, followLatest, wsActive]);
 
   useEffect(() => {
     const onScroll = () => {
       const gap =
         document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
       const nearBottom = gap < 120;
-      if (nearBottom !== followLatest) setFollowLatest(nearBottom);
+      if (!nearBottom && followLatest) setFollowLatest(false);
     };
     window.addEventListener("scroll", onScroll);
     return () => window.removeEventListener("scroll", onScroll);
   }, [followLatest]);
 
   const task = ws?.task ?? null;
+  const diagnoses = useMemo(() => ws ? diagnoseSubtasks(ws) : [], [ws]);
+  const selectedSubtask = diagnoses.find((diagnosis) => diagnosis.subtask.position === subtaskPosition) ?? null;
   const meta = task ? statusMeta(task.status) : null;
   const positions = useMemo(() => (task ? availablePositions(task) : []), [task]);
   const runningOcc = ws?.occurrences.find((o) => o.status === "running") ?? null;
@@ -693,6 +711,29 @@ export default function Workspace() {
     if (!task) return null;
     return [...task.steps].sort((a, b) => a.position - b.position).find((s) => s.status === "pending") ?? null;
   }, [task]);
+
+  // Ocorrências superadas: a MESMA fase tem uma execução posterior (mais recente).
+  // Falhas antigas perdem o peso visual — o estado atual é o da última execução.
+  const latestRunByStep = useMemo(() => {
+    const latest = new Map<number, number>();
+    for (const o of ws?.occurrences ?? []) {
+      latest.set(o.step_id, Math.max(latest.get(o.step_id) ?? 0, o.run));
+    }
+    return latest;
+  }, [ws]);
+  const isSuperseded = (occ: WorkspaceOccurrence) =>
+    (latestRunByStep.get(occ.step_id) ?? 0) > occ.run;
+
+  // A task falhou/parou em algum momento, mas foi retomada e continua rodando:
+  // deixa explícito que o estado de erro foi superado (histórico preservado).
+  const recovered = useMemo(() => {
+    if (!ws) return false;
+    if (ws.task.status !== "in_progress" && ws.task.status !== "queued") return false;
+    return ws.occurrences.some(
+      (o) => (o.status === "failed" || o.status === "blocked") && isSuperseded(o),
+    );
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ws]);
 
   // Permissão de atuação: sem responsável qualquer autenticado atua; com
   // responsável, só ele, admin do projeto ou admin global (auth OFF libera).
@@ -728,7 +769,7 @@ export default function Workspace() {
   };
 
   const sendChat = async () => {
-    if (!chatText.trim() || chatBusy) return;
+    if (!chatText.trim() || chatBusy || !canAct) return;
     setChatBusy(true);
     try {
       await api.sendChat(taskId, chatText.trim());
@@ -755,6 +796,29 @@ export default function Workspace() {
 
   const focusInput = () => inputRef.current?.focus();
 
+  const openSubtask = (position: number) => {
+    setFollowLatest(false);
+    setSubtaskPosition(position);
+  };
+
+  const prepareCorrection = (diagnosis: SubtaskDiagnosis) => {
+    if (!task) return;
+    const target = suggestedCorrectionStep(task, diagnosis);
+    const action = diagnosis.inconclusive
+      ? "Investigue o motivo da validação inconclusiva e valide novamente"
+      : "Corrija os problemas apontados no relatório e valide novamente";
+    const draft = `${action} a subtarefa ${diagnosis.subtask.position + 1}: ${diagnosis.subtask.title}.${diagnosis.reason ? `\nMotivo registrado: ${diagnosis.reason}` : ""}\nUse o relatório completo da subtarefa e seus critérios de aceite. Informe as alterações e as evidências da nova validação.`;
+    if (task.mode === "manual") {
+      setChatText((previous) => previous.trim() ? `${previous}\n\n${draft}` : draft);
+    } else {
+      setInstruction((previous) => previous.trim() ? `${previous}\n\n${draft}` : draft);
+      if (target) setResumePos(String(target.position));
+    }
+    setSubtaskPosition(null);
+    setFollowLatest(false);
+    requestAnimationFrame(focusInput);
+  };
+
   /** Atribuição de responsável salva: atualiza o header sem recarregar a página. */
   const handleAssigned = (updated: Task) => {
     setWs((prev) => (prev ? { ...prev, task: updated } : prev));
@@ -774,7 +838,7 @@ export default function Workspace() {
   };
 
   const send = async () => {
-    if (!instruction.trim()) return;
+    if (!instruction.trim() || busy || !canAct) return;
     const position = resumePos === "" ? undefined : Number(resumePos);
     await act(() => api.sendInstruction(taskId, { instruction: instruction.trim(), position }));
     setInstruction("");
@@ -809,6 +873,15 @@ export default function Workspace() {
       list.push({ label: "Reexecutar", onClick: () => act(() => api.retryStep(taskId, last.position)) });
     }
     if (taskStatus !== "created") list.push({ label: "Resumir", cls: "ws-btn-summary", onClick: summarize });
+    if (taskStatus !== "cancelled")
+      list.push({
+        label: "Cancelar",
+        cls: "danger",
+        onClick: () => {
+          if (!window.confirm(`Cancelar a tarefa #${taskId}?`)) return;
+          void act(() => api.cancelTask(taskId));
+        },
+      });
     return list;
   })();
 
@@ -943,19 +1016,12 @@ export default function Workspace() {
           />
         )}
 
-        {(task?.status === "blocked" || task?.status === "failed" || task?.status === "needs_review") && task.error && (
-          <div className={`ws-header-alert ${task.status === "blocked" ? "ws-alert-critical" : ""}`}>
+        {recovered && (
+          <div className="ws-header-alert ws-alert-ok">
             <span>
-              {task.status === "blocked" && task.block_reason_type === "decision_request"
-                ? "🟠 Decisão necessária:"
-                : task.status === "blocked"
-                  ? "⛔ Bloqueada:"
-                  : task.status === "failed"
-                    ? "❌ Erro:"
-                    : "⚠ Revisão:"}{" "}
-              {task.error}
+              ↻ Execução retomada. Os cards de execuções anteriores permanecem no histórico;
+              acompanhe a nova validação para confirmar o resultado da correção.
             </span>
-            <button className="link-btn" onClick={focusInput}>responder ↓</button>
           </div>
         )}
       </header>
@@ -963,6 +1029,7 @@ export default function Workspace() {
       <div className="ws-body">
       <main className="ws-timeline">
         {!ws && <div className="muted ws-loading">carregando workspace…</div>}
+        {ws && <WorkspaceDiagnosis ws={ws} diagnoses={diagnoses} canAct={canAct} onSubtask={openSubtask} onPrepare={prepareCorrection} onDetails={setDetailsOcc} onFocus={focusInput} />}
         {ws && ws.occurrences.length === 0 && (
           <div className="ws-empty">
             <p className="muted">Nenhuma etapa executada ainda.</p>
@@ -1000,8 +1067,16 @@ export default function Workspace() {
           </section>
         ) : null}
 
+        {ws && ws.occurrences.length > 0 && <div className="ws-diagnosis-heading">
+          <div><span className="ws-diagnosis-eyebrow">HISTÓRICO PRESERVADO</span><h3 className="ws-diagnosis-title">Execuções da tarefa</h3></div>
+          {wsActive && <button className="link-btn" aria-pressed={followLatest} onClick={() => setFollowLatest((previous) => !previous)}>{followLatest ? "Pausar acompanhamento ao vivo" : "Acompanhar ao vivo ↓"}</button>}
+        </div>}
+
         {ws?.occurrences.map((occ) => {
-          const key = `${occ.step_id}-${occ.attempt}`;
+          // `run` é o índice ÚNICO por fase (o contador `attempt` se repete em
+          // re-execuções dentro do mesmo attempt — ex.: guardrail matou e a
+          // subtarefa re-rodou sem incrementar) — sem isso, chaves duplicadas.
+          const key = `${occ.step_id}-${occ.run}`;
           return (
             <OccurrenceCard
               key={key}
@@ -1009,6 +1084,7 @@ export default function Workspace() {
               onChanged={refresh}
               onError={setError}
               canAct={canAct}
+              superseded={isSuperseded(occ)}
               onDetails={() => setDetailsOcc(occ)}
               onFile={(file) =>
                 setFileDiff({ position: occ.position, branch: occ.branch ?? null, file })
@@ -1047,19 +1123,9 @@ export default function Workspace() {
           </h4>
           {ws?.task.subtasks.length ? (
             <ul className="ws-subtasks-global">
-              {[...ws.task.subtasks].sort((a, b) => a.position - b.position).map((s) => {
-                const lb = SUB_LABELS[s.status] ?? { label: s.status, cls: "badge-muted" };
-                return (
-                  <li key={s.position} className="ws-subtask-global-item">
-                    <span className="ws-sub-pos">{s.position + 1}</span>
-                    <span className="ws-sub-title">{s.title}</span>
-                    <span className={`badge ${lb.cls}`}>{lb.label}</span>
-                    {s.attempt > 1 && <span className="muted small">tentativa {s.attempt}</span>}
-                    {s.verdict && <span className="muted small">{s.verdict}</span>}
-                    {s.error && <span className="ws-sub-error" title={s.error}>{s.error}</span>}
-                  </li>
-                );
-              })}
+              {[...diagnoses].sort((a, b) => Number(b.needsAttention) - Number(a.needsAttention) || a.subtask.position - b.subtask.position).map((diagnosis) => (
+                <li key={diagnosis.subtask.id}><SubtaskCard diagnosis={diagnosis} onOpen={() => openSubtask(diagnosis.subtask.position)} /></li>
+              ))}
             </ul>
           ) : (
             <p className="muted small ws-aside-empty">Sem subtarefas nesta tarefa.</p>
@@ -1072,6 +1138,7 @@ export default function Workspace() {
         <footer className="ws-input">
           <div className="ws-input-row">
             <textarea
+              ref={inputRef}
               value={chatText}
               onChange={(e) => setChatText(e.target.value)}
               placeholder="Fale com o agente em linguagem natural… (ex.: 'rode o developer para implementar a rota de login', 'testa a feature', 'faz o merge')"
@@ -1149,6 +1216,7 @@ export default function Workspace() {
       {detailsOcc && (
         <OccurrenceDetailsModal occ={detailsOcc} onClose={() => setDetailsOcc(null)} />
       )}
+      {task && selectedSubtask && <SubtaskDetailsModal task={task} diagnosis={selectedSubtask} canAct={canAct} onClose={() => setSubtaskPosition(null)} onPrepare={prepareCorrection} onDetails={(occurrence) => { setSubtaskPosition(null); setDetailsOcc(occurrence); }} />}
       {fileDiff && (
         <FileDiffModal
           taskId={taskId}

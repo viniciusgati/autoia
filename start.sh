@@ -34,6 +34,14 @@ HOME_DIR="${HOME:-$HOME}"
 NVM_BIN="$(compgen -G "$HOME_DIR/.nvm/versions/node/*/bin" 2>/dev/null | sort -V | tail -n 1 || true)"
 export PATH="$HOME_DIR/.kimi-code/bin${NVM_BIN:+:$NVM_BIN}:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
+# Verifica se o PID do arquivo ainda é o processo esperado (evita PID
+# reutilizado pelo SO: kill -0 sozinho aceita processo novo com o mesmo PID).
+pid_matches() {
+  local pid="$1" name="$2"
+  [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null \
+    && tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null | grep -qF -- "$name"
+}
+
 wait_for_service() {
   local name="$1"
   local url="$2"
@@ -56,7 +64,7 @@ wait_for_service() {
 }
 
 start_api() {
-  if [[ -f "$PID_API" ]] && kill -0 "$(cat "$PID_API")" 2>/dev/null; then
+  if pid_matches "$(cat "$PID_API" 2>/dev/null)" "autoia-api"; then
     echo "API já está rodando (PID $(cat "$PID_API"))"
   else
     echo "Iniciando API (:${API_PORT})..."
@@ -67,7 +75,7 @@ start_api() {
 }
 
 start_worker() {
-  if [[ -f "$PID_WORKER" ]] && kill -0 "$(cat "$PID_WORKER")" 2>/dev/null; then
+  if pid_matches "$(cat "$PID_WORKER" 2>/dev/null)" "autoia-worker"; then
     echo "Worker já está rodando (PID $(cat "$PID_WORKER"))"
   else
     echo "Iniciando worker ($WORKERS processo(s))..."
@@ -77,7 +85,7 @@ start_worker() {
 }
 
 start_frontend() {
-  if [[ -f "$PID_FRONT" ]] && kill -0 "$(cat "$PID_FRONT")" 2>/dev/null; then
+  if pid_matches "$(cat "$PID_FRONT" 2>/dev/null)" "npm run dev"; then
     echo "Frontend já está rodando (PID $(cat "$PID_FRONT"))"
   else
     echo "Iniciando frontend dev (:5173)..."
@@ -89,7 +97,7 @@ start_frontend() {
 
 stop() {
   for f in "$PID_API" "$PID_WORKER" "$PID_FRONT"; do
-    if [[ -f "$f" ]] && kill -0 "$(cat "$f")" 2>/dev/null; then
+    if pid_matches "$(cat "$f" 2>/dev/null)" "$(basename "$f" .pid | sed 's/^/autoia-/; s/^autoia-frontend$/npm run dev/')"; then
       echo "Parando $(basename "$f") (PID $(cat "$f"))"
       kill "$(cat "$f")"
     fi

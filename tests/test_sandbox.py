@@ -555,6 +555,7 @@ def test_run_executor_fail_closed_varredura_de_segredos(tmp_path):
         codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1,
 
         keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=True, image="debian:bookworm-slim",
@@ -585,6 +586,7 @@ def test_run_executor_varredura_avisa_mas_roda(tmp_path):
         codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1,
 
         keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=False, image="debian:bookworm-slim",
@@ -964,6 +966,7 @@ def test_docker_sandbox_fail_closed_sem_docker(tmp_path, monkeypatch):
         codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1,
 
         keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=True, image="img"),
@@ -985,6 +988,7 @@ def test_docker_sandbox_fallback_direto_sem_fail_closed(tmp_path, monkeypatch):
         codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1,
 
         keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=False, image="img"),
@@ -1020,6 +1024,7 @@ def test_subtask_executor_fallback_direto_sem_fail_closed(tmp_path, monkeypatch)
         codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1,
         keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=False, image="img"),
     )
@@ -1056,6 +1061,7 @@ def test_subtask_executor_fail_closed_aborta_sem_docker(tmp_path, monkeypatch):
         codex_bin="codex", codex_model="",
         log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
         branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1,
         keep_workspaces=True,
         sandbox=sb.SandboxConfig(mode="fs", fail_closed=True, image="img"),
     )

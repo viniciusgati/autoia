@@ -18,6 +18,7 @@ class RepositoryCreate(BaseModel):
     max_attempts: int | None = None
     max_pm_decisions: int | None = None
     run_timeout: int | None = None
+    no_progress_timeout: int | None = None
     task_budget: float | None = None
     cost_per_interaction: float | None = None
     risky_patterns_extra: str | None = None
@@ -47,6 +48,7 @@ class RepositoryUpdate(BaseModel):
     max_attempts: int | None = None
     max_pm_decisions: int | None = None
     run_timeout: int | None = None
+    no_progress_timeout: int | None = None
     task_budget: float | None = None
     cost_per_interaction: float | None = None
     risky_patterns_extra: str | None = None
@@ -75,6 +77,7 @@ class RepositoryOut(BaseModel):
     max_attempts: int | None = None
     max_pm_decisions: int | None = None
     run_timeout: int | None = None
+    no_progress_timeout: int | None = None
     task_budget: float | None = None
     cost_per_interaction: float | None = None
     risky_patterns_extra: str | None = None

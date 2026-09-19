@@ -324,3 +324,34 @@ def test_cleanup_remove_apenas_concluidas_antigas(bench_settings):
     assert result["skipped_active"] >= 1
     assert result["skipped_recent"] >= 1
 
+
+def test_effective_no_progress_timeout_android_auto_policy():
+    """O watchdog "sem progresso" efetivo segue: repo explícito > auto-policy
+    Android (900s) > global. Repo não-Android sem valor usa o global."""
+    from types import SimpleNamespace
+
+    from app.worker.runner import _effective_no_progress_timeout
+
+    base = SimpleNamespace(
+        no_progress_timeout=None,
+        sandbox_profile=None,
+    )
+    settings = SimpleNamespace(no_progress_timeout=300, sandbox_profile=None)
+
+    # Repo não-Android sem valor explícito: herda o global.
+    assert _effective_no_progress_timeout(settings, base) == 300
+
+    # Perfil Android efetivo (do repo): auto-policy de 900s.
+    android_repo = SimpleNamespace(no_progress_timeout=None, sandbox_profile="android-emulator-35")
+    assert _effective_no_progress_timeout(settings, android_repo) == 900
+
+    # Perfil Android global (repo herda): auto-policy também vale.
+    android_settings = SimpleNamespace(no_progress_timeout=300, sandbox_profile="android-compose-37")
+    assert _effective_no_progress_timeout(android_settings, base) == 900
+
+    # Valor explícito do repo prevalece (inclusive 0 = desliga o watchdog).
+    custom = SimpleNamespace(no_progress_timeout=1500, sandbox_profile="android-emulator-35")
+    assert _effective_no_progress_timeout(settings, custom) == 1500
+    disabled = SimpleNamespace(no_progress_timeout=0, sandbox_profile="android-emulator-35")
+    assert _effective_no_progress_timeout(settings, disabled) == 0
+

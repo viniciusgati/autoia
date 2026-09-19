@@ -9,9 +9,9 @@ import pytest
 from app.worker import gitops
 
 
-def _git(cwd, *args):
+def _git(cwd, *args, check=True):
     return subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+        ["git", *args], cwd=cwd, capture_output=True, text=True, check=check
     )
 
 
@@ -119,6 +119,73 @@ def test_pull_branch_noop_when_not_published(bare_repo, tmp_path):
     gitops.ensure_task_branch(dest, "autoia/task-1", "main")
     gitops.pull_branch(dest, "autoia/task-1")  # não deve lançar
     assert gitops.current_branch(dest) == "autoia/task-1"
+
+
+def test_abort_in_progress_merge(bare_repo, tmp_path):
+    """Merge pendurado (robô morto no meio) é abortado e o checkout segue limpo.
+
+    Simula o cenário da task travada por "you need to resolve your current index
+    first": um `git merge` com conflito fica com MERGE_HEAD no índice; a chamada
+    seguinte de `ensure_task_branch` deve abortá-lo automaticamente e voltar ao
+    último commit, sem falhar.
+    """
+    dest = str(tmp_path / "clone")
+    gitops.clone(bare_repo, dest)
+    gitops.ensure_task_branch(dest, "autoia/task-1", "main")
+
+    # branch faz um commit em README
+    (tmp_path / "clone" / "README.md").write_text("A\n")
+    gitops.commit_all(dest, "branch muda README")
+
+    # main avança em README (via outro clone) para gerar conflito
+    dest_b = str(tmp_path / "clone_b")
+    gitops.clone(bare_repo, dest_b)
+    gitops.ensure_task_branch(dest_b, "autoia/task-b", "main")
+    (tmp_path / "clone_b" / "README.md").write_text("B\n")
+    gitops.commit_all(dest_b, "main muda README")
+    res_b = gitops.merge_and_push(dest_b, "autoia/task-b", "main")
+    assert res_b.ok
+
+    # simula um merge pendurado: conflito deixado no índice, sem commit
+    _git(dest, "fetch", "origin")
+    merged = _git(dest, "merge", "origin/main", check=False)
+    assert merged.returncode != 0  # conflito
+    assert (tmp_path / "clone" / ".git" / "MERGE_HEAD").exists()
+
+    # a recuperação aborta o merge e o checkout funciona de novo
+    aborted = gitops.abort_in_progress_merge(dest)
+    assert aborted is True
+    assert not (tmp_path / "clone" / ".git" / "MERGE_HEAD").exists()
+    assert gitops.current_branch(dest) == "autoia/task-1"
+
+    # idempotente: sem merge pendurado retorna False e não quebra
+    assert gitops.abort_in_progress_merge(dest) is False
+
+
+def test_ensure_task_branch_recovers_stale_merge(bare_repo, tmp_path):
+    """`ensure_task_branch` aborta merge pendurado antes do checkout (fase normal)."""
+    dest = str(tmp_path / "clone")
+    gitops.clone(bare_repo, dest)
+    gitops.ensure_task_branch(dest, "autoia/task-1", "main")
+    (tmp_path / "clone" / "README.md").write_text("A\n")
+    gitops.commit_all(dest, "branch muda README")
+
+    dest_b = str(tmp_path / "clone_b")
+    gitops.clone(bare_repo, dest_b)
+    gitops.ensure_task_branch(dest_b, "autoia/task-b", "main")
+    (tmp_path / "clone_b" / "README.md").write_text("B\n")
+    gitops.commit_all(dest_b, "main muda README")
+    assert gitops.merge_and_push(dest_b, "autoia/task-b", "main").ok
+
+    _git(dest, "fetch", "origin")
+    merged = _git(dest, "merge", "origin/main", check=False)
+    assert merged.returncode != 0
+    assert (tmp_path / "clone" / ".git" / "MERGE_HEAD").exists()
+
+    # ensure_task_branch NÃO deve lançar: aborta o merge e faz checkout
+    gitops.ensure_task_branch(dest, "autoia/task-1", "main")
+    assert gitops.current_branch(dest) == "autoia/task-1"
+    assert not (tmp_path / "clone" / ".git" / "MERGE_HEAD").exists()
 
 
 def test_advpl_helpers():

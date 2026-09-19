@@ -220,6 +220,19 @@ class Settings:
     no_progress_timeout: int = field(
         default_factory=lambda: _int("AUTOIA_NO_PROGRESS_TIMEOUT", 300)
     )
+    # Repetições da verificação (verify/validador) quando ela termina INCONCLUSIVA
+    # (veredicto ausente, timeout ou erro do executor — o código não foi avaliado):
+    # a MESMA subtarefa é re-verificada sem bounce-back para o developer. Depois de
+    # esgotado, a task vai a needs_review com diagnóstico claro. 0 = sem retry.
+    verify_retries: int = field(default_factory=lambda: _int("AUTOIA_VERIFY_RETRIES", 1))
+    # Watchdog de LOOP SEMÂNTICO: se o executor repetir a MESMA intenção de busca
+    # (ex.: `find`/`grep` pelo mesmo arquivo/termo, leituras do mesmo caminho)
+    # `max_repeated_searches` vezes numa execução, o processo é morto com o
+    # diagnóstico no evento `guardrail_blocked` — agentes presos procurando um
+    # relatório inexistente queimam tempo/tokens em vez de pedir ajuda. 0 = desligado.
+    max_repeated_searches: int = field(
+        default_factory=lambda: _int("AUTOIA_MAX_REPEATED_SEARCHES", 6)
+    )
     # Rotação de logs (configuração geral): arquivos `.log` com mtime mais antigo
     # que `log_retention_days` dias são elegíveis à limpeza de órfãos
     # (tela `/config`). 0 desliga a limpeza de logs.

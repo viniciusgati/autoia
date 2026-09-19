@@ -86,6 +86,7 @@ def run_opencode(
     whitelisted_hosts: list[str] = (),
     model: str | None = None,
     no_progress_timeout: int = 0,
+    max_repeated_searches: int = 0,
     resume_session_id: str | None = None,
     repo_id: int | None = None,
     stop_file: str | None = None,
@@ -182,6 +183,7 @@ def run_opencode(
         final_text = ""
         last_call_key: tuple | None = None
         identical_count = 0
+        semantic_tracker = guardrails.SemanticLoopTracker(max_repeated_searches)
 
         def _persist(kind: str, payload: dict, cost: float = 0.0) -> str | None:
             nonlocal seq
@@ -241,6 +243,10 @@ def run_opencode(
                         violation = guardrails.GuardrailViolation(
                             pattern="identical-calls",
                             detail=f"{tc['tool']} repetido {identical_count}x seguidas",
+                        )
+                    if violation is None:
+                        violation = semantic_tracker.register(
+                            tc["tool"], part.get("state", {}).get("input")
                         )
 
                     abort_reason = _persist(

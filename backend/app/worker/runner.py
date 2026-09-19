@@ -117,8 +117,22 @@ class EffectiveSettings:
     branch_prefix: str
     max_identical_calls: int
     no_progress_timeout: int
+    max_repeated_searches: int
+    verify_retries: int
     keep_workspaces: bool
     sandbox: sandbox_mod.SandboxConfig
+
+
+# Padrão do watchdog "sem progresso" para perfis de toolchain Android: builds
+# instrumentados longos (gradle connectedDebugAndroidTest) ficam >300s sem o
+# executor emitir saída enquanto a tool call roda — o default global mataria a
+# execução no meio da suíte. Aplicado quando o perfil efetivo é Android e o
+# repositório não define o próprio valor.
+ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT = 900
+_ANDROID_PROFILES = (
+    toolchains.PROFILE_ANDROID_COMPOSE_37,
+    toolchains.PROFILE_ANDROID_EMULATOR_35,
+)
 
 
 def _sandbox_config(settings: Settings, repo: Repository) -> sandbox_mod.SandboxConfig:
@@ -219,10 +233,28 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         branch_prefix=settings.branch_prefix,
         workspace_dir=settings.workspace_dir,
         max_identical_calls=settings.max_identical_calls,
-        no_progress_timeout=settings.no_progress_timeout,
+        no_progress_timeout=_effective_no_progress_timeout(settings, repo),
+        max_repeated_searches=settings.max_repeated_searches,
+        verify_retries=settings.verify_retries,
         keep_workspaces=settings.keep_workspaces,
         sandbox=_sandbox_config(settings, repo),
     )
+
+
+def _effective_no_progress_timeout(settings: Settings, repo: Repository) -> int:
+    """Watchdog "sem progresso" efetivo: repo > auto-policy Android > global.
+
+    O repositório pode definir o próprio valor (`Repository.no_progress_timeout`;
+    0 desliga). Sem valor explícito, perfis de toolchain Android ganham um padrão
+    maior (`ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT`) — suítes instrumentadas longas
+    ficam sem saída do executor além dos 300s do default global.
+    """
+    if repo.no_progress_timeout is not None:
+        return repo.no_progress_timeout
+    profile_name = (repo.sandbox_profile or settings.sandbox_profile or "").strip().lower()
+    if profile_name in _ANDROID_PROFILES:
+        return ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT
+    return settings.no_progress_timeout
 
 
 def _effective_step_mode(step: TaskStep, task: Task) -> str:
@@ -651,21 +683,27 @@ def _step_prior_activity(s: Session, step: TaskStep, limit: int = 40) -> str:
         .order_by(RunEvent.seq)
         .all()
     )
-    start = 0
-    for i, ev in enumerate(events):
-        if ev.kind == "attempt_started":
-            start = i
-            break
-    if not events[start:]:
+    starts = [i for i, ev in enumerate(events) if ev.kind == "attempt_started"]
+    if not starts:
+        return ""
+    # Mostra a ÚLTIMA tentativa com atividade: se a última `attempt_started` ainda
+    # não tem eventos (é a atual, recém-iniciada no claim), usa a tentativa anterior.
+    start = starts[-1]
+    if not any(
+        ev.kind in ("tool_call", "assistant_text") for ev in events[start + 1 :]
+    ) and len(starts) >= 2:
+        start = starts[-2]
+    if not events[start + 1 :]:
         return ""
     lines: list[str] = []
-    for ev in events[start:][-limit:]:
+    for ev in events[start + 1 :][-limit:]:
         p = ev.payload or {}
         if ev.kind == "tool_call":
             tc = p.get("tool_call") or {}
             fn = (tc.get("function") or {}) if isinstance(tc, dict) else {}
-            name = fn.get("name") if isinstance(fn, dict) else (p.get("tool") or "?")
-            args = fn.get("arguments") if isinstance(fn, dict) else p.get("input")
+            fn_name = fn.get("name") if isinstance(fn, dict) else None
+            name = fn_name or p.get("tool") or "?"
+            args = fn.get("arguments") if isinstance(fn, dict) and fn_name else p.get("input")
             target = _tool_call_target(args)
             lines.append(f"- {name}: {target}" if target else f"- {name}")
         elif ev.kind == "assistant_text":
@@ -1128,6 +1166,7 @@ def _run_executor(
                 whitelisted_hosts=eff.whitelisted_hosts,
                 model=model or eff.opencode_model,
                 no_progress_timeout=eff.no_progress_timeout,
+                max_repeated_searches=eff.max_repeated_searches,
                 resume_session_id=resume_session_id,
                 repo_id=repo_id,
                 stop_file=stop_file,
@@ -1181,6 +1220,7 @@ def _run_executor(
                     else eff.cost_per_interaction
                 ),
                 no_progress_timeout=eff.no_progress_timeout,
+                max_repeated_searches=eff.max_repeated_searches,
                 resume_session_id=resume_session_id,
                 repo_id=repo_id,
                 stop_file=stop_file,
@@ -1261,6 +1301,24 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             log.warning(
                 "não foi possível configurar identidade git em %s", checkout, exc_info=True
             )
+
+        # Recuperação automática de merge pendurado: um robô morto no meio de um
+        # `git merge` (watchdog de progresso/guardrail/timeout) deixa `MERGE_HEAD`
+        # no índice — o `git checkout` seguinte falha com "you need to resolve your
+        # current index first" e trava a task até intervenção manual. O merge final
+        # é sempre do worker, então um merge pendurado é lixo de execução
+        # interrompida: aborta e segue (com evento explícito na timeline).
+        if gitops.abort_in_progress_merge(checkout):
+            log.warning("merge pendurado abortado no checkout %s", checkout)
+            _system_event(
+                s, step, "stale_merge_aborted",
+                {
+                    "reason": "merge pendurado de execução anterior abortado automaticamente "
+                    "(robô interrompido durante resolução de conflitos). A branch voltou ao "
+                    "último commit e a fase segue normalmente.",
+                },
+            )
+            s.commit()
 
         try:
             if step.post_merge:
@@ -2244,6 +2302,23 @@ def _decide_subtask_verify(
             _spawn_tasks(session_factory, step_id, checkout)
             return None
 
+        if result.startswith("inconclusive:"):
+            # Validação não conseguiu avaliar o código (veredicto AUSENTE, timeout,
+            # executor morreu) mesmo após retry — NÃO há defeito identificado para
+            # o developer corrigir: pausa com diagnóstico claro (intervenção humana).
+            _system_event(s, step, "verify_inconclusive", {"reason": result})
+            reason = (
+                f"validação inconclusiva após retry — sem defeito identificado no "
+                f"código (veredicto ausente/falha de infraestrutura): {result}"
+            )
+            task.status = TASK_NEEDS_REVIEW
+            task.error = reason
+            step.status = STEP_FAILED
+            step.error = reason
+            _finish(step)
+            s.commit()
+            return {"task_id": task.id, "reason": reason}
+
         if result.startswith("sub:"):
             # Subtarefas NÃO têm limite próprio: o contador `attempt` da subtarefa
             # é cumulativo entre implement e verify e nunca reseta — um limite por
@@ -2255,6 +2330,12 @@ def _decide_subtask_verify(
             # reseta as tentativas (novo orçamento) — ver _rewind_pipeline etc.
             for st in task.subtasks:
                 if st.status not in ("done",):
+                    # Inconclusivas não voltam ao developer: o código não foi
+                    # avaliado (não há defeito a corrigir) — permanecem com o
+                    # erro `inconclusive:` para a próxima rodada de verify
+                    # re-validar sem re-implementação.
+                    if str(st.error or "").startswith("inconclusive:"):
+                        continue
                     st.status = "pending"
                     st.verdict = None
                     st.finished_at = None
@@ -2354,6 +2435,10 @@ def _subtask_progress_summary(task: Task, post_merge: bool = False) -> str:
             line += f" — {s.summary[:200]}"
         if s.verdict:
             line += f" (veredicto: {s.verdict})"
+        # Motivo da falha/inconclusão: sem isso o developer caça um relatório
+        # inexistente (ex.: "[FALHOU]" sem dizer que foi veredicto AUSENTE).
+        if s.error:
+            line += f" — motivo: {s.error[:200]}"
         lines.append(line)
     return "\n".join(lines)
 

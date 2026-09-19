@@ -654,7 +654,11 @@ com EXATAMENTE estas seções:
 2. ...
 
 ### Priorização
-- <ordem recomendada e justificativa (impacto × esforço)>"""
+- <ordem recomendada e justificativa (impacto × esforço)>
+
+NÃO crie o arquivo `autoia_tasks.json` — definir propostas de tarefas é papel
+EXCLUSIVO do propositor (fase final do pipeline), que consolida o seu relatório
+junto com as demais análises. O seu relatório é apenas insumo para ele."""
 
 # Contrato do auditor de usabilidade (role "usability").
 CONTRACT_USABILITY = """## Formato de saída OBRIGATÓRIO (auditoria de usabilidade)
@@ -769,5 +773,9 @@ def build_prompt(
     if robot.role not in ("refine", "pm", "summary"):
         parts.append(BLOCKED_TOOL)
         parts.append(DECISION_TOOL)
-    parts.append(TASK_SPAWN_TOOL)
+    # Ferramenta de propostas (autoia_tasks.json): o analista (plan) NÃO recebe —
+    # escrever propostas é papel exclusivo do propositor; o analista só sugere
+    # tarefas no relatório (duplicaria as propostas da fase final).
+    if robot.role != "plan":
+        parts.append(TASK_SPAWN_TOOL)
     return "\n\n".join(p for p in parts if p)

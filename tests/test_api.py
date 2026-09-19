@@ -244,6 +244,28 @@ def test_pause_resume_cancel(app_client, registered_repo):
     assert r.status_code == 400
 
 
+def test_cancel_terminal_task_allowed(settings, bare_repo):
+    """Tarefa em estado terminal (done/failed) ainda pode ser cancelada."""
+    from app.db import make_engine, make_session_factory
+
+    app = create_app(settings)
+    session_factory = make_session_factory(make_engine(settings.database_url))
+    client = TestClient(app)
+    client.post(
+        "/api/repositories", json={"name": "r", "url": bare_repo, "default_branch": "main"}
+    )
+    task = _create_and_start_task(client)
+    with session_factory() as s:
+        t = s.get(Task, task["id"])
+        t.status = "failed"
+        t.error = "falhou no teste"
+        s.commit()
+
+    body = client.post(f"/api/tasks/{task['id']}/cancel").json()
+    assert body["status"] == "cancelled"
+    assert "cancelada" in body["error"]
+
+
 def test_cancel_during_run_stops_pipeline(settings, bare_repo, tmp_path, fake_kimi):
     """Task cancelada enquanto a fase roda: o worker não avança nem faz merge."""
     settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass")
