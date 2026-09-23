@@ -18,6 +18,7 @@ from ..models import (
     CHAT_STATUS_IDLE,
     CHAT_STATUS_QUEUED,
     STEP_BLOCKED,
+    STEP_DONE,
     STEP_FAILED,
     STEP_GUARDRAIL_BLOCKED,
     STEP_MODE_MANUAL,
@@ -1300,6 +1301,10 @@ def continue_blocked(
 def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     """Reexecuta a partir de `target`: reabre o alvo e reseta os steps seguintes.
 
+    Se uma fase ANTERIOR ao alvo está não-concluída (failed/guardrail_blocked),
+    o rewind começa dela: o claim exige todas as fases anteriores `done` e o
+    alvo nunca seria reclamado (mesmo deadlock do PM retry — task-194).
+
     Intervenção humana = orçamento NOVO: as tentativas da fase (e das fases
     seguintes) voltam a 1 — o contador é cumulativo e, sem reset, uma retomada
     após esgotamento falhava na primeira reprovação seguinte (loop travado em
@@ -1307,15 +1312,21 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     execuções viram novas ocorrências na timeline. Compartilhado pelo bounceback
     manual e pelo envio de instrução.
     """
-    target.attempt = 1
-    target.status = STEP_PENDING
-    target.error = None
-    target.summary = None
-    target.verdict = None
-    target.finished_at = None
-    target.started_at = None
-    for st in _active_steps(task):
-        if st.position > target.position:
+    active = _active_steps(task)
+    start = target
+    for st in sorted(active, key=lambda x: x.position):
+        if st.position <= target.position and st.status != STEP_DONE:
+            start = st
+            break
+    start.attempt = 1
+    start.status = STEP_PENDING
+    start.error = None
+    start.summary = None
+    start.verdict = None
+    start.finished_at = None
+    start.started_at = None
+    for st in active:
+        if st.position > start.position:
             st.status = STEP_PENDING
             st.attempt = 1
             st.error = None

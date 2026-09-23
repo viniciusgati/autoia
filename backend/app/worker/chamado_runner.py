@@ -233,7 +233,7 @@ def execute_stage_action(settings: Settings, session_factory, stage_id: int, act
             return
         chamado = stage.chamado
         repo = chamado.repository
-        eff = _effective(settings, repo)
+        eff = _effective(settings, repo, s)
         checkout = chamado_workspace(eff, repo.id, chamado.id)
         source = repo.url or repo.local_path or ""
         if not source:

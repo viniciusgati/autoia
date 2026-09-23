@@ -283,7 +283,7 @@ def execute_chat_action(settings: Settings, session_factory, task_id: int, actio
         if task is None:
             return
         repo = task.repository
-        eff = _effective(settings, repo)
+        eff = _effective(settings, repo, s)
         checkout = _task_workspace(eff, repo.id, task.id)
         base = repo.default_branch
         branch = task.branch or f"{eff.branch_prefix}/task-{task.id}"

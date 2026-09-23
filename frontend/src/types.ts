@@ -31,6 +31,18 @@ export interface Repository {
   task_targets: string[];
   /** Informações úteis injetadas no contexto dos robôs (DNS de deploy, URLs, env). */
   external_context: string | null;
+  /** Conta opencode-go fixada para este repositório (nome no roster global). */
+  opencode_account: string | null;
+}
+
+/** Conta opencode-go (roster global de credenciais do agente). O token nunca é
+ *  retornado pela API — `has_token` indica se a conta tem credencial válida. */
+export interface OpenCodeAccount {
+  id: number;
+  name: string;
+  description: string;
+  is_default: boolean;
+  has_token: boolean;
 }
 
 /** Informações para o diálogo de confirmação de exclusão do projeto

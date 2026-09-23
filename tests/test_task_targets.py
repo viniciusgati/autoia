@@ -83,7 +83,7 @@ def test_task_targets_vazio_recusa_cross_repo(settings, bare_repo, tmp_path):
     )
     settings.task_budget = 100.0
 
-    pipeline_id = _simple_pipeline(flow, 1, "iniciador")
+    pipeline_id = _simple_pipeline(flow, 1, "propositor")
     resp = client.post(
         "/api/tasks",
         json={"repository_id": 1, "pipeline_id": pipeline_id, "title": "brain", "description": "d"},
@@ -127,7 +127,7 @@ def test_task_targets_permitido_cria_proposta(settings, bare_repo, tmp_path):
     )
     settings.task_budget = 100.0
 
-    pipeline_id = _simple_pipeline(flow, 1, "iniciador")
+    pipeline_id = _simple_pipeline(flow, 1, "propositor")
     resp = client.post(
         "/api/tasks",
         json={"repository_id": 1, "pipeline_id": pipeline_id, "title": "brain", "description": "d"},
@@ -157,7 +157,7 @@ def test_task_targets_fora_da_lista_recusado(settings, bare_repo, tmp_path):
     )
     settings.task_budget = 100.0
 
-    pipeline_id = _simple_pipeline(flow, 1, "iniciador")
+    pipeline_id = _simple_pipeline(flow, 1, "propositor")
     resp = client.post(
         "/api/tasks",
         json={"repository_id": 1, "pipeline_id": pipeline_id, "title": "t", "description": "d"},
@@ -207,7 +207,7 @@ def test_external_context_entra_no_prompt_e_no_agents_md(settings, bare_repo):
 
     from app.models import Robot as RobotModel
 
-    robot = RobotModel(name="iniciador", role="analyze", mission="m.")
+    robot = RobotModel(name="propositor", role="propose", mission="m.")
     task = SimpleNamespace(
         title="t", description="d", acceptance_criteria="",
         feedback="", details="", resume_instruction="", executor="kimi",
@@ -239,7 +239,7 @@ def test_repo_proposals_endpoint_lista_do_projeto(settings, bare_repo, tmp_path)
     )
     settings.task_budget = 100.0
 
-    pipeline_id = _simple_pipeline(flow, 1, "iniciador")
+    pipeline_id = _simple_pipeline(flow, 1, "propositor")
     resp = client.post(
         "/api/tasks",
         json={"repository_id": 1, "pipeline_id": pipeline_id, "title": "brain", "description": "d"},

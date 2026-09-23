@@ -58,7 +58,7 @@ def _prepare(flow, tmp_path, phases: list[str] | None = None) -> dict:
 
     Retorna a task pai e a proposta pendente.
     """
-    phases = phases or ["po", "qa"]
+    phases = phases or ["propositor", "propositor"]
     settings = flow["settings"]
     settings.kimi_bin = _kimi_spawn(tmp_path, [{"title": "filha", "description": "desc", "kind": "bug"}])
     settings.task_budget = 100.0
@@ -128,7 +128,7 @@ def test_accept_filha_pode_ser_iniciada_e_executa(proposals_flow, tmp_path, fake
     client = proposals_flow["client"]
     # pipeline de UMA fase (po) para o pai: sem fases pendentes do pai sobrando
     # para interferir no FIFO do worker quando a filha for executada
-    prep = _prepare(proposals_flow, tmp_path, phases=["po"])
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"])
     parent_id, proposal = prep["parent_id"], prep["proposal"]
 
     resp = client.post(f"/api/tasks/{parent_id}/proposals/{proposal['id']}/accept")
@@ -306,12 +306,12 @@ def test_change_pipeline_reinicia_task(proposals_flow, tmp_path):
     """Trocar a pipeline de uma task (mesmo já rodada) arquiva as fases antigas
     (histórico preservado) e cria as novas do zero — a UI mostra só as novas."""
     client = proposals_flow["client"]
-    prep = _prepare(proposals_flow, tmp_path, phases=["po", "qa"])
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor", "propositor"])
     parent_id, proposal = prep["parent_id"], prep["proposal"]
     client.post(f"/api/tasks/{parent_id}/proposals/{proposal['id']}/accept")
     child = client.get(f"/api/tasks/{parent_id}").json()["children"][0]
     child_id = child["id"]
-    assert [st["robot"]["name"] for st in child["steps"]] == ["po", "qa"]
+    assert [st["robot"]["name"] for st in child["steps"]] == ["propositor", "propositor"]
 
     robots = client.get(f"/api/robots?repository_id={proposals_flow['repo_id']}").json()
     dev = next(r for r in robots if r["name"] == "developer")
@@ -417,7 +417,7 @@ def test_accept_cross_repo_requer_allow_external_tasks(proposals_flow, tmp_path,
         json={
             "name": "p",
             "repository_id": proposals_flow["repo_id"],
-            "steps": [{"position": 0, "robot_id": by_name["po"]}],
+            "steps": [{"position": 0, "robot_id": by_name["propositor"]}],
         },
     )
     resp = client.post(

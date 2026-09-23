@@ -220,3 +220,80 @@ def test_captures_session_id_and_resumes(tmp_path):
     assert argv[argv.index("--session") + 1] == "ses_abc"
     # a sequência de eventos emitida não muda com o resume
     assert len(events) == 4  # 2 runs × (assistant_text + system)
+
+
+def test_resume_fallback_sem_sessao(tmp_path):
+    """Retomada com sessão inexistente (`Error: Session not found`) cai para uma
+    execução NOVA sem `--session` em vez de falhar a fase — cenário real: a conta
+    opencode-go mudou entre a execução original e a retomada, isolando o
+    `XDG_DATA_HOME` (a sessão da execução antiga não existe no armazenamento novo)."""
+    fake = tmp_path / "fake_fallback"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "with open('argv.txt', 'a') as f:\n"
+        "    f.write('RUN:' + ' '.join(sys.argv) + '\\n')\n"
+        "if '--session' in sys.argv:\n"
+        "    sys.stderr.write('Error: Session not found\\n')\n"
+        "    sys.exit(1)\n"
+        "for l in [\n"
+        "  " + json.dumps({"type": "text", "part": {"type": "text", "text": "ok-nova-sessao"}}) + ",\n"
+        "  " + json.dumps({"type": "step_finish", "part": {"type": "step-finish", "reason": "stop", "cost": 0.001, "tokens": {"input": 1, "output": 1}}}) + "\n"
+        "]:\n"
+        "    print(json.dumps(l))\n"
+        "    sys.stdout.flush()\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    events: list[tuple[str, dict]] = []
+
+    def on_event(kind, payload, cost):
+        events.append((kind, payload))
+        return None
+
+    outcome = opencode_exec.run_opencode(
+        "continuar", cwd=str(cwd), opencode_bin=str(fake),
+        log_path=str(tmp_path / "run.log"), timeout=30,
+        max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        resume_session_id="ses_morta", on_event=on_event,
+    )
+
+    assert outcome.exit_code == 0
+    assert not outcome.aborted
+    assert outcome.final_text == "ok-nova-sessao"
+    runs = (cwd / "argv.txt").read_text().splitlines()
+    assert len(runs) == 2
+    assert "--session" in runs[0]      # 1ª tentativa tentou retomar
+    assert "--session" not in runs[1]  # fallback rodou sem retomada
+    fallback = next(
+        p for k, p in events if k == "system" and "opencode_resume_fallback" in p
+    )
+    assert "ses_morta" in fallback["opencode_resume_fallback"]
+
+
+def test_resume_ok_nao_faz_fallback(tmp_path):
+    """Retomada bem-sucedida não aciona o fallback (só UM run, com --session)."""
+    lines = [
+        {"type": "text", "part": {"type": "text", "text": "ok"}, "sessionID": "ses_viva"},
+        _finish(0.001),
+    ]
+    fake = _make_fake(tmp_path, lines)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    events: list[str] = []
+
+    def on_event(kind, payload, cost):
+        events.append(kind)
+        return None
+
+    outcome = opencode_exec.run_opencode(
+        "continuar", cwd=str(cwd), opencode_bin=fake,
+        log_path=str(tmp_path / "run.log"), timeout=30,
+        max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        resume_session_id="ses_viva", on_event=on_event,
+    )
+    assert outcome.exit_code == 0
+    argv = (cwd / "argv.txt").read_text().split()
+    assert "--session" in argv
+    assert argv.count("--session") == 1

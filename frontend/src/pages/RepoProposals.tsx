@@ -43,7 +43,6 @@ export default function RepoProposals() {
 
   const repoNames = Object.fromEntries(repos.map((r) => [r.id, r.name]));
   const pending = proposals.filter((p) => p.status === "pending");
-  const accepted = proposals.filter((p) => p.status === "accepted");
 
   return (
     <div className="resumo">
@@ -64,9 +63,9 @@ export default function RepoProposals() {
         </Link>
       </div>
 
-      {proposals.length === 0 && (
+      {pending.length === 0 && (
         <p className="muted" style={{ marginTop: 16 }}>
-          Nenhuma proposta de tarefa neste projeto. Propostas aparecem aqui quando um
+          Nenhuma proposta de tarefa aguardando decisão. Propostas aparecem aqui quando um
           robô (ex.: pipeline de brainstorm) gera tasks filhas para decisão humana.
         </p>
       )}
@@ -76,25 +75,6 @@ export default function RepoProposals() {
           <h3 className="resumo-section">Aguardando decisão</h3>
           <div className="proposal-list">
             {pending.map((p) => (
-              <ProposalCard
-                key={p.id}
-                proposal={p}
-                repoNames={repoNames}
-                parentRepoName={repo?.name}
-                parentDetailPath={`/${repoId}/tasks`}
-                onChanged={() => void load()}
-                onError={setError}
-              />
-            ))}
-          </div>
-        </>
-      )}
-
-      {accepted.length > 0 && (
-        <>
-          <h3 className="resumo-section">Aceitas (tasks criadas)</h3>
-          <div className="proposal-list">
-            {accepted.map((p) => (
               <ProposalCard
                 key={p.id}
                 proposal={p}

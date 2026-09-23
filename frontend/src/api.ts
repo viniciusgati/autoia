@@ -12,6 +12,7 @@ import type {
   Execution,
   MyProject,
   MyTask,
+  OpenCodeAccount,
   Pipeline,
   Project,
   ProjectDetail,
@@ -482,6 +483,23 @@ export const api = {
   // Modelos disponíveis para o executor opencode (dropdown; fonte: `opencode
   // models`, com fallback na lista configurável do backend).
   openCodeModels: () => request<{ models: string[]; source: string }>("/api/system/opencode/models"),
+  // ── Contas opencode-go (roster global de credenciais) ────────────────────
+  listOpenCodeAccounts: (signal?: AbortSignal) =>
+    request<OpenCodeAccount[]>("/api/system/opencode-accounts", { signal }),
+  createOpenCodeAccount: (data: {
+    name: string; token: string; description?: string; is_default?: boolean;
+  }) =>
+    request<OpenCodeAccount>("/api/system/opencode-accounts", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+  updateOpenCodeAccount: (id: number, data: { token?: string; description?: string; is_default?: boolean }) =>
+    request<OpenCodeAccount>(`/api/system/opencode-accounts/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+  deleteOpenCodeAccount: (id: number) =>
+    request<void>(`/api/system/opencode-accounts/${id}`, { method: "DELETE" }),
 };
 
 // Cache curto em memória da lista de modelos do codex (vários seletores na UI).

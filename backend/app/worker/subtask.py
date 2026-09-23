@@ -20,7 +20,7 @@ from dataclasses import replace
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
-from .. import budget, prompts, verdicts
+from .. import budget, guardrails, prompts, verdicts
 from ..config import Settings
 from ..models import (
     STEP_DONE,
@@ -157,7 +157,15 @@ def _run_subtask_executor(
             )
     if sandbox is None:
         sandbox = SandboxConfig(mode=SANDBOX_OFF)
+    # Conta opencode-go efetiva (espelho do `_run_executor` do runner): só o
+    # executor opencode usa — o diretório vira XDG_DATA_HOME (auth/sessões da
+    # conta isolados) e entra como mount rw nas execuções sandboxed.
+    account_dir = getattr(settings, "opencode_account_dir", None) if executor == "opencode" else None
+    if account_dir:
+        sandbox = replace(sandbox, opencode_account_dir=account_dir)
     extra_env = _sub_extra_env(settings, sandbox)
+    if account_dir:
+        extra_env = {**extra_env, "XDG_DATA_HOME": account_dir}
     preflight_ok, preflight_detail = exec_common.run_toolchain_preflight(
         sandbox,
         cwd=cwd,
@@ -363,6 +371,13 @@ def _build_subtask_implement_prompt(
     if task.acceptance_criteria:
         parts.append(f"### Critérios gerais da história (referência)\n{task.acceptance_criteria}")
 
+    # Avaliação da execução anterior interrompida (guardrail/timeout): o robô
+    # precisa saber o que aconteceu para NÃO repetir o comportamento que matou
+    # a execução (ex.: loop de busca no mesmo alvo).
+    guidance = guardrails.interruption_guidance(getattr(subtask, "error", None))
+    if guidance:
+        parts.append(guidance)
+
     # Intervenção do usuário (retomada): entra direto no prompt — a subtarefa é
     # parte da re-execução e a instrução não pode depender só do handoff.
     if task.resume_instruction:
@@ -442,6 +457,12 @@ def _build_subtask_verify_prompt(
     # Histórico da subtarefa (resumo do developer)
     if subtask.summary:
         parts.append(f"### Resumo da implementação\n{subtask.summary[:1000]}")
+
+    # Avaliação da verificação anterior interrompida (guardrail/timeout): não
+    # repetir o comportamento que matou a execução.
+    guidance = guardrails.interruption_guidance(getattr(subtask, "error", None))
+    if guidance:
+        parts.append(guidance)
 
     # Progresso
     implemented = [s for s in sorted(task.subtasks, key=lambda x: x.position) if s.status == SUB_IMPLEMENTED]

@@ -1087,3 +1087,80 @@ def test_subtask_executor_dispatch(monkeypatch):
     assert st._run_subtask_executor(s, "codex", "p", **base, model="gpt-5.6-luna") == "codex-ok"
     assert calls["codex"]["model"] == "gpt-5.6-luna"
 
+
+# ---------------------------------------------------------------------------
+# Guardrail/timeout em subtarefa: avaliação no prompt + re-tentativa da fase
+# ---------------------------------------------------------------------------
+
+
+def test_prompt_subtarefa_inclui_avaliacao_guardrail(flow):
+    """O prompt da subtarefa re-executada inclui a avaliação do guardrail — o robô
+    precisa saber o que fez de errado para não repetir o loop de busca."""
+    from app.models import SubTask, Task
+    from app.worker.subtask import _build_subtask_implement_prompt
+
+    with flow["session_factory"]() as s:
+        task = s.get(Task, flow["task"]["id"])
+        sub = SubTask(
+            task_id=task.id, position=0, title="Sub A", description="fazer A",
+            status="pending", attempt=2,
+            error="guardrail: repeated-search: busca repetida 6x pelo mesmo alvo: grep:x.xml",
+        )
+        s.add(sub)
+        s.commit()
+        prompt = _build_subtask_implement_prompt(
+            task, sub, "", "main", "autoia/task-1", "/tmp/checkout"
+        )
+    assert "interrompida pelo guardrail" in prompt
+    assert "NÃO repita a mesma busca" in prompt
+    assert "repeated-search" in prompt
+
+
+def test_guardrail_em_subtarefa_retenta_fase_sem_bounce(flow, tmp_path, monkeypatch):
+    """Guardrail numa subtarefa re-tenta a MESMA fase (implement) com a subtarefa
+    pendente — NÃO faz bounce-back para a fase anterior (qa/po), que revisava a
+    história sem relação com o problema e travava a pipeline (task-194)."""
+    from app.models import Repository, SubTask, Task, TaskStep
+    from app.worker import runner, subtask
+
+    session_factory = flow["session_factory"]
+    task_id = flow["task"]["id"]
+    with session_factory() as s:
+        s.add(SubTask(
+            task_id=task_id, position=0, title="Sub A", description="fazer A",
+            status="pending", attempt=2,
+            error="guardrail: repeated-search: busca repetida 6x",
+        ))
+        steps = (
+            s.query(TaskStep).filter(TaskStep.task_id == task_id)
+            .order_by(TaskStep.position).all()
+        )
+        steps[0].status = "done"
+        steps[1].status = "done"      # qa (fase anterior)
+        steps[2].status = "running"   # developer (implement)
+        steps[2].attempt = 2
+        dev_id, qa_id = steps[2].id, steps[1].id
+        s.commit()
+        eff = runner._effective(flow["settings"], s.get(Repository, 1), s)
+
+    monkeypatch.setattr(
+        subtask, "run_implement_subtasks",
+        lambda *a, **k: ("guardrail: repeated-search: busca repetida 6x pelo mesmo alvo", None),
+    )
+    trigger = runner._decide_subtask_implement(
+        eff, session_factory, dev_id, str(tmp_path), "main", "autoia/task-1", "",
+    )
+    assert trigger is None
+
+    with session_factory() as s:
+        dev = s.get(TaskStep, dev_id)
+        qa = s.get(TaskStep, qa_id)
+        task = s.get(Task, task_id)
+        assert dev.status == "pending"      # re-tenta a própria fase
+        assert dev.attempt == 3
+        assert "guardrail" in (dev.error or "")
+        assert qa.status == "done"          # NÃO reabre a fase anterior
+        assert task.status == "in_progress"
+        assert any(e.kind == "subtask_retry" for e in dev.events)
+
+

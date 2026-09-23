@@ -21,6 +21,9 @@ GUARDRAIL_INSTRUCTIONS = """## Regras de trabalho (orientação)
   registry.npmjs.org) ou `AUTOIA_HOST_SERVICES_BASE` (serviços do host).
 - NÃO rode `git push`. NÃO troque para as branches main/master (`git checkout main`).
   Trabalhe apenas na branch atual — o merge/push da integração é feito pelo sistema.
+- NÃO repita a MESMA busca/comando quando não encontrar o que procura: confirme o
+  caminho (`ls`/glob), mude o termo/estratégia ou siga sem o artefato. Loops de busca
+  idêntica são interrompidos pelo sistema e a execução é reiniciada.
 - Faça commits locais com `git add -A && git commit -m "mensagem"` quando concluir.
 - Se algo estiver quebrado, corrija o que estiver ao seu alcance e relate o resto.
   Não invente resultados.
@@ -404,8 +407,11 @@ MOTIVO: <porquê — progresso real, precisa de mais orçamento>
 DECISÃO: escalar
 MOTIVO: <porquê — precisa de humano>
 
-No retry, informe a posição da fase (ex.: `retry 3`) ou o nome do robô da fase que
-falhou (ex.: `retry tester`).
+No retry, informe SEMPRE a POSIÇÃO NUMÉRICA da fase que deve ser reexecutada
+(ex.: `retry 0`, `retry 2`) — é o identificador seguro. O nome do robô (ex.: `retry
+tester`) ou o role (ex.: `retry implement`) também é aceito, mas use EXATAMENTE como
+aparece na lista de fases do contexto. Reabra a fase que de fato CORRIGE a causa:
+se o defeito é da história, o alvo é a fase de refine (po), não a de revisão (qa).
 
 ### Heurísticas de decisão
 - retry: a falha tem causa clara e plausivelmente corrigível, e a mesma fase falhou
@@ -773,9 +779,11 @@ def build_prompt(
     if robot.role not in ("refine", "pm", "summary"):
         parts.append(BLOCKED_TOOL)
         parts.append(DECISION_TOOL)
-    # Ferramenta de propostas (autoia_tasks.json): o analista (plan) NÃO recebe —
-    # escrever propostas é papel exclusivo do propositor; o analista só sugere
-    # tarefas no relatório (duplicaria as propostas da fase final).
-    if robot.role != "plan":
+    # Ferramenta de propostas (autoia_tasks.json): SÓ o propositor (role "propose")
+    # escreve propostas, consolidando as análises das fases anteriores. Iniciador,
+    # analista e auditor-ux NÃO recebem a ferramenta — eles só produzem relatórios
+    # no texto final; escrever propostas em qualquer outra fase duplicaria ou
+    # anteciparia o trabalho exclusivo da fase final.
+    if robot.role == "propose":
         parts.append(TASK_SPAWN_TOOL)
     return "\n\n".join(p for p in parts if p)

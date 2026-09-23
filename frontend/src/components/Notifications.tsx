@@ -27,11 +27,14 @@ function saveSeen(seen: Set<string>): void {
   }
 }
 
-function browserNotify(title: string, body: string): void {
+function browserNotify(n: Notice): void {
   if (typeof Notification === "undefined") return;
   if (Notification.permission !== "granted") return;
   try {
-    new Notification(title, { body, tag: "autoia-notice" });
+    new Notification(`autoia — #${n.task_id} ${n.task_title}`, {
+      body: n.message,
+      tag: `autoia-notice-${n.kind}-${n.task_id}`,
+    });
   } catch {
     /* notificação bloqueada pelo navegador */
   }
@@ -60,7 +63,7 @@ export default function Notifications() {
           const fresh = keys.filter((k) => !lastKeys.current.includes(k));
           for (const k of fresh) {
             const n = d.notices.find((x) => noticeKey(x) === k);
-            if (n) browserNotify(`autoia — ${n.task_title}`, n.message);
+            if (n) browserNotify(n);
           }
           lastKeys.current = keys;
         })

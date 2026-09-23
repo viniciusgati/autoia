@@ -27,7 +27,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import exists, func, update
 from sqlalchemy.orm import Session, aliased
 
-from .. import budget, prompts, verdicts
+from .. import budget, guardrails, opencode_accounts, prompts, verdicts
 from ..config import Settings
 from ..db import Base, make_engine, make_session_factory, migrate_schema, utcnow
 from ..models import (
@@ -121,6 +121,9 @@ class EffectiveSettings:
     verify_retries: int
     keep_workspaces: bool
     sandbox: sandbox_mod.SandboxConfig
+    # Diretório da conta opencode-go deste repositório (XDG_DATA_HOME do opencode).
+    # None = sem conta pinada/default: o executor usa a conta do host.
+    opencode_account_dir: str | None = None
 
 
 # Padrão do watchdog "sem progresso" para perfis de toolchain Android: builds
@@ -204,8 +207,14 @@ host_services_base=base,
     )
 
 
-def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
-    """Merge: configurações do repositório sobrescrevem as globais."""
+def _effective(settings: Settings, repo: Repository, session: Session | None = None) -> EffectiveSettings:
+    """Merge: configurações do repositório sobrescrevem as globais.
+
+    `session` opcional: quando presente, a conta opencode-go do repositório é
+    resolvida/materializada (pin > default) e o diretório vira
+    `opencode_account_dir` no resultado. Chamadores de worker passam a sessão;
+    rotas de leitura (workspace/diffs) deixam `None` (nenhuma I/O em disco no GET).
+    """
     patterns = list(settings.risky_patterns)
     if repo.risky_patterns_extra:
         try:
@@ -238,6 +247,11 @@ def _effective(settings: Settings, repo: Repository) -> EffectiveSettings:
         verify_retries=settings.verify_retries,
         keep_workspaces=settings.keep_workspaces,
         sandbox=_sandbox_config(settings, repo),
+        opencode_account_dir=(
+            opencode_accounts.effective_account_dir(settings, session, repo)
+            if session is not None
+            else None
+        ),
     )
 
 
@@ -483,6 +497,7 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
     log.info("worker iniciado (dir de trabalho: %s)", workspace_dir)
     hb_path = os.path.join(workspace_dir, "worker.heartbeat")
     peak_prev = False
+    last_sweep = 0.0
     while True:
         # Janela de pico: não reclamar novas fases (o trabalho em andamento
         # termina; nada novo começa). Evita custo dobrado no provedor.
@@ -500,10 +515,15 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
             time.sleep(60)
             continue
         _touch_heartbeat(hb_path)
-        try:
-            process_stop_files(workspace_dir)
-        except Exception:
-            log.exception("erro ao processar sinais de parada de projetos")
+        # Varredura periódica (throttled): tasks 'em andamento' sem fase
+        # reclamável são movidas para needs_review (decisão humana) — sem isso,
+        # uma task presa ficaria 'in_progress' para sempre.
+        if time.monotonic() - last_sweep >= 30:
+            try:
+                _sweep_stuck_tasks(session_factory)
+            except Exception:
+                log.exception("erro na varredura de tasks travadas")
+            last_sweep = time.monotonic()
         try:
             step_id = claim_next(session_factory)
         except Exception:
@@ -540,6 +560,69 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
         finally:
             stop.set()
             hb_thread.join(timeout=1)
+
+
+def _sweep_stuck_tasks(session_factory) -> None:
+    """Detecta tasks 'travadas' e as move para `needs_review`.
+
+    Uma task em `queued`/`in_progress` cuja PRIMEIRA fase ativa não-concluída
+    está em `failed`/`guardrail_blocked` NUNCA será reclamada (`claim_next` exige
+    todas as fases anteriores `done`) — nem as fases pendentes posteriores.
+    Acontece quando uma intervenção humana/PM reabre uma fase sem reabrir a
+    cadeia anterior — a task fica 'em andamento' para sempre. A varredura move
+    essas tasks para `needs_review` (decisão humana) em vez de deixá-las presas
+    em silêncio. Histórico (RunEvent) não é apagado.
+    """
+    with session_factory() as s:
+        running = {
+            tid
+            for (tid,) in (
+                s.query(TaskStep.task_id).filter(TaskStep.status == STEP_RUNNING).all()
+            )
+        }
+        for task in (
+            s.query(Task)
+            .filter(Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]))
+            .all()
+        ):
+            if task.id in running:
+                continue
+            steps = _active_steps(task)
+            if not steps:
+                continue
+            # A PRIMEIRA fase não-concluída precisa ser reclamável. Se ela está
+            # failed/guardrail_blocked, nenhuma fase posterior será reclamada (o
+            # claim exige as anteriores `done`) — mesmo com pendings posteriores
+            # (ex.: retry que reabriu só o alvo — task-194). A varredura move
+            # essas tasks para `needs_review` (decisão humana) em vez de
+            # deixá-las presas em silêncio. Histórico (RunEvent) não é apagado.
+            frontier = next((st for st in steps if st.status != STEP_DONE), None)
+            if frontier is None or frontier.status not in (
+                STEP_FAILED,
+                STEP_GUARDRAIL_BLOCKED,
+            ):
+                continue
+            name = frontier.robot.name if frontier.robot else "?"
+            reason = (
+                f"pipeline travado sem fase reclamável "
+                f"(fase {frontier.position} {name} em {frontier.status})"
+            )
+            # UPDATE atômico condicionado ao status atual: com N workers rodando a
+            # varredura, só UM vence (rowcount==1) — os demais veem a task já em
+            # needs_review e não duplicam evento/estado.
+            result = s.execute(
+                update(Task)
+                .where(
+                    Task.id == task.id,
+                    Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+                )
+                .values(status=TASK_NEEDS_REVIEW, error=reason)
+            )
+            if result.rowcount != 1:
+                continue
+            log.warning("task %s: %s — movendo para needs_review", task.id, reason)
+            _system_event(s, frontier, "task_stuck_needs_review", {"reason": reason})
+            s.commit()
 
 
 def claim_next(session_factory) -> int | None:
@@ -696,6 +779,7 @@ def _step_prior_activity(s: Session, step: TaskStep, limit: int = 40) -> str:
     if not events[start + 1 :]:
         return ""
     lines: list[str] = []
+    violation_reason: str | None = None
     for ev in events[start + 1 :][-limit:]:
         p = ev.payload or {}
         if ev.kind == "tool_call":
@@ -712,7 +796,19 @@ def _step_prior_activity(s: Session, step: TaskStep, limit: int = 40) -> str:
             if first:
                 lines.append(f"> {first[:180]}")
         elif ev.kind == "guardrail_blocked":
-            lines.append(f"! guardrail bloqueou: {p.get('detail') or p.get('pattern') or ''}")
+            detail = p.get("detail") or p.get("pattern") or ""
+            lines.append(f"! guardrail bloqueou: {detail}")
+            violation_reason = p.get("reason") or (
+                f"guardrail: {p.get('pattern')}: {p.get('detail')}"
+                if p.get("pattern")
+                else str(detail)
+            )
+        elif ev.kind == "timeout":
+            violation_reason = str(p.get("reason") or "timeout")
+    guidance = guardrails.interruption_guidance(violation_reason)
+    if guidance:
+        lines.append("")
+        lines.append(guidance)
     return "\n".join(lines)
 
 
@@ -1046,6 +1142,12 @@ def _run_executor(
         else None
     )
     sandbox = eff.sandbox
+    # Conta opencode-go efetiva deste repositório: só o executor opencode usa
+    # (kimi/codex rodam com o estado da conta deles, imutável). O diretório da
+    # conta vira XDG_DATA_HOME do opencode (auth + sessões isolados por conta).
+    account_dir = eff.opencode_account_dir if executor == "opencode" else None
+    if account_dir:
+        sandbox = replace(sandbox, opencode_account_dir=account_dir)
     # Execuções que NÃO precisam do device (missão, resumo, PM em background)
     # não sobem o emulador no container: só o bootstrap do emulador é removido —
     # o preflight de toolchain continua (rápido, sem emulador).
@@ -1121,6 +1223,7 @@ def _run_executor(
         {
             "AUTOIA_HOST_SERVICES_BASE": sandbox.host_services_base,
             "AUTOIA_SANDBOX": sandbox.mode,
+            **({"XDG_DATA_HOME": account_dir} if account_dir else {}),
         },
     )
     preflight_ok, preflight_detail = exec_common.run_toolchain_preflight(
@@ -1250,7 +1353,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         task = step.task
         repo = task.repository
         base = repo.default_branch
-        eff = _effective(settings, repo)
+        eff = _effective(settings, repo, s)
         branch = task.branch or f"{eff.branch_prefix}/task-{task.id}"
 
         # Workspace isolado por task — cada task tem seu próprio clone, sem conflito
@@ -2199,14 +2302,52 @@ def _decide_subtask_implement(
                 s.commit()
                 return {"task_id": task.id, "reason": abort_reason}
 
-            # Guardrail / timeout / erro de commit
-            trigger = _handle_failure(
-                eff, s, step, task, abort_reason,
+            # Falha de EXECUÇÃO durante uma subtarefa (guardrail/timeout/erro de
+            # commit): a subtarefa voltou a `pending` com o motivo. Re-tenta a
+            # PRÓPRIA fase — o prompt da subtarefa inclui a avaliação do guardrail
+            # para o robô não repetir o comportamento. NÃO faz bounce-back para a
+            # fase anterior: a falha é do robô se perdendo (ex.: loop de busca),
+            # não da história — reabrir o qa/po revisava a história sem relação
+            # com o problema, queimava as tentativas deles e travava a pipeline
+            # (task-194: guardrail na subtarefa → qa/po reabertos → PM retry →
+            # fase anterior failed bloqueava o claim para sempre).
+            _system_event(
+                s, step,
                 "guardrail_blocked" if "guardrail" in abort_reason else "error",
-                STEP_FAILED,
+                {"reason": abort_reason},
             )
+            if step.attempt < eff.max_attempts:
+                pending_positions = sorted(
+                    su.position + 1
+                    for su in task.subtasks
+                    if su.status in ("pending", "failed", "implementing")
+                )
+                step.status = STEP_PENDING
+                step.attempt += 1
+                step.error = abort_reason
+                step.started_at = None
+                step.finished_at = None
+                task.status = TASK_IN_PROGRESS
+                task.error = None
+                task.current_step = step.position
+                _system_event(
+                    s, step, "subtask_retry",
+                    {"reason": abort_reason, "attempt": step.attempt,
+                     "positions": pending_positions, "phase": "implement"},
+                )
+                s.commit()
+                return None
+
+            task.status = TASK_NEEDS_REVIEW
+            task.error = (
+                f"falha ao implementar subtarefas e fase de correção esgotada "
+                f"({eff.max_attempts} tentativas): {abort_reason}"
+            )
+            step.status = STEP_FAILED
+            step.error = task.error
+            _finish(step)
             s.commit()
-            return trigger
+            return {"task_id": task.id, "reason": task.error}
 
         # Todas as subtarefas implementadas → avança para verify
         # Execução livre (correção sem subtarefa pendente): o texto final do robô
@@ -2455,12 +2596,18 @@ def _pm_context(s: Session, task: Task) -> str:
         f"Decisões de PM já tomadas: {task.pm_decisions}",
     ]
     for st in _active_steps(task):
-        robot_name = st.robot.name if st.robot else "?"
+        robot = st.robot
+        robot_name = robot.name if robot else "?"
+        role = robot.role if robot else "?"
         lines.append(
-            f"Fase {st.position} ({robot_name}) [{st.status}] tentativa {st.attempt}"
+            f"Fase {st.position} ({robot_name}/{role}) [{st.status}] tentativa {st.attempt}"
             f"{' veredicto ' + st.verdict if st.verdict else ''}"
             f"{' erro: ' + st.error if st.error else ''}"
         )
+    lines.append(
+        "No retry, use a POSIÇÃO NUMÉRICA da fase (ex.: `retry 0`) — é o identificador "
+        "seguro. Nome do robô ou role também são aceitos, desde que exatamente como acima."
+    )
     return "\n".join(lines)
 
 
@@ -2470,7 +2617,7 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
         task = s.get(Task, task_id)
         if task is None:
             return
-        eff = _effective(settings, task.repository)
+        eff = _effective(settings, task.repository, s)
         checkout = _task_workspace(eff, task.repository.id, task.id)
         pm_robot = (
             s.query(Robot)
@@ -2569,26 +2716,60 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
         if task is None:
             return
         anchor = _active_steps(task)[-1]
-        _system_event(s, anchor, "pm_decision", {"trigger": trigger, **decision})
 
+        # Cadeia de reabertura do retry: da PRIMEIRA fase ativa não-concluída até
+        # o alvo. Reabrir SÓ o alvo quando uma fase anterior está
+        # failed/guardrail_blocked deixava a task travada — o claim exige todas
+        # as fases anteriores `done` e a fase reaberta nunca era reclamada
+        # (task-194: PM retry no developer com o qa failed = deadlock).
+        retry_chain: list[TaskStep] = []
         if decision["action"] == verdicts.PM_RETRY:
             target = None
             if decision.get("position") is not None:
                 target = next((st for st in _active_steps(task) if st.position == decision["position"]), None)
+            # O PM pode indicar o nome do robô ou o role (ex.: `retry po`/`retry implement`)
+            # em vez da posição. Resolve para a fase correspondente — antes o nome era
+            # descartado e o fallback reabria a PRIMEIRA fase falha (qa) mesmo quando o
+            # PM pedia o po (task-194: a história só é corrigida no po).
+            if target is None and decision.get("target"):
+                hint = str(decision["target"]).strip().lower()
+                token_match = re.match(r"[a-z_]+", hint)
+                token = token_match.group(0) if token_match else hint
+                target = next(
+                    (
+                        st for st in _active_steps(task)
+                        if st.robot and token in (
+                            st.robot.name.lower(), st.robot.role.lower(),
+                        )
+                    ),
+                    None,
+                )
             if target is None:
                 target = next(
                     (st for st in _active_steps(task) if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)),
                     None,
                 )
-            if target is not None and target.attempt < eff.max_attempts:
-                target.status = STEP_PENDING
-                target.attempt += 1
-                target.error = None
-                target.summary = None
-                target.finished_at = None
+            if target is not None:
+                retry_chain = [
+                    st for st in _active_steps(task)
+                    if st.position <= target.position and st.status != STEP_DONE
+                ]
+                decision["chain"] = [st.position for st in retry_chain]
+
+        _system_event(s, anchor, "pm_decision", {"trigger": trigger, **decision})
+
+        if decision["action"] == verdicts.PM_RETRY:
+            if retry_chain and all(st.attempt < eff.max_attempts for st in retry_chain):
+                for st in retry_chain:
+                    st.status = STEP_PENDING
+                    st.attempt += 1
+                    st.error = None
+                    st.summary = None
+                    st.finished_at = None
+                    st.started_at = None
                 task.status = TASK_IN_PROGRESS
                 task.error = None
-                task.current_step = target.position
+                task.current_step = min(st.position for st in retry_chain)
             else:
                 task.status = TASK_NEEDS_REVIEW
                 task.error = f"PM: retry inválido/limitado ({decision['reason']})"
@@ -2647,7 +2828,7 @@ def _maybe_auto_summary(settings: Settings, session_factory, step_id: int) -> No
             if not task.repository.auto_summary:
                 return
             task_id = task.id
-            eff = _effective(settings, task.repository)
+            eff = _effective(settings, task.repository, s)
     except Exception:
         log.exception("auto-resumo: falha ao avaliar o step %s", step_id)
         return
@@ -2719,7 +2900,7 @@ def _maybe_step_summary(settings: Settings, session_factory, step_id: int) -> No
             )
             if existing is not None:
                 return
-            eff = _effective(settings, step.task.repository)
+            eff = _effective(settings, step.task.repository, s)
     except Exception:
         log.exception("resumo de fase: falha ao avaliar o step %s", step_id)
         return
@@ -2776,7 +2957,7 @@ def _maybe_step_mission(settings: Settings, session_factory, step_id: int, run: 
             )
             if existing is not None:
                 return
-            eff = _effective(settings, step.task.repository)
+            eff = _effective(settings, step.task.repository, s)
     except Exception:
         log.exception("missão: falha ao avaliar o step %s", step_id)
         return
@@ -2817,7 +2998,7 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
         task = s.get(Task, task_id)
         if task is None:
             return
-        eff = _effective(settings, task.repository)
+        eff = _effective(settings, task.repository, s)
         if task.pm_decisions >= eff.max_pm_decisions:
             anchor = _active_steps(task)[-1] if _active_steps(task) else None
             _system_event(
@@ -2835,7 +3016,13 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
 
     As propostas ficam `pending` aguardando APROVAÇÃO HUMANA — o worker NUNCA cria
     a task automaticamente (allow_auto_tasks é obsoleto e ignorado). Dedup por
-    `task_id + title`: re-execuções da fase não duplicam a proposta."""
+    `task_id + title`: re-execuções da fase não duplicam a proposta.
+
+    SÓ a fase do PROPOSITOR (role "propose") gera propostas: é ele quem consolida
+    as análises das fases anteriores. As demais fases (iniciador/analista/
+    auditor-ux) não recebem a ferramenta no prompt, e mesmo que um arquivo fique
+    no checkout (ex.: execução antiga), ele é ignorado aqui — papel exclusivo.
+    """
     tasks_file = os.path.join(checkout, "autoia_tasks.json")
     if not os.path.isfile(tasks_file):
         return
@@ -2854,6 +3041,14 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
         if step is None:
             return
         task = step.task
+        if (step.robot.role if step.robot else "") != "propose":
+            log.info(
+                "autoia_tasks.json ignorado na fase %s (role %s) — propostas são papel "
+                "exclusivo do propositor",
+                step.position,
+                step.robot.role if step.robot else "?",
+            )
+            return
         # Exclusividade: task com subtarefas não pode gerar propostas (autoia_tasks.json).
         # As subtarefas já dividem o trabalho na MESMA branch; propostas criariam tasks
         # com branches paralelas no mesmo repo → sobreposição de arquivos e conflito de merge.

@@ -139,7 +139,7 @@ def summarize_task(settings, session_factory, task_id: int) -> bool:
             if task is None:
                 return False
             repo = task.repository
-            eff = _effective(settings, repo)
+            eff = _effective(settings, repo, s)
             checkout = _task_workspace(eff, repo.id, task.id)
 
             # Garante o checkout para o executor rodar (clone se necessário).

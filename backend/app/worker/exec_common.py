@@ -296,6 +296,7 @@ def build_spawn_command(
                 extra_env=extra_env,
                 mount_system_ro=sandbox.mount_system_ro,
                 environment=sandbox.environment,
+                opencode_account_dir=sandbox.opencode_account_dir,
             )
         else:
             final = build_sandbox_command(

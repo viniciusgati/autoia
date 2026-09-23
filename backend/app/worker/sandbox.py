@@ -107,6 +107,10 @@ class SandboxConfig:
     # Configuração de ulimit aplicada quando NÃO sandboxado (0 = sem limite).
     ulimit_as_mb: int = 0
     ulimit_nofile: int = 0
+    # Diretório da conta opencode-go (XDG_DATA_HOME do opencode): montado rw para
+    # o executor ler/escrever em auth + sessões isoladas por conta. None = sem
+    # conta pinada/default (o opencode usa a conta do host).
+    opencode_account_dir: str | None = None
 
     @property
     def enabled(self) -> bool:
@@ -363,6 +367,7 @@ def _mount_specs(
     cli_bins: list[str],
     home: str,
     mount_system_ro: bool = True,
+    extra_rw: list[str] | None = None,
 ) -> tuple[list[str], bool]:
     """Lista de specs de bind mount (`origem:destino[:modo]`) e flag `source_under_tmp`
     (True se alguma origem rw fica sob /tmp — nesse caso /tmp vira bind, não tmpfs)."""
@@ -382,6 +387,10 @@ def _mount_specs(
     # mesma árvore — o mesmo path absoluto dentro e fora do contêiner).
     add(checkout, "rw")
     add(workspace_dir, "rw")
+
+    # Conta opencode-go efetiva: rw (o opencode escreve auth/sessões por conta).
+    for src in extra_rw or []:
+        add(src, "rw")
 
     # Estado/config das CLIs no home do host.
     for sub, mode in _HOME_CLI_DIRS:
@@ -445,6 +454,7 @@ def scan_secret_mounts(
         [cli_bin or ""],
         home,
         mount_system_ro=config.mount_system_ro,
+        extra_rw=([config.opencode_account_dir] if config.opencode_account_dir else None),
     )
     return _secret_violations(mounts, home)
 
@@ -542,6 +552,7 @@ def build_sandbox_command(
         [cli_bin or ""],
         home,
         mount_system_ro=config.mount_system_ro,
+        extra_rw=([config.opencode_account_dir] if config.opencode_account_dir else None),
     )
 
     uid, gid = os.getuid(), os.getgid()
@@ -684,6 +695,7 @@ def build_bwrap_command(
     extra_env: dict | None = None,
     mount_system_ro: bool = True,
     environment: dict[str, str] | None = None,
+    opencode_account_dir: str | None = None,
 ) -> list[str]:
     """Variante bubblewrap (fallback leve): isolamento de FS com a mesma árvore de
     mounts, sem rede externa (`--unshare-net`). Não suporta allowlist de egress —
@@ -696,6 +708,7 @@ def build_bwrap_command(
         [cli_bin or ""],
         home,
         mount_system_ro=mount_system_ro,
+        extra_rw=([opencode_account_dir] if opencode_account_dir else None),
     )
     bwrap = [
         "bwrap",

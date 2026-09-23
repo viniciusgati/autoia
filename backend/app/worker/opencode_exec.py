@@ -16,6 +16,7 @@ timeout total e timeout de "sem progresso".
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -35,6 +36,8 @@ from .exec_common import (
     unregister_proc,
 )
 from .sandbox import SandboxConfig
+
+log = logging.getLogger(__name__)
 
 # Tipos de evento emitidos para o callback (mesmos do kimi_exec).
 EVENT_TOOL_CALL = "tool_call"
@@ -111,7 +114,95 @@ def run_opencode(
     `resume_session_id` (opcional): id da sessão anterior da MESMA fase (timeout/
     stall → re-execução) — o comando ganha `--session <id>` para continuar a mesma
     conversa (contexto/cache preservados), espelhando o `-S <id>` do kimi.
+
+    Resiliência: se a retomada falhar porque a sessão não existe mais no
+    armazenamento da conta atual (`Session not found` — ex.: a conta opencode-go
+    mudou entre a execução original e a retomada, isolando `XDG_DATA_HOME`), o run
+    cai para uma execução NOVA sem `--session` em vez de falhar a fase. A retomada
+    é otimização (contexto); o handoff/prompt da fase já traz a atividade anterior.
     """
+    outcome = _run_opencode_once(
+        prompt, cwd=cwd, opencode_bin=opencode_bin, log_path=log_path,
+        timeout=timeout, max_identical_calls=max_identical_calls,
+        risky_patterns=risky_patterns, checkout_path=checkout_path,
+        whitelisted_hosts=whitelisted_hosts, model=model,
+        no_progress_timeout=no_progress_timeout,
+        max_repeated_searches=max_repeated_searches,
+        resume_session_id=resume_session_id, repo_id=repo_id,
+        stop_file=stop_file, task_stop_file=task_stop_file, sandbox=sandbox,
+        workspace_dir=workspace_dir, extra_env=extra_env, on_event=on_event,
+    )
+    if (
+        resume_session_id
+        and outcome.exit_code not in (0, None)
+        and _log_has_session_not_found(log_path)
+    ):
+        log.warning(
+            "opencode: retomada da sessão %s falhou (Session not found) — "
+            "nova execução sem --session (sessão não existe no estado da conta)",
+            resume_session_id,
+        )
+        try:
+            on_event(
+                EVENT_SYSTEM,
+                {
+                    "opencode_resume_fallback": (
+                        f"sessão {resume_session_id} não encontrada no estado da conta "
+                        "— executando sem retomada"
+                    )
+                },
+                0.0,
+            )
+        except Exception:  # noqa: BLE001 — callback nunca deve quebrar o fallback
+            log.exception("opencode: falha ao registrar fallback de retomada")
+        outcome = _run_opencode_once(
+            prompt, cwd=cwd, opencode_bin=opencode_bin, log_path=log_path,
+            timeout=timeout, max_identical_calls=max_identical_calls,
+            risky_patterns=risky_patterns, checkout_path=checkout_path,
+            whitelisted_hosts=whitelisted_hosts, model=model,
+            no_progress_timeout=no_progress_timeout,
+            max_repeated_searches=max_repeated_searches,
+            resume_session_id=None, repo_id=repo_id,
+            stop_file=stop_file, task_stop_file=task_stop_file, sandbox=sandbox,
+            workspace_dir=workspace_dir, extra_env=extra_env, on_event=on_event,
+        )
+    return outcome
+
+
+def _log_has_session_not_found(log_path: str) -> bool:
+    """True se o log da execução contém o erro de retomada do opencode
+    (`Error: Session not found` no stderr)."""
+    try:
+        with open(log_path, "r", encoding="utf-8") as fh:
+            return "Session not found" in fh.read()
+    except OSError:
+        return False
+
+
+def _run_opencode_once(
+    prompt: str,
+    *,
+    cwd: str,
+    opencode_bin: str,
+    log_path: str,
+    timeout: int,
+    max_identical_calls: int,
+    risky_patterns: list[str],
+    checkout_path: str,
+    whitelisted_hosts: list[str] = (),
+    model: str | None = None,
+    no_progress_timeout: int = 0,
+    max_repeated_searches: int = 0,
+    resume_session_id: str | None = None,
+    repo_id: int | None = None,
+    stop_file: str | None = None,
+    task_stop_file: str | None = None,
+    sandbox: SandboxConfig | None = None,
+    workspace_dir: str | None = None,
+    extra_env: dict[str, str] | None = None,
+    on_event,
+) -> ExecOutcome:
+    """Uma execução do opencode (sem fallback de retomada)."""
     # cwd ABSOLUTO: o workspace do worker pode ser relativo (`data/workspaces/...`),
     # mas o `--dir` vai dentro do container (workdir absoluto) — um caminho
     # relativo não resolve lá ("Failed to change directory", task 127).

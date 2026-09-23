@@ -4,7 +4,7 @@ import { api } from "../api";
 import { useAuth } from "../auth";
 import HelpTip from "../components/HelpTip";
 import ProjectSkills from "../components/ProjectSkills";
-import type { Pipeline, Repository, RepositoryMember } from "../types";
+import type { OpenCodeAccount, Pipeline, Repository, RepositoryMember } from "../types";
 
 /** Campos editáveis (usados no badge "alterações não salvas"). */
 const SETTINGS_FIELDS = [
@@ -25,6 +25,7 @@ const SETTINGS_FIELDS = [
   "sandbox_image",
   "task_targets",
   "external_context",
+  "opencode_account",
 ] as const;
 
 function apiErrorMsg(e: unknown): string {
@@ -45,6 +46,7 @@ export default function RepoConfig() {
   const [members, setMembers] = useState<RepositoryMember[]>([]);
   const [pipelines, setPipelines] = useState<Pipeline[]>([]);
   const [allRepos, setAllRepos] = useState<Repository[]>([]);
+  const [openCodeAccounts, setOpenCodeAccounts] = useState<OpenCodeAccount[]>([]);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
@@ -60,6 +62,7 @@ export default function RepoConfig() {
     }).catch((e) => setError(String(e)));
     api.listPipelines(repoId).then(setPipelines).catch(() => {});
     api.listMembers(repoId).then(setMembers).catch(() => {});
+    api.listOpenCodeAccounts().then(setOpenCodeAccounts).catch(() => {});
   }, [repoId]);
 
   const updateRepo = (next: Repository) => {
@@ -91,6 +94,7 @@ export default function RepoConfig() {
         sandbox_image: repo.sandbox_image,
         task_targets: repo.task_targets,
         external_context: repo.external_context,
+        opencode_account: repo.opencode_account ?? null,
       });
       setRepo(updated);
       setBaseRepo(updated);
@@ -346,6 +350,41 @@ export default function RepoConfig() {
                   disabled={!canManage}
                   onChange={(e) => updateRepo({ ...repo, external_context: e.target.value || null })}
                 />
+              </div>
+            </div>
+          </details>
+
+          {/* ── Conta opencode-go ── */}
+          <details className="config-section">
+            <summary>Conta opencode-go</summary>
+            <div className="form-stack">
+              <div className="form-field">
+                <label className="form-label">
+                  Conta do executor opencode <HelpTip>
+                  Conta opencode-go (credencial de API) fixada para este projeto.
+                  Vazio usa a conta global marcada como default ou, sem default, a conta
+                  do host do agente. O cadastro das contas é feito em Configuração geral
+                  do sistema (menu global).
+                </HelpTip></label>
+                <select
+                  value={repo.opencode_account ?? ""}
+                  disabled={!canManage}
+                  onChange={(e) => updateRepo({ ...repo, opencode_account: e.target.value || null })}
+                >
+                  <option value="">
+                    {openCodeAccounts.length === 0
+                      ? "— default do host (sem conta cadastrada) —"
+                      : openCodeAccounts.some((a) => a.is_default)
+                        ? "— default global —"
+                        : "— conta do host —"}
+                  </option>
+                  {openCodeAccounts.map((a) => (
+                    <option key={a.id} value={a.name}>
+                      {a.name}
+                      {a.is_default ? " (default)" : ""}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           </details>

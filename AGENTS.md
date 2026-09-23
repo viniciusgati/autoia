@@ -13,6 +13,30 @@ Nada é "mock": os robôs executam o **kimi-code CLI** real
 (`kimi -p <prompt> --output-format stream-json`) em um checkout do repo. O sistema não
 chama APIs de LLM diretamente.
 
+## Princípio: autonomia com solução definitiva (não corrigir "na unha")
+
+O sistema precisa ser **autônomo**: a tarefa anda sozinha do início ao fim. Toda vez
+que uma tarefa travar ou falhar, a correção preferida é **definitiva e via
+prompt/modelo** — dar ao robô o contexto e a avaliação de que ele precisa para se
+recuperar na re-execução:
+
+- **Guardrail/timeout** → a avaliação do que aconteceu entra no prompt da re-execução
+  (`guardrails.interruption_guidance`) para o robô **não repetir** o comportamento que
+  matou a execução (ex.: loop de busca no mesmo alvo). O guardrail é rede de proteção,
+  não o conserto: o conserto é o modelo entender e mudar de estratégia.
+- **Reprovação de verificação** → o relatório completo (`autoia_verdict.txt` + resumo
+  da fase) entra no handoff da fase que vai corrigir.
+- **Bloqueio/decisão** → o robô PARA e pergunta (`autoia_blocked.json` /
+  `autoia_decision.json`); a resposta do humano volta como instrução.
+- **Falha de fluxo/estado** (deadlock de claim, reabertura incoerente, fase que nunca
+  é reclamada) → corrija a **causa** no fluxo (ex.: reabrir a cadeia de fases
+  não-concluídas), não a instância da tarefa.
+
+Evite "consertar na unha" (patch pontual de estado/banco só para a tarefa andar): isso
+esconde a causa e o sistema trava de novo na próxima tarefa. Correção manual de uma
+task específica é **último recurso**, documentada — a solução definitiva deve entrar no
+código/prompt (com teste) para valer para todas as tarefas.
+
 ## Stack
 
 | Camada | Tecnologia |
@@ -103,9 +127,11 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   + deploy-tester pós-merge), `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
   para projetos sem deploy), `po-qa-dev-tester-avaliador-deploytest-browser` (com
   browser-tester pós-merge), `iniciador-analista-ux-propositor` (brainstorm/análise:
-  inicia o projeto, define tarefas/lacunas, audita usabilidade e o propositor escreve
-  `autoia_tasks.json` → propostas PENDENTES de decisão humana, sem merge automático de
-  tasks filhas), `advpl-po-qa-dev-tester-avaliador-merge` (fluxo ADVPL/Protheus:
+  inicia o projeto, define tarefas/lacunas, audita usabilidade e SOMENTE o propositor
+  (role `propose`, fase final) escreve `autoia_tasks.json` → propostas PENDENTES de
+  decisão humana, sem merge automático de tasks filhas — iniciador/analista/auditor-ux
+  não recebem a ferramenta de propostas e `_spawn_tasks` ignora o arquivo fora da fase
+  do propositor), `advpl-po-qa-dev-tester-avaliador-merge` (fluxo ADVPL/Protheus:
   usa o `developer-advpl` em vez do developer) e as **deep-v2-*** (por superfície da
   tarefa: `deep-v2-backend`, `deep-v2-frontend`, `deep-v2-fullstack` + variantes
   `-lean`). Robôs novos do seed: **`qa-lean`** (role `review`, revisão de história
@@ -165,6 +191,18 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   timeout, erro) → a **fase anterior** volta a `pending` com o relatório
   completo no contexto, até `max_attempts`. Falha **pós-merge** → **nunca** bounce
   (código já integrado): task `needs_review` + evento `post_merge_failed` + PM decide.
+  Exceção: falha de **execução** numa subtarefa (`implement` com subtarefas —
+  guardrail/timeout/commit) **re-tenta a PRÓPRIA fase**, não a anterior: a falha é do
+  robô se perdendo (ex.: loop de busca), não da história; o prompt da subtarefa leva a
+  avaliação (`guardrails.interruption_guidance`) e a subtarefa fica `pending` com o
+  motivo. Reabrir o qa/po revisaria a história sem relação com o problema, queimaria
+  as tentativas deles e travaria a pipeline (task-194). Esgotada a fase → `needs_review`.
+- **Reabertura coerente de fase** (`_rewind_pipeline` da instrução e PM `retry`): reabrir
+  uma fase com uma **anterior não-concluída** (`failed`/`guardrail_blocked`) reabre a
+  **cadeia** da primeira não-concluída até o alvo — reabrir só o alvo deixava a task
+  travada para sempre, pois `claim_next` exige todas as fases anteriores `done`
+  (task-194). `_sweep_stuck_tasks` também move para `needs_review` a task cuja primeira
+  fase não-concluída está `failed`/`guardrail_blocked` mesmo com pendings posteriores.
 - **Subtarefas**: fases `implement`/`verify` iteram sobre subtarefas (cada uma com seu
   bounce-back). **Subtarefa NÃO tem limite próprio de tentativas** — o contador é
   cumulativo entre implement e verify e, com limite, travava a task para sempre (nem a

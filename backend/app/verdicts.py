@@ -372,9 +372,14 @@ def parse_pm_decision(raw: str | None) -> dict:
 
     if re.match(r"^retry\b", decision_line, re.IGNORECASE):
         pos_match = re.search(r"\d+", decision_line)
+        # Texto após `retry` (ex.: `po`, `tester`, `implement`) — o runner resolve
+        # para a fase pelo nome do robô ou role. Antes era descartado e o fallback
+        # reabria a PRIMEIRA fase falha mesmo quando o PM pedia outra (task-194).
+        target_text = re.sub(r"^retry\b", "", decision_line, flags=re.IGNORECASE).strip(" :.-")
         return {
             "action": PM_RETRY,
             "position": int(pos_match.group(0)) if pos_match else None,
+            "target": target_text or None,
             "reason": reason or "retry indicado",
         }
     if re.match(r"^continuar\b", decision_line, re.IGNORECASE):

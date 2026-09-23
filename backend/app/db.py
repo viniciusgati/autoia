@@ -59,6 +59,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("sandbox_image", "VARCHAR(200)"),
         ("task_targets", "JSON"),
         ("external_context", "TEXT"),
+        # Conta opencode-go fixada para este repositório (nome no roster global).
+        ("opencode_account", "VARCHAR(100)"),
     ],
     "robots": [
         ("role", "VARCHAR(30) DEFAULT 'implement' NOT NULL"),

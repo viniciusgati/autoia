@@ -142,6 +142,18 @@ export function formatDuration(ms: number): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+/** "Há quanto tempo" desde um timestamp ISO/UTC: "agora" · "10s atrás" · "2m 5s atrás". */
+export function tempoAtras(iso: string): string {
+  const ms = Date.now() - new Date(iso).getTime();
+  if (ms < 0) return "agora";
+  const s = Math.floor(ms / 1000);
+  if (s < 5) return "agora";
+  if (s < 60) return `${s}s atrás`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}m ${s % 60}s atrás`;
+  return `${Math.floor(m / 60)}h ${m % 60}m atrás`;
+}
+
 /** True se o timestamp (ISO/UTC) cai no dia de HOJE no fuso local do navegador. */
 export function isToday(iso: string): boolean {
   const d = new Date(iso);

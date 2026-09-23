@@ -70,7 +70,11 @@ def _kimi_spawn(tmp_path, tasks: list[dict]) -> str:
 
 
 def _simple_pipeline(flow) -> int:
-    """Pipeline po → qa (2 fases) e retorna o id."""
+    """Pipeline com 2 fases do propositor (role propose) e retorna o id.
+
+    Propostas (autoia_tasks.json) são papel EXCLUSIVO do propositor — nenhum outro
+    robô recebe a ferramenta de spawn no prompt nem tem o arquivo consumido.
+    """
     client = flow["client"]
     robots = client.get(f"/api/robots?repository_id={flow['repo_id']}").json()
     by_name = {r["name"]: r["id"] for r in robots}
@@ -80,8 +84,8 @@ def _simple_pipeline(flow) -> int:
             "name": "spawn-pipeline",
             "repository_id": flow["repo_id"],
             "steps": [
-                {"position": 0, "robot_id": by_name["po"]},
-                {"position": 1, "robot_id": by_name["qa"]},
+                {"position": 0, "robot_id": by_name["propositor"]},
+                {"position": 1, "robot_id": by_name["propositor"]},
             ],
         },
     )
@@ -104,7 +108,7 @@ def _proposals(flow, task_id: int) -> list[dict]:
 
 
 def test_robo_cria_proposta_de_task_filha(spawn_flow, tmp_path):
-    """po escreve autoia_tasks.json → o worker grava uma proposta `pending`, sem
+    """propositor escreve autoia_tasks.json → o worker grava uma proposta `pending`, sem
     criar a task filha automaticamente."""
     settings = spawn_flow["settings"]
     settings.kimi_bin = _kimi_spawn(
@@ -209,7 +213,7 @@ def test_propostas_independentes_de_allow_auto_tasks(settings, bare_repo, tmp_pa
         json={
             "name": "p",
             "repository_id": repo_id,
-            "steps": [{"position": 0, "robot_id": by_name["po"]}],
+            "steps": [{"position": 0, "robot_id": by_name["propositor"]}],
         },
     )
     resp = client.post(
@@ -244,8 +248,7 @@ def test_spawn_bloqueado_em_task_com_subtarefas(spawn_flow, tmp_path):
             "name": "subtask-pipeline",
             "repository_id": spawn_flow["repo_id"],
             "steps": [
-                {"position": 0, "robot_id": by_name["developer"]},
-                {"position": 1, "robot_id": by_name["tester"]},
+                {"position": 0, "robot_id": by_name["propositor"]},
             ],
         },
     )
@@ -268,8 +271,7 @@ def test_spawn_bloqueado_em_task_com_subtarefas(spawn_flow, tmp_path):
     parent_id = resp.json()["id"]
     client.post(f"/api/tasks/{parent_id}/start")
 
-    _claim_and_execute(spawn_flow)  # implement (ciclo de subtarefa; escreve autoia_tasks.json)
-    _claim_and_execute(spawn_flow)  # verify (ciclo de subtarefa) → spawn
+    _claim_and_execute(spawn_flow)  # propositor (escreve autoia_tasks.json)
 
     assert len(_all_tasks(spawn_flow)) == 1  # só o pai; nada criado automaticamente
     proposals = _proposals(spawn_flow, parent_id)

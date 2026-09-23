@@ -183,6 +183,7 @@ def _build_notices(
         .all()
     )
     for step in blocked_steps:
+        robot = step.robot.name if step.robot else "?"
         notices.append(
             NoticeOut(
                 task_id=step.task.id,
@@ -191,7 +192,7 @@ def _build_notices(
                 repository_id=step.task.repository_id,
                 level="critical",
                 kind="guardrail",
-                message=step.error or "guardrail bloqueou a execução",
+                message=f"Fase {step.position} · {robot}: {step.error or 'guardrail bloqueou a execução'}",
                 ts=step.finished_at or step.started_at or step.task.updated_at,
             )
         )

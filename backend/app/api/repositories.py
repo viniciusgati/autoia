@@ -23,6 +23,7 @@ from ..models import (
     TASK_PAUSED,
     TASK_QUEUED,
     TASK_WAITING_APPROVAL,
+    OpenCodeAccount,
     Pipeline,
     PipelineStep,
     Repository,
@@ -137,6 +138,18 @@ def create_repository(
     targets = _validate_task_targets(
         session, Repository(name=data.name), list(data.task_targets or [])
     )
+    if data.opencode_account:
+        # O pin precisa existir no roster global (ou ser vazio/null = default/host).
+        pin = data.opencode_account
+        exists = (
+            session.query(OpenCodeAccount)
+            .filter(OpenCodeAccount.name == pin)
+            .one_or_none()
+        )
+        if exists is None:
+            raise HTTPException(
+                400, f"conta opencode-go {pin!r} não existe no roster global"
+            )
 
     repo = Repository(
         name=data.name,
@@ -160,6 +173,7 @@ def create_repository(
         sandbox_image=data.sandbox_image,
         task_targets=targets,
         external_context=data.external_context,
+        opencode_account=data.opencode_account,
     )
     session.add(repo)
     session.commit()
@@ -240,6 +254,18 @@ def update_repository(
     payload = data.model_dump(exclude_unset=True)
     if "task_targets" in payload:
         payload["task_targets"] = _validate_task_targets(session, repo, payload["task_targets"] or [])
+    if "opencode_account" in payload and payload["opencode_account"]:
+        # O pin precisa existir no roster global (ou ser vazio/null = default/host).
+        pin = payload["opencode_account"]
+        exists = (
+            session.query(OpenCodeAccount)
+            .filter(OpenCodeAccount.name == pin)
+            .one_or_none()
+        )
+        if exists is None:
+            raise HTTPException(
+                400, f"conta opencode-go {pin!r} não existe no roster global"
+            )
     for field, value in payload.items():
         setattr(repo, field, value)
     session.commit()

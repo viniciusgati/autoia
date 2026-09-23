@@ -315,6 +315,85 @@ def _search_fingerprint(tool: str, arguments) -> str | None:
     return None
 
 
+# Orientação ao robô quando uma execução é interrompida — vira prompt da
+# re-execução (o robô precisa saber o que fez de errado para NÃO repetir).
+# Determinística (sem LLM): o motivo real vem do guardrail que matou a execução.
+_GUIDANCE_BY_PATTERN: dict[str, str] = {
+    "repeated-search": (
+        "Você repetiu a MESMA busca várias vezes pelo mesmo alvo e o sistema "
+        "interrompeu a execução para não gastar recursos em loop. O alvo "
+        "provavelmente não existe ou está em outro caminho/formato. NÃO repita "
+        "a mesma busca: confirme o caminho com `ls`/glob, use um termo mais "
+        "amplo, procure por outro arquivo — ou siga sem esse artefato. Se o "
+        "dado realmente não existe, registre a pendência no texto final em vez "
+        "de insistir."
+    ),
+    "identical-calls": (
+        "Você repetiu a MESMA chamada de ferramenta várias vezes seguidas e o "
+        "sistema interrompeu a execução para não gastar recursos em loop. Pare "
+        "de repetir a chamada idêntica: mude a estratégia (outro comando, "
+        "arquivo ou abordagem) ou siga adiante."
+    ),
+    "path-outside-workspace": (
+        "Você tentou acessar um caminho FORA do checkout e o sistema "
+        "interrompeu a execução. Trabalhe SOMENTE dentro do diretório do "
+        "repositório; para artefatos temporários (screenshots, logs) use um "
+        "diretório dentro do próprio checkout (ex.: `autoia_screenshots/`)."
+    ),
+}
+
+_VIOLATION_RE = re.compile(r"^guardrail:\s*([\w-]+)\s*:\s*(.*)$", re.DOTALL)
+
+# Marcadores textuais de timeout no motivo do abort (kimi/opencode/codex).
+_TIMEOUT_MARKERS = ("timeout", "tempo limite", "sem progresso", "stall")
+
+
+def parse_violation(reason: str | None) -> tuple[str, str] | None:
+    """Extrai `(pattern, detail)` de um motivo no formato `guardrail: <p>: <d>`."""
+    match = _VIOLATION_RE.match((reason or "").strip())
+    if not match:
+        return None
+    return match.group(1), match.group(2).strip()
+
+
+def interruption_guidance(reason: str | None) -> str:
+    """Seção de prompt (PT-BR) explicando por que a execução anterior foi
+    interrompida e o que fazer diferente.
+
+    Retorna "" quando o motivo não tem orientação específica (ex.: erro de
+    commit/exit code) — nesses casos o motivo cru já entra no prompt/handoff.
+    """
+    text = (reason or "").strip()
+    if not text:
+        return ""
+    parsed = parse_violation(text)
+    if parsed:
+        pattern, detail = parsed
+        guidance = _GUIDANCE_BY_PATTERN.get(
+            pattern,
+            "A execução anterior foi interrompida pelo guardrail. Reveja o que "
+            "estava fazendo e mude a abordagem — não repita o comportamento.",
+        )
+        header = (
+            "## Execução anterior desta etapa foi interrompida pelo guardrail\n\n"
+            f"- Motivo: `{pattern}` — {detail or '(sem detalhe)'}\n"
+        )
+        return f"{header}\n### O que fazer diferente\n{guidance}"
+    lowered = text.lower()
+    if any(marker in lowered for marker in _TIMEOUT_MARKERS):
+        return (
+            "## Execução anterior desta etapa foi interrompida (tempo)\n\n"
+            f"- Motivo: {text[:300]}\n\n"
+            "### O que fazer diferente\n"
+            "A execução estourou o limite de tempo ou ficou sem progresso. NÃO "
+            "repita a mesma sequência longa: simplifique o caminho (rode apenas "
+            "a suíte rápida/headless, evite subir emulador/navegador/servidor "
+            "externo), faça commits menores e registre no texto final o que foi "
+            "pulado e por quê."
+        )
+    return ""
+
+
 class SemanticLoopTracker:
     """Detecta repetição de INTENÇÃO de busca dentro de UMA execução do executor.
 

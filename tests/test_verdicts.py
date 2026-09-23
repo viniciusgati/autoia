@@ -43,12 +43,15 @@ def test_parse_pm_decision():
     assert verdicts.parse_pm_decision("DECISÃO: retry 3\nMOTIVO: corrigível") == {
         "action": "retry",
         "position": 3,
+        "target": "3",
         "reason": "corrigível",
     }
-    # tolerante: nome do robô no lugar da posição → retry sem posição (fallback do runner)
+    # tolerante: nome do robô no lugar da posição → target textual (o runner
+    # resolve para a fase pelo nome do robô ou role)
     assert verdicts.parse_pm_decision("DECISÃO: retry tester\nMOTIVO: timeout corrigível") == {
         "action": "retry",
         "position": None,
+        "target": "tester",
         "reason": "timeout corrigível",
     }
     # número solto na linha (ex.: "retry fase 3") vale como posição

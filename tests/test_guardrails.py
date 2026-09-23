@@ -354,3 +354,34 @@ def test_budget():
     assert not budget.budget_exceeded(0.5, 1.0)
     settings = Settings()
     assert budget.interaction_cost(settings) == settings.cost_per_interaction
+
+
+def test_interruption_guidance_por_padrao():
+    """A avaliação do guardrail vira prompt da re-execução (o robô precisa saber
+    o que fez de errado para não repetir o comportamento que matou a execução)."""
+    from app.guardrails import interruption_guidance, parse_violation
+
+    assert parse_violation("guardrail: repeated-search: busca repetida 6x") == (
+        "repeated-search",
+        "busca repetida 6x",
+    )
+    assert parse_violation("guardrail: path-outside-workspace: Write /tmp/x") == (
+        "path-outside-workspace",
+        "Write /tmp/x",
+    )
+    assert parse_violation("commit: falhou") is None
+
+    guidance = interruption_guidance("guardrail: repeated-search: busca repetida 6x pelo mesmo alvo")
+    assert "repeated-search" in guidance
+    assert "NÃO repita" in guidance
+
+    # path fora do workspace tem orientação específica
+    assert "FORA do checkout" in interruption_guidance(
+        "guardrail: path-outside-workspace: Write /tmp/x"
+    )
+    # timeout tem orientação de simplificação
+    assert "tempo" in interruption_guidance("timeout após 1800s").lower()
+    # motivo sem orientação específica → vazio (o motivo cru já entra no prompt)
+    assert interruption_guidance("commit: erro de git") == ""
+    assert interruption_guidance(None) == ""
+

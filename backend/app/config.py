@@ -144,6 +144,11 @@ class Settings:
     log_dir: str = field(default_factory=lambda: _env("AUTOIA_LOG_DIR", "data/logs"))
     # Diretório com as skills dos projetos (`data/skills/<repo_id>/<skill_id>/`).
     skills_dir: str = field(default_factory=lambda: _env("AUTOIA_SKILLS_DIR", "data/skills"))
+    # Diretório com as contas opencode-go materializadas
+    # (`data/opencode-accounts/<name>/opencode/auth.json`).
+    opencode_accounts_dir: str = field(
+        default_factory=lambda: _env("AUTOIA_OPENCODE_ACCOUNTS_DIR", "data/opencode-accounts")
+    )
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
     codex_bin: str = field(default_factory=lambda: _env("AUTOIA_CODEX_BIN", "codex"))
@@ -369,6 +374,7 @@ class Settings:
             self.workspace_dir,
             self.log_dir,
             self.skills_dir,
+            self.opencode_accounts_dir,
             _sqlite_parent(self.database_url),
         ):
             os.makedirs(d, exist_ok=True)

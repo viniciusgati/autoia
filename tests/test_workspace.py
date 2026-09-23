@@ -404,6 +404,41 @@ def test_instruction_rewind_with_position(flow, fake_kimi):
     assert step1["status"] == "pending"
 
 
+def test_instruction_rewind_reabre_cadeia_com_anterior_failed(flow, fake_kimi):
+    """Rewind a partir de uma fase com anterior failed reabre a CADEIA (senão o
+    alvo nunca seria reclamado — o claim exige as anteriores `done`; task-194)."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))  # fase 0 ok
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        t.status = "needs_review"
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.status = "failed"
+        qa.error = "história ambígua"
+        dev = next(st for st in t.steps if st.position == 2)
+        dev.status = "failed"
+        dev.error = "guardrail: repeated-search"
+        s.commit()
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/instruction",
+        json={"instruction": "corrija a partir da implementação", "position": 2},
+    )
+    assert resp.status_code == 200, resp.text
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        qa = next(st for st in t.steps if st.position == 1)
+        dev = next(st for st in t.steps if st.position == 2)
+        assert t.status == "queued"
+        assert qa.status == "pending"   # cadeia anterior reaberta
+        assert dev.status == "pending"
+
+
 def test_instruction_rewind_forbidden_future(flow, fake_kimi):
     """Não é possível continuar de uma fase futura (além do que já foi executado)."""
     settings = flow["settings"]

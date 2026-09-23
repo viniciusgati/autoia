@@ -14,11 +14,20 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from ..config import Settings
-from ..models import User
+from ..models import OpenCodeAccount, Repository, User
+from ..opencode_accounts import (
+    InvalidAccountName,
+    materialize_auth,
+    remove_account_dir,
+    sanitize_name,
+)
 from ..schemas import (
     CleanRequest,
     CleanResult,
     CodexModelsOut,
+    OpenCodeAccountCreate,
+    OpenCodeAccountOut,
+    OpenCodeAccountUpdate,
     OpenCodeModelsOut,
     StorageReport,
 )
@@ -143,7 +152,7 @@ def opencode_models(settings: Settings = Depends(get_settings)):
     return OpenCodeModelsOut(models=list(cached["models"]), source=cached["source"])
 
 
-@router.get("/codex/models", response_model=CodexModelsOut)
+@router.get("/storage", response_model=StorageReport)
 def get_storage(
     session: Session = Depends(get_session),
     settings: Settings = Depends(get_settings),
@@ -174,3 +183,122 @@ def clean_orphan_data(
         return clean_storage(settings, session, data.targets)
     except InvalidTargetError as exc:
         raise HTTPException(400, f"alvo de limpeza desconhecido: {exc}") from exc
+
+
+# ---------- Contas opencode-go (roster global de credenciais) ----------
+
+@router.get("/opencode-accounts", response_model=list[OpenCodeAccountOut])
+def list_opencode_accounts(
+    session: Session = Depends(get_session),
+):
+    """Lista o roster de contas opencode-go (sem tokens; `has_token` indica se a
+    conta tem credencial válida). Acessível a qualquer autenticado: os admins de
+    projeto precisam do roster para fixar uma conta no repositório."""
+    return (
+        session.query(OpenCodeAccount)
+        .order_by(OpenCodeAccount.name)
+        .all()
+    )
+
+
+@router.post("/opencode-accounts", response_model=OpenCodeAccountOut, status_code=201)
+def create_opencode_account(
+    data: OpenCodeAccountCreate,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    _admin: User | None = Depends(require_admin),
+):
+    """Cria uma conta opencode-go e materializa a credencial em disco.
+
+    Nome vira a pasta da conta (`data/opencode-accounts/<nome>`); `is_default=True`
+    remove o default de todas as demais (default é exclusivo)."""
+    try:
+        sanitize_name(data.name)
+    except InvalidAccountName as exc:
+        raise HTTPException(400, str(exc)) from exc
+
+    exists = (
+        session.query(OpenCodeAccount)
+        .filter(OpenCodeAccount.name == data.name)
+        .one_or_none()
+    )
+    if exists is not None:
+        raise HTTPException(400, f"já existe uma conta opencode-go chamada {data.name!r}")
+    if data.is_default:
+        session.query(OpenCodeAccount).update(
+            {OpenCodeAccount.is_default: False}
+        )
+    account = OpenCodeAccount(
+        name=data.name,
+        token=data.token,
+        description=data.description or "",
+        is_default=data.is_default,
+    )
+    session.add(account)
+    session.commit()
+    try:
+        materialize_auth(settings, account.name, account.token)
+    except InvalidAccountName as exc:  # pragma: no cover — sanitize já validou
+        session.delete(account)
+        session.commit()
+        raise HTTPException(400, str(exc)) from exc
+    session.refresh(account)
+    return account
+
+
+@router.put("/opencode-accounts/{account_id}", response_model=OpenCodeAccountOut)
+def update_opencode_account(
+    account_id: int,
+    data: OpenCodeAccountUpdate,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    _admin: User | None = Depends(require_admin),
+):
+    """Edita uma conta. `token` ausente mantém o atual (informativo: o token de
+    atualização é requisito). `is_default=None` não mexe no flag; `is_default=True`
+    remove o default das demais."""
+    account = session.get(OpenCodeAccount, account_id)
+    if account is None:
+        raise HTTPException(404, "conta opencode-go não encontrada")
+
+    if data.is_default is not None and data.is_default:
+        session.query(OpenCodeAccount).update(
+            {OpenCodeAccount.is_default: False}
+        )
+        account.is_default = True
+    elif data.is_default is not None:
+        account.is_default = data.is_default
+    if data.description is not None:
+        account.description = data.description
+    if data.token:
+        account.token = data.token
+    session.commit()
+
+    if data.token:
+        try:
+            materialize_auth(settings, account.name, account.token)
+        except InvalidAccountName as exc:  # pragma: no cover — sanitize já validou
+            raise HTTPException(400, str(exc)) from exc
+    session.refresh(account)
+    return account
+
+
+@router.delete("/opencode-accounts/{account_id}", status_code=204)
+def delete_opencode_account(
+    account_id: int,
+    session: Session = Depends(get_session),
+    settings: Settings = Depends(get_settings),
+    _admin: User | None = Depends(require_admin),
+):
+    """Remove a conta do roster, desfixa dos repositórios que a usam e apaga o
+    diretório materializado em disco."""
+    account = session.get(OpenCodeAccount, account_id)
+    if account is None:
+        raise HTTPException(404, "conta opencode-go não encontrada")
+    name = account.name
+    session.delete(account)
+    session.query(Repository).filter(Repository.opencode_account == name).update(
+        {Repository.opencode_account: None}
+    )
+    session.commit()
+    remove_account_dir(settings, name)

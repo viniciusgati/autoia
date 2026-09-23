@@ -2,15 +2,37 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
+def _serialize_utc(value: datetime) -> str:
+    """Serializa datetime NAIVE (armazenado em UTC) com marcador de fuso UTC.
+
+    O banco guarda UTC sem tzinfo (`db.utcnow()` remove); sem o marcador o
+    navegador interpreta o valor como hora local e mostra a hora UTC crua.
+    Com `+00:00`, o `new Date(...)` do frontend converte para o fuso do usuário
+    (ex.: GMT-3)."""
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.isoformat()
+
+
+class ApiModel(BaseModel):
+    """Base comum da API.
+
+    Todos os datetimes saem com marcador de fuso UTC (`+00:00`) no JSON, para o
+    frontend converter para o fuso local do usuário corretamente (ex.: GMT-3).
+    """
+
+    model_config = ConfigDict(json_encoders={datetime: _serialize_utc})
+
+
 # ---------- Repository ----------
 
-class RepositoryCreate(BaseModel):
+class RepositoryCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     url: str = Field(min_length=1, max_length=500)
     default_branch: str = Field(default="main", max_length=100)
@@ -38,9 +60,11 @@ class RepositoryCreate(BaseModel):
     task_targets: list[str] = []
     # Informações úteis injetadas no contexto dos robôs (DNS de deploy, URLs, env).
     external_context: str | None = None
+    # Conta opencode-go fixada para este repositório (nome no roster global).
+    opencode_account: str | None = None
 
 
-class RepositoryUpdate(BaseModel):
+class RepositoryUpdate(ApiModel):
     """Edição de configurações de um repositório existente (todos opcionais)."""
     name: str | None = Field(default=None, min_length=1, max_length=200)
     url: str | None = Field(default=None, min_length=1, max_length=500)
@@ -62,9 +86,10 @@ class RepositoryUpdate(BaseModel):
     sandbox_image: str | None = None
     task_targets: list[str] | None = None
     external_context: str | None = None
+    opencode_account: str | None = None
 
 
-class RepositoryOut(BaseModel):
+class RepositoryOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -93,6 +118,7 @@ class RepositoryOut(BaseModel):
     # vazio = restritivo). Reexista a NULL de bancos criados antes da coluna.
     task_targets: list[str] = []
     external_context: str | None = None
+    opencode_account: str | None = None
 
     @field_validator("task_targets", mode="before")
     @classmethod
@@ -100,7 +126,7 @@ class RepositoryOut(BaseModel):
         return v or []
 
 
-class RepositoryDeleteInfo(BaseModel):
+class RepositoryDeleteInfo(ApiModel):
     """Informações exibidas no diálogo de confirmação de exclusão do projeto
     (`GET /api/repositories/{id}/delete-info`)."""
 
@@ -108,9 +134,40 @@ class RepositoryDeleteInfo(BaseModel):
     checkout_path: str | None
 
 
+# ---------- Contas opencode-go ----------
+
+class OpenCodeAccountCreate(ApiModel):
+    """Criação de uma conta opencode-go (roster global de credenciais)."""
+
+    name: str = Field(min_length=1, max_length=100)
+    token: str = Field(min_length=1)
+    description: str = ""
+    is_default: bool = False
+
+
+class OpenCodeAccountUpdate(ApiModel):
+    """Edição de uma conta; `token` ausente = mantém o atual. `is_default=True`
+    remove o default de todas as demais (default é exclusivo)."""
+
+    token: str | None = Field(default=None, min_length=1)
+    description: str | None = None
+    is_default: bool | None = None
+
+
+class OpenCodeAccountOut(ApiModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    name: str
+    description: str = ""
+    is_default: bool = False
+    # O token NUNCA é retornado; só se a conta tem credencial válida.
+    has_token: bool = True
+
+
 # ---------- Usuários / Auth ----------
 
-class UserOut(BaseModel):
+class UserOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -121,7 +178,7 @@ class UserOut(BaseModel):
     created_at: datetime
 
 
-class UserCreate(BaseModel):
+class UserCreate(ApiModel):
     """Criação de usuário por admin global (senha em texto puro, hasheada no backend)."""
 
     name: str = Field(min_length=1, max_length=100)
@@ -130,7 +187,7 @@ class UserCreate(BaseModel):
     role: str = Field(default="member", pattern="^(member|admin)$")
 
 
-class UserUpdate(BaseModel):
+class UserUpdate(ApiModel):
     """Edição de usuário por admin global (todos os campos opcionais)."""
 
     name: str | None = Field(default=None, min_length=1, max_length=100)
@@ -140,12 +197,12 @@ class UserUpdate(BaseModel):
     active: bool | None = None
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(ApiModel):
     email: str
     password: str
 
 
-class RegisterRequest(BaseModel):
+class RegisterRequest(ApiModel):
     """Bootstrap: só aceito com `users` vazio (primeiro registro vira admin global)."""
 
     name: str = Field(min_length=1, max_length=100)
@@ -153,7 +210,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=6, max_length=255)
 
 
-class SessionOut(BaseModel):
+class SessionOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     token: str
@@ -161,7 +218,7 @@ class SessionOut(BaseModel):
     expires_at: datetime
 
 
-class RepositoryUserOut(BaseModel):
+class RepositoryUserOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -172,18 +229,18 @@ class RepositoryUserOut(BaseModel):
     user: UserOut | None = None
 
 
-class RepositoryUserUpdate(BaseModel):
+class RepositoryUserUpdate(ApiModel):
     role: Literal["member", "admin"]
 
 
-class RepositoryMemberCreate(BaseModel):
+class RepositoryMemberCreate(ApiModel):
     user_id: int
     role: Literal["member", "admin"] = "member"
 
 
 # ---------- Skills de projeto ----------
 
-class RepositorySkillOut(BaseModel):
+class RepositorySkillOut(ApiModel):
     """Skill de projeto: metadados do upload de `.zip` com `SKILL.md` na raiz.
 
     Os arquivos ficam em `data/skills/<repository_id>/<skill_id>/` no disco; o
@@ -204,7 +261,7 @@ class RepositorySkillOut(BaseModel):
 
 # ---------- Robot ----------
 
-class RobotCreate(BaseModel):
+class RobotCreate(ApiModel):
     name: str = Field(min_length=1, max_length=100)
     mission: str = Field(min_length=1)
     role: str = Field(default="implement", max_length=30)
@@ -212,7 +269,7 @@ class RobotCreate(BaseModel):
     repository_id: int | None = None
 
 
-class RobotUpdate(BaseModel):
+class RobotUpdate(ApiModel):
     mission: str | None = None
     role: str | None = None
     model: str | None = None
@@ -220,7 +277,7 @@ class RobotUpdate(BaseModel):
     archived: bool | None = None
 
 
-class RobotOut(BaseModel):
+class RobotOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -236,20 +293,20 @@ class RobotOut(BaseModel):
 
 # ---------- Pipeline ----------
 
-class PipelineStepIn(BaseModel):
+class PipelineStepIn(ApiModel):
     position: int = Field(ge=0)
     robot_id: int
     post_merge: bool = False
     pause_before: bool = False
 
 
-class PipelineCreate(BaseModel):
+class PipelineCreate(ApiModel):
     name: str = Field(min_length=1, max_length=200)
     steps: list[PipelineStepIn] = Field(min_length=1)
     repository_id: int | None = None
 
 
-class PipelineStepOut(BaseModel):
+class PipelineStepOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -260,7 +317,7 @@ class PipelineStepOut(BaseModel):
     robot: RobotOut | None = None
 
 
-class PipelineOut(BaseModel):
+class PipelineOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -272,7 +329,7 @@ class PipelineOut(BaseModel):
 
 # ---------- Task ----------
 
-class SubTaskIn(BaseModel):
+class SubTaskIn(ApiModel):
     """Subtarefa definida na criação da task (opcional — o PO também pode gerar)."""
 
     title: str = Field(min_length=1, max_length=300)
@@ -280,7 +337,7 @@ class SubTaskIn(BaseModel):
     acceptance_criteria: str | None = None
 
 
-class SubTaskUpdate(BaseModel):
+class SubTaskUpdate(ApiModel):
     """Edição de subtarefa durante a execução (injeta contexto)."""
 
     title: str | None = None
@@ -288,7 +345,7 @@ class SubTaskUpdate(BaseModel):
     acceptance_criteria: str | None = None
 
 
-class SubTaskOut(BaseModel):
+class SubTaskOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -305,7 +362,7 @@ class SubTaskOut(BaseModel):
     finished_at: datetime | None
 
 
-class TaskCreate(BaseModel):
+class TaskCreate(ApiModel):
     repository_id: int
     pipeline_id: int
     title: str = Field(min_length=1, max_length=300)
@@ -323,14 +380,14 @@ class TaskCreate(BaseModel):
     epic_id: int | None = None
 
 
-class DescriptionFromFileOut(BaseModel):
+class DescriptionFromFileOut(ApiModel):
     """Conteúdo de um arquivo `.txt`/`.md`/`.markdown` extraído para uso como
     descrição de tarefa (o arquivo em si não é armazenado no servidor)."""
 
     description: str
 
 
-class TaskStepOut(BaseModel):
+class TaskStepOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -355,7 +412,7 @@ class TaskStepOut(BaseModel):
     execution_mode: str | None = None
 
 
-class TaskProposalOut(BaseModel):
+class TaskProposalOut(ApiModel):
     """Proposta de task filha aguardando (ou não) aprovação humana."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -376,7 +433,7 @@ class TaskProposalOut(BaseModel):
     accepted_task_id: int | None = None
 
 
-class TaskProposalUpdate(BaseModel):
+class TaskProposalUpdate(ApiModel):
     """Edição de uma proposta ANTES de aceitar (o usuário ajusta título/descrição/kind
     e a pipeline da task filha — a task nasce com os valores editados)."""
 
@@ -386,14 +443,14 @@ class TaskProposalUpdate(BaseModel):
     pipeline_id: int | None = None
 
 
-class TaskChangePipelineRequest(BaseModel):
+class TaskChangePipelineRequest(ApiModel):
     """Troca a pipeline de uma task AINDA NÃO iniciada (status `created`) e recria
     as fases do zero — usado para "reiniciar o trabalho" com outro pipeline."""
 
     pipeline_id: int
 
 
-class TaskStepListOut(BaseModel):
+class TaskStepListOut(ApiModel):
     """Fase em payload "lean" de listas: sem o texto integral do resumo,
     apenas um preview truncado para exibição (o completo fica no detalhe)."""
 
@@ -419,7 +476,7 @@ class TaskStepListOut(BaseModel):
     execution_mode: str | None = None
 
 
-class TaskListItem(BaseModel):
+class TaskListItem(ApiModel):
     """Listagem leve de tasks (polling): sem resumo LLM, children, propostas e
     subtarefas — só o que as telas de grid/dashboard precisam renderizar."""
 
@@ -449,7 +506,7 @@ class TaskListItem(BaseModel):
     steps: list[TaskStepListOut] = []
 
 
-class TaskOut(BaseModel):
+class TaskOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -499,7 +556,7 @@ class TaskOut(BaseModel):
         return [s for s in v if not getattr(s, "archived", False)]
 
 
-class TaskSummaryOut(BaseModel):
+class TaskSummaryOut(ApiModel):
     """Resumo estruturado do desenvolvimento gerado por LLM (persistido no banco)."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -518,7 +575,7 @@ class TaskSummaryOut(BaseModel):
     created_at: datetime
 
 
-class TimelineEventOut(BaseModel):
+class TimelineEventOut(ApiModel):
     """Evento da timeline cronológica de execução (resumo determinístico, sem LLM)."""
 
     seq: int
@@ -537,7 +594,7 @@ class TimelineEventOut(BaseModel):
     step_role: str | None = None
 
 
-class StepSummaryOut(BaseModel):
+class StepSummaryOut(ApiModel):
     """Resumo de UMA execução de fase ("O que foi entregue") gerado por LLM dedicada."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -554,7 +611,7 @@ class StepSummaryOut(BaseModel):
     created_at: datetime
 
 
-class WorkspaceOccurrenceOut(BaseModel):
+class WorkspaceOccurrenceOut(ApiModel):
     """Uma execução de fase na timeline do workspace (histórico imutável)."""
 
     step_id: int
@@ -592,7 +649,7 @@ class WorkspaceOccurrenceOut(BaseModel):
     branch: str | None = None
 
 
-class WorkspaceOut(BaseModel):
+class WorkspaceOut(ApiModel):
     """Payload da tela de trabalho (workspace): task + timeline de execuções.
 
     Em modo manual, inclui o chat (mensagens), as rodadas de agente e a lista de
@@ -607,7 +664,7 @@ class WorkspaceOut(BaseModel):
     agents: list[RobotOut] = []
 
 
-class TaskMessageOut(BaseModel):
+class TaskMessageOut(ApiModel):
     """Uma interação do chat human-in-the-loop de uma task (transcript)."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -621,7 +678,7 @@ class TaskMessageOut(BaseModel):
     cost: float = 0.0
 
 
-class TaskRunOut(BaseModel):
+class TaskRunOut(ApiModel):
     """Uma rodada de agente no modo human-in-the-loop (histórico)."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -641,18 +698,18 @@ class TaskRunOut(BaseModel):
     finished_at: datetime | None = None
 
 
-class ChatSendRequest(BaseModel):
+class ChatSendRequest(ApiModel):
     """Mensagem do usuário no chat human-in-the-loop (modo manual)."""
 
     text: str = Field(min_length=1, max_length=10000)
 
 
-class ChatMessageResponse(BaseModel):
+class ChatMessageResponse(ApiModel):
     ok: bool
     message: str
 
 
-class StepDiffOut(BaseModel):
+class StepDiffOut(ApiModel):
     """Diff real (git) do commit de uma fase — o git é a fonte de verdade."""
 
     stat: str = ""
@@ -661,7 +718,7 @@ class StepDiffOut(BaseModel):
     commit: str | None = None
 
 
-class StepFileDiffOut(BaseModel):
+class StepFileDiffOut(ApiModel):
     """Diff real (git) de UM arquivo dentro do commit de uma fase."""
 
     path: str = ""
@@ -670,55 +727,55 @@ class StepFileDiffOut(BaseModel):
     commit: str | None = None
 
 
-class InstructionRequest(BaseModel):
+class InstructionRequest(ApiModel):
     """Instrução do usuário ao agente + (opcional) a partir de qual fase continuar."""
 
     instruction: str = Field(min_length=1, max_length=10000)
     position: int | None = None
 
 
-class BlockedContinueRequest(BaseModel):
+class BlockedContinueRequest(ApiModel):
     """Instrução do usuário para retomar uma fase bloqueada (continuar de onde parou)."""
 
     instruction: str = Field(min_length=1, max_length=10000)
 
 
-class FeedbackCreate(BaseModel):
+class FeedbackCreate(ApiModel):
     text: str = Field(min_length=1, max_length=10000)
 
 
-class RetryRequest(BaseModel):
+class RetryRequest(ApiModel):
     """Retry manual de fase: `note` opcional vira feedback externo da task."""
 
     note: str | None = Field(default=None, max_length=10000)
 
 
-class ResponsibleUpdate(BaseModel):
+class ResponsibleUpdate(ApiModel):
     """Reatribuição do responsável por uma tarefa (upsert de repository_users)."""
 
     user_id: int
 
 
-class ReviewRequest(BaseModel):
+class ReviewRequest(ApiModel):
     action: Literal["approve", "cancel"]
     extra_budget: float = Field(default=5.0, ge=0)
     note: str | None = None
 
 
-class BouncebackRequest(BaseModel):
+class BouncebackRequest(ApiModel):
     target_position: int  # posição do step para onde voltar (ex.: 2 = implement)
     note: str | None = Field(default=None, max_length=2000)
     reviewed_by: str = "humano"  # identificação de quem confirmou
 
 
-class ApproveStepRequest(BaseModel):
+class ApproveStepRequest(ApiModel):
     """Aprovação humana de uma fase com `pause_before` (gate)."""
 
     position: int  # posição do step aguardando aprovação
     note: str | None = Field(default=None, max_length=10000)
 
 
-class TaskUpdateRequest(BaseModel):
+class TaskUpdateRequest(ApiModel):
     """Edição humana da história (descrição/critérios) — permitida em `created` e
     `waiting_approval`. `details` (detalhes da implementação), a associação
     Projeto > Épico (`project_id`/`epic_id`), o `executor` e o `model` das fases
@@ -744,7 +801,7 @@ class TaskUpdateRequest(BaseModel):
 
 # ---------- Modelos de executor ----------
 
-class CodexModelsOut(BaseModel):
+class CodexModelsOut(ApiModel):
     """Modelos disponíveis para o executor codex (populam o dropdown da UI)."""
 
     models: list[str] = []
@@ -752,7 +809,7 @@ class CodexModelsOut(BaseModel):
     source: str = "config"
 
 
-class OpenCodeModelsOut(BaseModel):
+class OpenCodeModelsOut(ApiModel):
     """Modelos disponíveis para o executor opencode (populam o dropdown da UI)."""
 
     models: list[str] = []
@@ -762,7 +819,7 @@ class OpenCodeModelsOut(BaseModel):
 
 # ---------- Eventos ----------
 
-class RunEventOut(BaseModel):
+class RunEventOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -774,7 +831,7 @@ class RunEventOut(BaseModel):
     cost: float
 
 
-class ArtifactOut(BaseModel):
+class ArtifactOut(ApiModel):
     """Metadados de um arquivo gerado por um robô (ex.: screenshot de smoke test)."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -788,7 +845,7 @@ class ArtifactOut(BaseModel):
 
 # ---------- Dashboard ----------
 
-class NoticeOut(BaseModel):
+class NoticeOut(ApiModel):
     """Aviso de uma tarefa que requer atenção (guardrail, orçamento, arquitetura...)."""
 
     task_id: int
@@ -801,7 +858,7 @@ class NoticeOut(BaseModel):
     ts: datetime
 
 
-class MyTaskOut(BaseModel):
+class MyTaskOut(ApiModel):
     """Tarefa do usuário no dashboard pessoal (responsable == eu)."""
 
     id: int
@@ -814,7 +871,7 @@ class MyTaskOut(BaseModel):
     updated_at: datetime
 
 
-class MyProjectOut(BaseModel):
+class MyProjectOut(ApiModel):
     """Participação do usuário em um projeto (papel + contagem de tarefas minhas)."""
 
     id: int
@@ -825,7 +882,7 @@ class MyProjectOut(BaseModel):
     my_tasks_pending: int = 0
 
 
-class DashboardOut(BaseModel):
+class DashboardOut(ApiModel):
     tasks_by_status: dict[str, int]
     total_cost: float
     total_tasks: int
@@ -843,12 +900,12 @@ class DashboardOut(BaseModel):
 
 # ---------- Execução (página global) ----------
 
-class WorkerStatusOut(BaseModel):
+class WorkerStatusOut(ApiModel):
     alive: bool
     last_heartbeat_sec: float | None = None
 
 
-class ExecutionOut(BaseModel):
+class ExecutionOut(ApiModel):
     """Payload da página global "Execução": tasks ativas, eventos ao vivo das fases
     running, propostas pendentes, avisos e status do worker (1 request/poll)."""
 
@@ -861,20 +918,20 @@ class ExecutionOut(BaseModel):
 
 # ---------- Chamados (fluxo de atendimento) ----------
 
-class EpicCreate(BaseModel):
+class EpicCreate(ApiModel):
     project_id: int
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     status: str = Field(default="aberto", pattern="^(aberto|em_andamento|fechado)$")
 
 
-class EpicUpdate(BaseModel):
+class EpicUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     status: str | None = Field(default=None, pattern="^(aberto|em_andamento|fechado)$")
 
 
-class EpicOut(BaseModel):
+class EpicOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -894,20 +951,20 @@ class EpicDetailOut(EpicOut):
     chamado_count: int = 0
 
 
-class ProjectCreate(BaseModel):
+class ProjectCreate(ApiModel):
     repository_id: int
     name: str = Field(min_length=1, max_length=200)
     description: str = ""
     status: str = Field(default="aberto", pattern="^(aberto|em_andamento|fechado)$")
 
 
-class ProjectUpdate(BaseModel):
+class ProjectUpdate(ApiModel):
     name: str | None = Field(default=None, min_length=1, max_length=200)
     description: str | None = None
     status: str | None = Field(default=None, pattern="^(aberto|em_andamento|fechado)$")
 
 
-class ProjectOut(BaseModel):
+class ProjectOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -929,7 +986,7 @@ class ProjectDetailOut(ProjectOut):
     chamado_count: int = 0
 
 
-class ChamadoStageTypeOut(BaseModel):
+class ChamadoStageTypeOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -947,7 +1004,7 @@ class ChamadoStageTypeOut(BaseModel):
         return v or []
 
 
-class ChamadoStageTypeCreate(BaseModel):
+class ChamadoStageTypeCreate(ApiModel):
     repository_id: int | None = None
     name: str = Field(min_length=1, max_length=100)
     description: str = ""
@@ -957,7 +1014,7 @@ class ChamadoStageTypeCreate(BaseModel):
     delivery_config: dict = {}
 
 
-class ChamadoCreate(BaseModel):
+class ChamadoCreate(ApiModel):
     repository_id: int
     project_id: int | None = None
     epic_id: int | None = None
@@ -970,7 +1027,7 @@ class ChamadoCreate(BaseModel):
     initial_stage_type_id: int | None = None
 
 
-class ChamadoUpdate(BaseModel):
+class ChamadoUpdate(ApiModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     description: str | None = None
     project_id: int | None = None
@@ -979,7 +1036,7 @@ class ChamadoUpdate(BaseModel):
     model: str | None = Field(default=None, max_length=200)
 
 
-class ToolInfoOut(BaseModel):
+class ToolInfoOut(ApiModel):
     """Descrição de uma ferramenta disponível na etapa atual do chamado."""
 
     key: str
@@ -987,7 +1044,7 @@ class ToolInfoOut(BaseModel):
     description: str
 
 
-class ChamadoStageOut(BaseModel):
+class ChamadoStageOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1005,7 +1062,7 @@ class ChamadoStageOut(BaseModel):
     stage_type_name: str | None = None
 
 
-class ChamadoMessageOut(BaseModel):
+class ChamadoMessageOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1018,7 +1075,7 @@ class ChamadoMessageOut(BaseModel):
     cost: float = 0.0
 
 
-class ChamadoOut(BaseModel):
+class ChamadoOut(ApiModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
@@ -1040,7 +1097,7 @@ class ChamadoOut(BaseModel):
     stages: list[ChamadoStageOut] = []
 
 
-class ChamadoWorkspaceOut(BaseModel):
+class ChamadoWorkspaceOut(ApiModel):
     """Payload da tela do chamado: chamado + etapas (histórico) + mensagens +
     etapa atual + ferramentas disponíveis nela."""
 
@@ -1052,20 +1109,20 @@ class ChamadoWorkspaceOut(BaseModel):
     close_options: list[str] = []
 
 
-class ToolRunRequest(BaseModel):
+class ToolRunRequest(ApiModel):
     """Pedido do usuário para rodar uma ferramenta na etapa atual."""
 
     text: str = Field(min_length=1, max_length=4000)
 
 
-class ChamadoMessageResponse(BaseModel):
+class ChamadoMessageResponse(ApiModel):
     ok: bool
     message: str
 
 
 # ---------- Sistema (configuração geral) ----------
 
-class StorageCategory(BaseModel):
+class StorageCategory(ApiModel):
     """Uma categoria do relatório de armazenamento (id = chave estável usada
     pelo frontend; label = nome PT-BR exibido)."""
 
@@ -1078,21 +1135,21 @@ class StorageCategory(BaseModel):
     cleanable: bool
 
 
-class StorageReport(BaseModel):
+class StorageReport(ApiModel):
     """Relatório completo do armazenamento do sistema (5 categorias + total)."""
 
     categories: list[StorageCategory] = []
     total_bytes: int = 0
 
 
-class CleanRequest(BaseModel):
+class CleanRequest(ApiModel):
     """Alvos da limpeza de órfãos (ids estáveis: logs, pytest_tmp, smoke,
     chrome_profiles). Id desconhecido → 400."""
 
     targets: list[str]
 
 
-class CleanTargetResult(BaseModel):
+class CleanTargetResult(ApiModel):
     """Resultado da limpeza de um alvo (itens removidos e bytes liberados)."""
 
     target: str
@@ -1100,7 +1157,7 @@ class CleanTargetResult(BaseModel):
     bytes_freed: int
 
 
-class CleanResult(BaseModel):
+class CleanResult(ApiModel):
     """Resposta da limpeza: detalhe por alvo + total liberado + relatório
     atualizado refletindo a remoção."""
 

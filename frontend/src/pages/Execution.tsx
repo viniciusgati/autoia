@@ -2,11 +2,11 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import StatusIcon from "../components/StatusIcon";
-import TaskCard from "../components/TaskCard";
+import TaskCompactCard from "../components/TaskCompactCard";
 import { formatToolCall, sessionEventLine } from "../lib/events";
 import { fmtBudget } from "../lib/money";
 import { usePolling } from "../lib/polling";
-import { faseAtual, taskNeedsAttention, tempoDecorrido } from "../lib/tasks";
+import { faseAtual, taskNeedsAttention, tempoAtras, tempoDecorrido } from "../lib/tasks";
 import type { Execution, Repository, RunEvent, TaskListItem } from "../types";
 
 const STOPPED_STATUSES = ["paused", "created", "open"];
@@ -64,8 +64,8 @@ export default function ExecutionPage() {
   const paradas = tasks.filter((task) => STOPPED_STATUSES.includes(task.status) && !runningIds.has(task.id));
 
   const cards = (items: TaskListItem[]) => (
-    <div className="exec-cards task-grid">
-      {items.map((task) => <TaskCard key={task.id} task={task} detailPath={`/${task.repository_id}/tasks`} repoName={repoNames[task.repository_id]} onChanged={() => void load()} onError={setError} />)}
+    <div className="exec-cards exec-cards-compact">
+      {items.map((task) => <TaskCompactCard key={task.id} task={task} detailPath={`/${task.repository_id}/tasks`} repoName={repoNames[task.repository_id]} onChanged={() => void load()} onError={setError} />)}
     </div>
   );
 
@@ -139,7 +139,9 @@ function RunningSession({ task, events, repoNames }: { task: TaskListItem; event
   const toolCall = eventsThisRun.find((event) => event.kind === "tool_call");
   const activity = eventsThisRun.find((event) => ["assistant_text", "tool_call", "subtask_start", "subtask_implemented", "subtask_verified", "subtask_failed", "subtask_bounce_back"].includes(event.kind));
   const command = toolCall ? formatToolCall(toolCall) : null;
-  const time = activity ? new Date(activity.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : null;
+  const lastAt = activity ? new Date(activity.ts).getTime() : runningStep?.started_at ? new Date(runningStep.started_at).getTime() : null;
+  const lastAgo = lastAt ? tempoAtras(new Date(lastAt).toISOString()) : null;
+  const stale = lastAt ? Date.now() - lastAt > 120_000 : false;
   const workspacePath = `/${task.repository_id}/tasks/${task.id}/workspace`;
 
   return (
@@ -152,7 +154,7 @@ function RunningSession({ task, events, repoNames }: { task: TaskListItem; event
         {runningStep && <span className="muted small">Tentativa {runningStep.attempt}{runningStep.started_at ? ` · ${tempoDecorrido(runningStep)}` : ""}</span>}
       </div>
       {runningStep && runningStep.attempt > 1 && <div className="exec-recovery-note">Nova tentativa em andamento. Acompanhe o resultado desta execução no workspace.</div>}
-      <div className="exec-session-activity"><span className="session-label">Última atividade{time ? ` · ${time}` : ""}</span><p>{activity ? sessionEventLine(activity) || "O agente está trabalhando." : "Aguardando a primeira atividade desta execução…"}</p></div>
+      <div className="exec-session-activity"><span className="session-label">Última atividade{lastAgo ? ` · ${lastAgo}` : ""}</span><p>{activity ? sessionEventLine(activity) || "O agente está trabalhando." : "Aguardando a primeira atividade desta execução…"}</p>{stale && <p className="exec-session-stale">Sem atividade há mais de 2 minutos — verifique se o agente não travou.</p>}</div>
       {command && <details className="exec-session-command"><summary>Ver última ferramenta utilizada</summary><pre>{command}</pre></details>}
       <div className="session-foot"><span className="muted small">Orçamento {fmtBudget(task.cost_spent, task.budget_limit)}</span><Link to={workspacePath} className="link-btn">Acompanhar →</Link></div>
     </article>

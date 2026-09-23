@@ -148,6 +148,9 @@ class Repository(Base):
     # Informações úteis injetadas no contexto dos robôs (ex.: DNS do deploy, URLs de
     # staging, env vars, serviços do host) — texto livre, incluído no AGENTS.md e no prompt.
     external_context: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Conta opencode-go fixada para este repositório (nome no roster global). NULL =
+    # usa a conta default (is_default) ou, sem default, a conta do host do agente.
+    opencode_account: Mapped[str | None] = mapped_column(String(100), nullable=True)
 
     tasks: Mapped[list["Task"]] = relationship(back_populates="repository")
     skills: Mapped[list["RepositorySkill"]] = relationship(
@@ -181,6 +184,32 @@ class RepositorySkill(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
 
     repository: Mapped[Repository] = relationship(back_populates="skills")
+
+
+class OpenCodeAccount(Base):
+    """Conta opencode-go (roster global de credenciais do agente).
+
+    Cada conta guarda uma chave de API OpenCode e pode ser fixada em repositórios
+    (`Repository.opencode_account`). A credencial é materializada em disco
+    (`data/opencode-accounts/<name>/opencode/auth.json`) no formato legado
+    `{"opencode-go": {"type": "api", "key": ...}}` e entregue ao executor opencode
+    via `XDG_DATA_HOME` — o token nunca é exposto pela API (schema de saída usa
+    `has_token`). Quando `is_default` é True (no máximo uma), repositórios sem pin
+    usam essa conta."""
+
+    __tablename__ = "opencode_accounts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(100), unique=True)
+    token: Mapped[str] = mapped_column(Text)
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_default: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(default=utcnow)
+
+    @property
+    def has_token(self) -> bool:
+        """Indica se a conta tem credencial válida (sem expor o token)."""
+        return bool(self.token)
 
 
 class User(Base):

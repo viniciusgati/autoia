@@ -82,7 +82,7 @@ def generate_mission(settings, session_factory, step_id: int, run: int) -> bool:
                 return False
             task = step.task
             repo = task.repository
-            eff = _effective(settings, repo)
+            eff = _effective(settings, repo, s)
             checkout = _task_workspace(eff, repo.id, task.id)
 
             git_dir = os.path.join(checkout, ".git")
