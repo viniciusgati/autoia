@@ -96,6 +96,26 @@ def opencode_state_log(env: dict[str, str] | None = None) -> str:
     return os.path.join(xdg, "opencode", "log", "opencode.log")
 
 
+def _executor_env(
+    spawn_env: dict[str, str] | None,
+    extra_env: dict[str, str] | None,
+) -> dict[str, str]:
+    """Ambiente efetivo da execução para achar o log próprio do opencode.
+
+    No sandbox o `build_spawn_command` devolve `env=None` (o Popen herda o
+    ambiente do `docker run`) e o `XDG_DATA_HOME` da conta vem em `extra_env` —
+    somar os dois é obrigatório: só o `spawn_env` faria a varredura de cota ler
+    `~/.local/share/opencode` (log do host, errado) em vez de
+    `data/opencode-accounts/<conta>/opencode/log/opencode.log`.
+    """
+    merged = dict(os.environ)
+    if spawn_env:
+        merged.update(spawn_env)
+    if extra_env:
+        merged.update(extra_env)
+    return merged
+
+
 def _log_ts(line: str) -> float | None:
     """Epoch de `timestamp=<ISO>` numa linha do log do opencode (None se não houver)."""
     marker = "timestamp="
@@ -538,7 +558,9 @@ def _run_opencode_once(
     # runner vê "timeout sem progresso" e faz bounce-back em vez de rotacionar a
     # conta do roster / agendar a retomada (task 195).
     if outcome.timed_out or (not outcome.aborted and outcome.exit_code not in (0, None)):
-        limit_msg = provider_limit_from_opencode_state(spawn_env, run_started)
+        limit_msg = provider_limit_from_opencode_state(
+            _executor_env(spawn_env, extra_env), run_started
+        )
         if limit_msg:
             outcome.aborted = True
             outcome.timed_out = False

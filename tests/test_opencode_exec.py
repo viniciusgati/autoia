@@ -468,3 +468,34 @@ def test_run_opencode_stall_sem_cota_continua_sendo_timeout(tmp_path):
     )
     assert outcome.aborted
     assert "sem progresso" in outcome.abort_reason
+
+
+def test_executor_env_somera_extra_env_sobre_o_ambiente(tmp_path, monkeypatch):
+    """Regressão: no sandbox o `build_spawn_command` devolve `spawn_env=None` (o
+    Popen herda o env do `docker run`) e o `XDG_DATA_HOME` da conta vem em
+    `extra_env`. Sem somar os dois, a varredura de cota lia
+    `~/.local/share/opencode` (log do host, errado) e um `Go usage limit`
+    real era classificado como 'timeout sem progresso' (task 196: merger)."""
+    from datetime import datetime, timezone
+
+    monkeypatch.setenv("XDG_DATA_HOME", "/host/antigo")
+    conta = str(tmp_path / "conta")
+
+    env = opencode_exec._executor_env(None, {"XDG_DATA_HOME": conta})
+    assert env["XDG_DATA_HOME"] == conta
+    # extra_env prevalece sobre o spawn_env quando os dois existem
+    env2 = opencode_exec._executor_env(
+        {"XDG_DATA_HOME": "/spawn"}, {"XDG_DATA_HOME": conta}
+    )
+    assert env2["XDG_DATA_HOME"] == conta
+
+    agora = datetime.now(timezone.utc).isoformat()
+    xdg = _estado(tmp_path / "conta", [
+        f'timestamp={agora} level=ERROR run=x message="stream error" '
+        'error.error="AI_APICallError: Go usage limit exceeded"',
+    ])
+    msg = opencode_exec.provider_limit_from_opencode_state(
+        opencode_exec._executor_env(None, {"XDG_DATA_HOME": xdg}),
+        started=time.time() - 10,
+    )
+    assert msg is not None and "usage limit" in msg
