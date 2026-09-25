@@ -1164,3 +1164,49 @@ def test_guardrail_em_subtarefa_retenta_fase_sem_bounce(flow, tmp_path, monkeypa
         assert any(e.kind == "subtask_retry" for e in dev.events)
 
 
+
+
+# ---------------------------------------------------------------------------
+# needs_reverification (o que volta para a fila do verify)
+# ---------------------------------------------------------------------------
+
+
+def test_needs_reverification_interrompida_entrna_na_fila():
+    """Regressão da task 195: a subtarefa interrompida por parada do usuário
+    ficava `pending`, o loop de verify a IGNORAVA (`to_verify` vazio →
+    `already_done > 0` → `phase_done`) e a fase fechava com **PASS em 2 s sem
+    verificar nada** — a subtarefa 5 jamais foi validada."""
+    from types import SimpleNamespace
+
+    from app.models import SUB_DONE, SUB_IMPLEMENTED, SUB_PENDING
+    from app.worker.subtask import needs_reverification
+
+    interrompida = SimpleNamespace(
+        status=SUB_PENDING,
+        error="execução interrompida (projeto excluído ou parada/instrução do usuário)",
+    )
+    assert needs_reverification(interrompida) is True
+
+    # qualquer motivo de infra/parada = código não avaliado → revalida
+    for err in (
+        "timeout sem progresso (900s sem saída)",
+        "worker reiniciado — subtarefa órfã re-enfileirada",
+        "inconclusive:4",
+        "provider_limit: Go usage limit exceeded",
+        "infra_blocked: toolchain preflight falhou — JDK ausente",
+        "opencode saiu com código -9",
+        "kimi saiu com código -15",
+    ):
+        assert needs_reverification(SimpleNamespace(status=SUB_PENDING, error=err)), err
+
+    # implemented sempre re-verifica
+    assert needs_reverification(SimpleNamespace(status=SUB_IMPLEMENTED, error=None)) is True
+
+    # reprovação por veredicto NÃO é revalidada sozinha (exige o ciclo
+    # implement → verify) e pending sem erro nunca rodou (precisa do developer)
+    assert needs_reverification(
+        SimpleNamespace(status=SUB_PENDING, error="veredicto FAIL: faltou o botão")
+    ) is False
+    assert needs_reverification(SimpleNamespace(status=SUB_PENDING, error=None)) is False
+    # done não volta
+    assert needs_reverification(SimpleNamespace(status=SUB_DONE, error=None)) is False

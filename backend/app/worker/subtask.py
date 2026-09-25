@@ -68,6 +68,37 @@ _HARD_VERIFY_ABORTS = (
     "orçamento estourado",
 )
 
+# Erros de subtarefa que significam "o CÓDIGO NÃO FOI AVALIADO": ao reabrir a fase
+# verify elas voltam para a fila de validação. Se um motivo real ficar de fora
+# desta lista, a subtarefa fica `pending` eternamente, o loop a IGNORA e a fase
+# fecha com PASS sem ter verificado nada (task 195: subtarefa 5 pulada porque o
+# erro era "execução interrompida (parada/instrução do usuário)" — só por isso).
+_INFRA_RECHECK_PREFIXES = (
+    "infra_blocked:",
+    "provider_limit:",  # limite do provedor: retomada automática revalida
+    "timeout",
+    "kimi saiu",
+    "opencode saiu",
+    "codex saiu",
+    "worker reiniciado",
+    "inconclusive:",  # validação não avaliou o código: re-verifica
+    # parada do usuário/rewind/stop file — mesma natureza das acima: a execução
+    # morreu antes de avaliar, não houve reprovação por veredicto.
+    "execução interrompida",
+)
+
+
+def needs_reverification(subtask) -> bool:
+    """True quando a subtarefa precisa ser (re)verificada nesta abertura do verify.
+
+    `implemented` sempre; `pending` SÓ quando o erro indica falha de
+    infraestrutura/parada (nunca quando é uma reprovação por veredicto — essa
+    exige o ciclo implement → verify).
+    """
+    if subtask.status == SUB_IMPLEMENTED:
+        return True
+    return str(subtask.error or "").lower().startswith(_INFRA_RECHECK_PREFIXES)
+
 
 def _sub_sandbox(settings) -> SandboxConfig | None:
     """Sandbox efetivo do ciclo de subtarefas (só aplica quando é um SandboxConfig;
@@ -1205,25 +1236,12 @@ def run_verify_subtasks(
             .order_by(SubTask.position)
             .all()
         )
-        # Uma falha de infraestrutura deixa a subtarefa pending porque o código
-        # não foi avaliado. Ao reabrir o verify, ela precisa voltar para a fila
-        # de validação; uma reprovação por veredicto continua exigindo o ciclo
-        # implement → verify e não é revalidada automaticamente.
-        infra_prefixes = (
-            "infra_blocked:",
-            "provider_limit:",  # limite do provedor: retomada automática revalida
-            "timeout",
-            "kimi saiu",
-            "opencode saiu",
-            "codex saiu",
-            "worker reiniciado",
-            "inconclusive:",  # validação não avaliou o código: re-verifica
-        )
-        to_verify = [
-            st for st in candidates
-            if st.status == SUB_IMPLEMENTED
-            or str(st.error or "").lower().startswith(infra_prefixes)
-        ]
+        # Uma falha de infraestrutura (ou parada do usuário) deixa a subtarefa
+        # pending porque o código não foi avaliado. Ao reabrir o verify, ela
+        # precisa voltar para a fila de validação; uma reprovação por veredicto
+        # continua exigindo o ciclo implement → verify e não é revalidada
+        # automaticamente (`needs_reverification`).
+        to_verify = [st for st in candidates if needs_reverification(st)]
         already_done = (
             s.query(SubTask)
             .filter(SubTask.task_id == task_id, SubTask.status == SUB_DONE)
