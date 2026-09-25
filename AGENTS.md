@@ -197,6 +197,18 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   avaliação (`guardrails.interruption_guidance`) e a subtarefa fica `pending` com o
   motivo. Reabrir o qa/po revisaria a história sem relação com o problema, queimaria
   as tentativas deles e travaria a pipeline (task-194). Esgotada a fase → `needs_review`.
+- **Verificação inconclusiva → assessor**: veredicto **AUSENTE** na verificação (verify
+  — validador/tester) por falha de infraestrutura (emulador/navegador/timeout/permissão)
+  NÃO é defeito de código: em vez de bounce-back para o developer (nada a corrigir) ou
+  de parar em `needs_review`, o worker encaminha o veredicto FINAL ao **avaliador** (role
+  `assess`) quando ele existe na sequência — evento `handoff_to_assess`; o assessor
+  decide PASS/FAIL por **revisão de código/diff**, sem depender da infraestrutura que
+  quebrou. Vale para a fase verify com subtarefas (`_decide_subtask_verify`, `inconclusive:`) e
+  para a verify sem subtarefas (`_decide`, veredicto AUSENTE). Sem assessor à frente →
+  `needs_review` com diagnóstico. O prompt de verify orienta o robô a NUNCA deixar o
+  veredicto ausente (escreve `autoia_verdict.txt` com o que conseguiu verificar + seção
+  `NÃO VERIFICADO:` e FAIL com justificativa de infra se a evidência for séria); o
+  CONTRACT_ASSESS orienta o avaliador a validar por revisão de código nesse caso.
 - **Reabertura coerente de fase** (`_rewind_pipeline` da instrução e PM `retry`): reabrir
   uma fase com uma **anterior não-concluída** (`failed`/`guardrail_blocked`) reabre a
   **cadeia** da primeira não-concluída até o alvo — reabrir só o alvo deixava a task
@@ -267,14 +279,45 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   / `Repository.sandbox`, env `AUTOIA_SANDBOX`): `off` (spawn direto; default até validado
   em produção) | `fs` (isolamento de FS/privilégios, rede host — transitório) | `full`
   (rede bridge + `host.docker.internal` + proxy de egress allowlist no host, fail-closed,
-  mesma lista de `config.DEFAULT_WHITELISTED_HOSTS`). Fallback: `AUTOIA_SANDBOX_FAIL_CLOSED=1`
+  mesma lista de `config.DEFAULT_WHITELISTED_HOSTS`). No `full`, o container recebe
+  `HTTP(S)_PROXY` apontando para o host **e** `NO_PROXY=localhost,127.0.0.1,::1` — o
+  loopback é o do próprio container (ex.: emulador em `:8554`), nunca o do host, e por
+  isso `127.0.0.1`/`localhost` **não** entram na allowlist do proxy (qualquer porta em
+  loopback do host seria alcançável). Um túnel só é fechado após
+  `AUTOIA_PROXY_IDLE_TIMEOUT` (default 600 s; 0 = nunca) de silêncio — os 30 s antigos
+  matavam chamadas de LLM no meio (TTFB > 30 s em prompt grande) e o executor ficava em
+  retry silencioso até o watchdog de 900 s. Fallback: `AUTOIA_SANDBOX_FAIL_CLOSED=1`
   faz a falha do sandbox (docker indisponível) falhar a execução; sem ele, cai para direto
   com aviso no log. Permanecem os watchdogs de progresso: loop de tool calls idênticas
   (`max_identical_calls`) → kill; timeout por fase (`AUTOIA_RUN_TIMEOUT`); watchdog de
-  "sem progresso" (`AUTOIA_NO_PROGRESS_TIMEOUT`). Kill/stop file matam o contêiner
-  (SIGTERM via `--sig-proxy` + `docker rm -f` pelo `--cidfile` registrado em
+  "sem progresso" (`AUTOIA_NO_PROGRESS_TIMEOUT`), que **não** conta a janela de bootstrap:
+  o sandbox emite `AUTOIA_BOOTSTRAP_DONE` no stdout logo antes da CLI e o relógio recomeça
+  (o boot do emulador escreve só em stderr e leva minutos). Kill/stop file matam o
+  contêiner (SIGTERM via `--sig-proxy` + `docker rm -f` pelo `--cidfile` registrado em
   `exec_common._ACTIVE_PROCS`). `guardrails.py` mantém `GuardrailViolation` (usado pelo
   watchdog de loop) e as funções de análise — sem uso de enforcement por enquanto.
+- **Chamadas LLM puras não sobem emulador**: tudo que é só ler/escrever JSON
+  (resumo de fase, resumo da task, missão, decisão do PM, dispatcher do chat) chama
+  `_run_executor(..., skip_device_bootstrap=True)` — sem isso cada um bootava um emulador
+  Android completo no perfil `android-emulator-*` e o host entrava em contenção
+  (load/swap) que dispara o watchdog de "sem progresso" (task 195).
+- **Semáforo de emuladores Android** (`exec_common.acquire_device_slot`, env
+  `AUTOIA_ANDROID_MAX_CONCURRENT`, default 2): execuções cujo sandbox sobe um emulador
+  (`bootstrap_extra`) seguram um slot de `flock` em `workspaces/.device-slots/` durante o
+  dispatch — semáforo entre TODOS os processos (workers forkados + chamado/chat), não um
+  `threading.Semaphore`. A espera é segura porque o heartbeat e o processamento de
+  `.stop-*` rodam na thread iniciada antes de `execute_step`/no worker de chamado/chat.
+  `0` desliga os slots; perfis sem emulador (LLM pura, genérico) nunca bloqueiam.
+- **Teto global de execuções LLM** (`exec_common.acquire_llm_slot`, env
+  `AUTOIA_LLM_MAX_CONCURRENT`, default 2): TODO dispatch de executor (fases **e**
+  missões/resumos/PM/dispatcher) segura um slot de `workspaces/.llm-slots/` — limita
+  chamadas simultâneas ao provedor. Medido: 27 chamadas/min (normal 2–5) dispararam
+  `429 Rate limit exceeded` em cascata e o retry imediato do opencode amplificou o
+  pico (18 chamadas ↔ 17 erros no mesmo minuto). Ordem de aquisição é sempre
+  **device → llm** (consistente em todos os caminhos, sem ciclo). `0` = sem teto.
+  As gerações LLM pura usam ainda `AUTOIA_LLM_BG_TIMEOUT` (default 300 s, via
+  `runner._effective_run_timeout`) — sem o teto, uma missão/resumo travado segura
+  o slot por `run_timeout` (5400 s no repo 4) e empurra fases de verdade na fila.
 - **Push bloqueado durante o robô** (`gitops.lock_push`/`unlock_push`): antes de cada
   execução o worker força `remote.origin.pushurl` para `none://` + hook `pre-push` que
   falha (restaurado no `finally`); defesa em profundidade com a rede restrita do sandbox.
@@ -400,13 +443,26 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   watchdog de **sem progresso** (`AUTOIA_NO_PROGRESS_TIMEOUT`, default 300 s; 0 =
   desligado): se o kimi/opencode ficar N s sem emitir NENHUMA saída no stdout
   (`make_no_progress_watchdog` em `exec_common.py`), o processo é morto e tratado
-  como timeout → bounce-back/retry. **Retomada de sessão**: o `kimi` emite
+  como timeout → bounce-back/retry. Perfis Android ganham 2400 s por padrão
+  (`runner.ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT`, sobrescrevível por
+  `Repository.no_progress_timeout`) porque uma suíte instrumentada longa deixa o
+  stdout mudo; a janela de **boot** não conta (sentinela `AUTOIA_BOOTSTRAP_DONE`).
+  O motivo do kill distingue "nunca houve saída desde o spawn (CLI/bootstrap não
+  subiu)" de silêncio posterior (`exec_common.stall_reason`). **Retomada de sessão**: o `kimi` emite
   `meta session.resume_hint` com `session_id` no stream-json; o worker guarda em
   `TaskStep.session_id` e, numa re-execução da MESMA fase que foi interrompida sem
   concluir (`_should_resume`), chama `kimi -S <id>` para **continuar a mesma conversa**
   (contexto do LLM preservado) em vez de começar do zero. A fase concluída (phase_done)
   não retoma. Como fallback, o handoff/prompt da retomada inclui a **atividade da
   execução anterior** da fase (`_step_prior_activity`, determinístico).
+- **Cota do provedor não vira "timeout sem progresso"**: `Go usage limit exceeded`
+  (e congêneres) nunca chega ao stdout/stderr do opencode — fica só no log próprio da
+  conta (`$XDG_DATA_HOME/opencode/log/opencode.log`). Ao terminar uma execução morta
+  por watchdog/saída não-zero, `opencode_exec.provider_limit_from_opencode_state`
+  varre esse tail (só `level=error` com timestamp do run atual) e classifica como
+  `provider_limit:` → o runner **rotaciona** para a próxima conta do roster ou agenda
+  `retry_at`, sem consumir tentativa (task 195: fase presa ~40 min num limite que já
+  era conhecido do provedor).
 - **Nunca trunque payloads** de `RunEvent` nem do log — "textos completos" é requisito.
 - **Migração de schema é aditiva**: colunas novas entram em `models.py` **e** em
   `ADDITIVE_COLUMNS` (`db.py`). Nunca drop/rename coluna sem plano de migração.

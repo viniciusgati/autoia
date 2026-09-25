@@ -139,3 +139,72 @@ def effective_account_dir(
     if account is None:
         return None
     return materialize_auth(settings, account.name, account.token)
+
+
+def account_chain(session: Session, repo: Repository | None) -> list[str]:
+    """Candidatas opencode-go na ordem de preferência para um repositório.
+
+    Ordem determinística: pin do repositório (`Repository.opencode_account`) >
+    conta global `is_default` > demais contas do roster (alfabética). É a cadeia
+    usada pela rotação automática de conta quando a em uso esgota (`provider_limit`
+    no executor opencode): a fase tenta a PRÓXIMA da cadeia em vez de esperar.
+    """
+    names = [n for (n,) in session.query(OpenCodeAccount.name).order_by(OpenCodeAccount.name)]
+    chain: list[str] = []
+    if repo is not None and repo.opencode_account:
+        chain.append(repo.opencode_account)
+    default = (
+        session.query(OpenCodeAccount)
+        .filter(OpenCodeAccount.is_default.is_(True))
+        .one_or_none()
+    )
+    if default is not None and default.name not in chain:
+        chain.append(default.name)
+    for name in names:
+        if name not in chain:
+            chain.append(name)
+    return chain
+
+
+def next_account(session: Session, repo: Repository | None, current: str) -> str | None:
+    """Próxima conta da cadeia após `current` (None = `current` é a última/inexistente)."""
+    chain = account_chain(session, repo)
+    try:
+        idx = chain.index(current)
+    except ValueError:
+        return None
+    return chain[idx + 1] if idx + 1 < len(chain) else None
+
+
+def resolve_account(
+    settings: Settings,
+    session: Session,
+    repo: Repository | None,
+    override: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Resolve a conta efetiva (nome, diretório) materializando a credencial.
+
+    `override` (rotação fixada na fase via `TaskStep.opencode_account`) usa EXATAMENTE
+    essa conta, se ainda existir no roster; sem override (ou override inexistente),
+    cai para a primeira da cadeia `account_chain` (pin > default). Sem contas →
+    `(None, None)` = conta do host (nenhuma env injetada).
+    """
+    if override:
+        account = (
+            session.query(OpenCodeAccount)
+            .filter(OpenCodeAccount.name == override)
+            .one_or_none()
+        )
+        if account is not None:
+            return account.name, materialize_auth(settings, account.name, account.token)
+    chain = account_chain(session, repo)
+    if not chain:
+        return None, None
+    account = (
+        session.query(OpenCodeAccount)
+        .filter(OpenCodeAccount.name == chain[0])
+        .one_or_none()
+    )
+    if account is None:
+        return None, None
+    return account.name, materialize_auth(settings, account.name, account.token)

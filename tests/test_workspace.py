@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 from app.models import RunEvent, StepSummary, Task
-from app.worker import runner
+from app.worker import runner, step_summarizer
 from app.worker.step_summarizer import summarize_step
 
 STREAM = [
@@ -332,6 +332,37 @@ def test_step_summary_persisted_and_exposed(flow, fake_kimi):
     assert delivered is not None
     assert delivered["result"] == "completed"
     assert delivered["summary"].startswith("A validação")
+
+
+def test_step_summary_nao_sobe_emulador(flow, fake_kimi, monkeypatch):
+    """Regressão da task 195: o resumo de fase é LLM pura e NÃO pode subir o
+    emulador Android (sem `skip_device_bootstrap` cada "O que foi entregue"
+    bootava um qemu de ~4 GB e empurrava o host para o watchdog de 900s)."""
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    step_id = _run_claim(flow)
+    _execute(flow, step_id)
+
+    seen: dict = {}
+    real = step_summarizer._run_executor
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(step_summarizer, "_run_executor", spy)
+
+    settings.kimi_bin = fake_kimi([], write_file="autoia_step_summary.json", write_content=json.dumps({
+        "summary": "Fase concluída.",
+        "changes": [],
+        "files": [],
+        "issues": [],
+        "result": "completed",
+    }))
+    assert summarize_step(settings, flow["session_factory"], step_id)
+    assert seen.get("skip_device_bootstrap") is True
 
 
 def test_instruction_blocked_continues(flow, fake_kimi):

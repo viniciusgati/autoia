@@ -191,19 +191,73 @@ def _run_subtask_executor(
                 0.0,
             )
         return outcome
-    if executor == "opencode":
-        return opencode_exec.run_opencode(
+    # Slot de emulador: no máximo `android_max_concurrent` execuções com qemu ao
+    # mesmo tempo, entre TODOS os processos (workers forkados + chamado/chat).
+    # Depois o slot LLM (teto global de executores — protege o provedor contra
+    # 429). Ordem fixa device → llm em todos os caminhos.
+    device_slot = exec_common.acquire_device_slot(
+        sandbox,
+        workspace_dir,
+        getattr(settings, "android_max_concurrent", 0),
+    )
+    llm_slot = exec_common.acquire_llm_slot(
+        workspace_dir, getattr(settings, "llm_max_concurrent", 0)
+    )
+    try:
+        if executor == "opencode":
+            return opencode_exec.run_opencode(
+                prompt,
+                cwd=cwd,
+                opencode_bin=settings.opencode_bin,
+                log_path=log_path,
+                timeout=settings.run_timeout,
+                max_identical_calls=settings.max_identical_calls,
+                risky_patterns=settings.risky_patterns,
+                checkout_path=checkout_path,
+                whitelisted_hosts=settings.whitelisted_hosts,
+                model=model or settings.opencode_model,
+                no_progress_timeout=settings.no_progress_timeout,
+                max_repeated_searches=getattr(settings, "max_repeated_searches", 0),
+                repo_id=repo_id,
+                stop_file=stop_file,
+                task_stop_file=task_stop_file,
+                sandbox=sandbox,
+                workspace_dir=workspace_dir,
+                extra_env=extra_env,
+                on_event=on_event,
+            )
+        if executor == "codex":
+            return codex_exec.run_codex(
+                prompt,
+                cwd=cwd,
+                codex_bin=settings.codex_bin,
+                log_path=log_path,
+                timeout=settings.run_timeout,
+                max_identical_calls=settings.max_identical_calls,
+                risky_patterns=settings.risky_patterns,
+                checkout_path=checkout_path,
+                whitelisted_hosts=settings.whitelisted_hosts,
+                cost_per_interaction=settings.cost_per_interaction,
+                no_progress_timeout=settings.no_progress_timeout,
+                model=model or settings.codex_model or None,
+                repo_id=repo_id,
+                stop_file=stop_file,
+                task_stop_file=task_stop_file,
+                sandbox=sandbox,
+                workspace_dir=workspace_dir,
+                extra_env=extra_env,
+                on_event=on_event,
+            )
+        return kimi_exec.run_kimi(
             prompt,
             cwd=cwd,
-            opencode_bin=settings.opencode_bin,
+            kimi_bin=settings.kimi_bin,
             log_path=log_path,
             timeout=settings.run_timeout,
             max_identical_calls=settings.max_identical_calls,
             risky_patterns=settings.risky_patterns,
             checkout_path=checkout_path,
-            whitelisted_hosts=settings.whitelisted_hosts,
-            model=model or settings.opencode_model,
-            no_progress_timeout=settings.no_progress_timeout,
+            cost_per_interaction=settings.cost_per_interaction,
             max_repeated_searches=getattr(settings, "max_repeated_searches", 0),
             repo_id=repo_id,
             stop_file=stop_file,
@@ -213,47 +267,9 @@ def _run_subtask_executor(
             extra_env=extra_env,
             on_event=on_event,
         )
-    if executor == "codex":
-        return codex_exec.run_codex(
-            prompt,
-            cwd=cwd,
-            codex_bin=settings.codex_bin,
-            log_path=log_path,
-            timeout=settings.run_timeout,
-            max_identical_calls=settings.max_identical_calls,
-            risky_patterns=settings.risky_patterns,
-            checkout_path=checkout_path,
-            whitelisted_hosts=settings.whitelisted_hosts,
-            cost_per_interaction=settings.cost_per_interaction,
-            no_progress_timeout=settings.no_progress_timeout,
-            model=model or settings.codex_model or None,
-            repo_id=repo_id,
-            stop_file=stop_file,
-            task_stop_file=task_stop_file,
-            sandbox=sandbox,
-            workspace_dir=workspace_dir,
-            extra_env=extra_env,
-            on_event=on_event,
-        )
-    return kimi_exec.run_kimi(
-        prompt,
-        cwd=cwd,
-        kimi_bin=settings.kimi_bin,
-        log_path=log_path,
-        timeout=settings.run_timeout,
-        max_identical_calls=settings.max_identical_calls,
-        risky_patterns=settings.risky_patterns,
-        checkout_path=checkout_path,
-        cost_per_interaction=settings.cost_per_interaction,
-        max_repeated_searches=getattr(settings, "max_repeated_searches", 0),
-        repo_id=repo_id,
-        stop_file=stop_file,
-        task_stop_file=task_stop_file,
-        sandbox=sandbox,
-        workspace_dir=workspace_dir,
-        extra_env=extra_env,
-        on_event=on_event,
-    )
+    finally:
+        exec_common.release_slot(llm_slot)
+        exec_common.release_slot(device_slot)
 
 # Arquivos de controle do autoia (não versionados) que NÃO contam como "mudança
 # de código" no guard de re-declaração de subtarefa já implementada.

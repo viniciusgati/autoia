@@ -64,6 +64,47 @@ def test_settings_step_context_recent_phases_env_overrides(monkeypatch):
     assert Settings().step_context_recent_phases == 3
 
 
+def test_settings_proxy_idle_timeout_default(monkeypatch):
+    """Ociosidade do túnel do proxy: 600s por padrão (muito acima dos 30s que
+    matavam chamadas de LLM no meio — regressão da task 195)."""
+    monkeypatch.delenv("AUTOIA_PROXY_IDLE_TIMEOUT", raising=False)
+    assert Settings().sandbox_proxy_idle_timeout == 600
+
+
+def test_settings_proxy_idle_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("AUTOIA_PROXY_IDLE_TIMEOUT", "1800")
+    assert Settings().sandbox_proxy_idle_timeout == 1800
+    monkeypatch.setenv("AUTOIA_PROXY_IDLE_TIMEOUT", "0")  # 0 = sem limite
+    assert Settings().sandbox_proxy_idle_timeout == 0
+
+
+def test_settings_android_max_concurrent_default(monkeypatch):
+    """Slots de emulador Android: 2 execuções com qemu ao mesmo tempo por padrão."""
+    monkeypatch.delenv("AUTOIA_ANDROID_MAX_CONCURRENT", raising=False)
+    assert Settings().android_max_concurrent == 2
+
+
+def test_settings_android_max_concurrent_env_override(monkeypatch):
+    monkeypatch.setenv("AUTOIA_ANDROID_MAX_CONCURRENT", "1")
+    assert Settings().android_max_concurrent == 1
+    monkeypatch.setenv("AUTOIA_ANDROID_MAX_CONCURRENT", "0")  # 0 = sem slots
+    assert Settings().android_max_concurrent == 0
+
+
+def test_settings_llm_max_concurrent_default(monkeypatch):
+    """Teto global de execuções LLM simultâneas: 2 por padrão (medido: 27
+    chamadas/min causaram 429 em cascata; 2–5/min funcionam)."""
+    monkeypatch.delenv("AUTOIA_LLM_MAX_CONCURRENT", raising=False)
+    assert Settings().llm_max_concurrent == 2
+
+
+def test_settings_llm_max_concurrent_env_override(monkeypatch):
+    monkeypatch.setenv("AUTOIA_LLM_MAX_CONCURRENT", "1")
+    assert Settings().llm_max_concurrent == 1
+    monkeypatch.setenv("AUTOIA_LLM_MAX_CONCURRENT", "0")  # 0 = sem teto
+    assert Settings().llm_max_concurrent == 0
+
+
 def _utc(h: int, m: int = 0) -> datetime:
     return datetime(2026, 9, 8, h, m)  # terça-feira (weekday 1)
 
@@ -116,3 +157,16 @@ def test_peak_hours_custom_window(monkeypatch):
     assert s.in_peak_hours(_utc(1, 59))   # fim da janela
     assert not s.in_peak_hours(_utc(21, 59))
     assert not s.in_peak_hours(_utc(2, 0))
+
+
+def test_settings_llm_bg_timeout_default(monkeypatch):
+    """Teto de timeout das gerações LLM pura: 300 s (chamada única de JSON)."""
+    monkeypatch.delenv("AUTOIA_LLM_BG_TIMEOUT", raising=False)
+    assert Settings().llm_bg_timeout == 300
+
+
+def test_settings_llm_bg_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("AUTOIA_LLM_BG_TIMEOUT", "120")
+    assert Settings().llm_bg_timeout == 120
+    monkeypatch.setenv("AUTOIA_LLM_BG_TIMEOUT", "0")  # 0 = usar run_timeout
+    assert Settings().llm_bg_timeout == 0

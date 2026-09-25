@@ -21,6 +21,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timezone
 
 from .. import guardrails
 from .exec_common import (
@@ -33,6 +34,7 @@ from .exec_common import (
     make_stop_watchdog,
     make_watchdog,
     register_proc,
+    stall_reason,
     unregister_proc,
 )
 from .sandbox import SandboxConfig
@@ -60,6 +62,89 @@ _TOOL_NAME_MAP = {
 }
 
 _JSONL_SKIP_TYPES = {"step_start", "event", "shell", "session_start", "session_finish"}
+
+# Marcadores de LIMITAÇÃO do provedor (usage/rate limit, créditos) — espelha o
+# codex_exec. Não é defeito de código nem de infra: a fase deve esperar OU (com
+# contas opencode-go no roster) rotacionar para a próxima conta — o runner trata
+# `provider_limit:` como retry agendado.
+_PROVIDER_LIMIT_MARKERS = (
+    "usage limit",
+    "rate limit",
+    "quota",
+    "credits",
+    "try again at",
+    "too many requests",
+)
+
+
+def _provider_limit_detected(text: str) -> bool:
+    low = text.lower()
+    return any(marker in low for marker in _PROVIDER_LIMIT_MARKERS)
+
+
+def opencode_state_log(env: dict[str, str] | None = None) -> str:
+    """Caminho do log PRÓPRIO do opencode (`$XDG_DATA_HOME/opencode/log/opencode.log`).
+
+    No sandbox, `XDG_DATA_HOME` é o diretório da conta do roster (montado rw);
+    sem conta (host) cai no `~/.local/share/opencode` — também montado.
+    """
+    base = dict(os.environ)
+    if env:
+        base.update(env)
+    home = base.get("HOME") or os.path.expanduser("~")
+    xdg = base.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    return os.path.join(xdg, "opencode", "log", "opencode.log")
+
+
+def _log_ts(line: str) -> float | None:
+    """Epoch de `timestamp=<ISO>` numa linha do log do opencode (None se não houver)."""
+    marker = "timestamp="
+    idx = line.find(marker)
+    if idx < 0:
+        return None
+    raw = line[idx + len(marker):].split()[0]
+    try:
+        return datetime.fromisoformat(raw).timestamp()
+    except ValueError:
+        return None
+
+
+def provider_limit_from_opencode_state(
+    env: dict[str, str] | None,
+    started: float,
+    tail_bytes: int = 512_000,
+) -> str | None:
+    """Procura marcador de COTA DO PROVEDOR no log próprio do opencode.
+
+    `Go usage limit exceeded` (e congêneres) nunca chega ao stdout/stderr da CLI —
+    fica só neste arquivo. Sem varrer aqui, a execução morre silenciosa até o
+    watchdog de "sem progresso" e a rotação de conta do roster nunca dispara
+    (task 195: fase do developer presa ~40 min num limite que já era conhecido).
+
+    Só aceita linhas `level=error` com timestamp posterior ao início DESTA
+    execução — evita reclassificar runs antigos que deixaram o marcador no tail
+    (arquivo compartilhado por todos os processos, sem truncar).
+    """
+    path = opencode_state_log(env)
+    try:
+        size = os.path.getsize(path)
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            fh.seek(max(0, size - tail_bytes))
+            tail = fh.read()
+    except OSError:
+        return None
+    lines = tail.splitlines()
+    if size > tail_bytes and lines:
+        lines = lines[1:]  # primeira linha pode estar cortada pelo seek
+    for line in reversed(lines):
+        low = line.lower()
+        if "level=error" not in low or not _provider_limit_detected(low):
+            continue
+        ts = _log_ts(line)
+        if ts is None or ts < started - 5.0:
+            continue
+        return line.strip()[:400]
+    return None
 
 
 def _tool_call_part(part: dict) -> dict | None:
@@ -215,6 +300,7 @@ def _run_opencode_once(
         cmd += ["-m", model]
     outcome = ExecOutcome()
     outcome.sandbox_mode = sandbox.mode if sandbox else None
+    run_started = time.time()
     log_lock = threading.Lock()
     # cidfile ABSOLUTO: o docker roda com `cwd=checkout` e um caminho relativo
     # (ex.: `data/logs/...`) não existe a partir dali → falha na criação do arquivo.
@@ -272,6 +358,7 @@ def _run_opencode_once(
         seq = 0
         interactions = 0
         final_text = ""
+        saw_stdout = False
         last_call_key: tuple | None = None
         identical_count = 0
         semantic_tracker = guardrails.SemanticLoopTracker(max_repeated_searches)
@@ -299,6 +386,7 @@ def _run_opencode_once(
                 line = line.strip()
                 if not line:
                     continue
+                saw_stdout = True
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
@@ -398,6 +486,12 @@ def _run_opencode_once(
 
                 elif event_type == "error":
                     reason = str(part.get("message") or obj.get("error") or "erro do opencode")
+                    # Limitação do provedor (usage/rate limit, créditos) NÃO é abort
+                    # genérico: o runner trata `provider_limit:` como retomada
+                    # automática (agendada ou com rotação de conta opencode-go).
+                    if _provider_limit_detected(reason):
+                        _persist(EVENT_SYSTEM, {"error": reason})
+                        return _abort(f"provider_limit: {reason}")
                     _persist(EVENT_SYSTEM, {"error": reason})
                     outcome.aborted = True
                     outcome.abort_reason = f"opencode: {reason}"
@@ -429,7 +523,7 @@ def _run_opencode_once(
     elif stalled.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True
-        outcome.abort_reason = f"timeout sem progresso ({no_progress_timeout}s sem saída)"
+        outcome.abort_reason = stall_reason(no_progress_timeout, saw_stdout)
     elif timed_out.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True
@@ -438,6 +532,28 @@ def _run_opencode_once(
     outcome.exit_code = proc.returncode
     outcome.final_text = final_text
     outcome.interaction_count = interactions
+    # Cota do provedor mora SÓ no log próprio do opencode (ver
+    # `provider_limit_from_opencode_state`). Uma execução morta pelo watchdog ou
+    # que saiu não-zero é reclassificada quando há marcador fresco — sem isto o
+    # runner vê "timeout sem progresso" e faz bounce-back em vez de rotacionar a
+    # conta do roster / agendar a retomada (task 195).
+    if outcome.timed_out or (not outcome.aborted and outcome.exit_code not in (0, None)):
+        limit_msg = provider_limit_from_opencode_state(spawn_env, run_started)
+        if limit_msg:
+            outcome.aborted = True
+            outcome.timed_out = False
+            outcome.abort_reason = f"provider_limit: {limit_msg}"
+    # Limitação do provedor sem evento `error` (o CLI sai não-zero com a mensagem
+    # no log/stderr): classifica como `provider_limit:` p/ retomada/rotação.
+    if not outcome.aborted and outcome.exit_code not in (0, None):
+        try:
+            with open(log_path, "r", encoding="utf-8") as lf:
+                _log_tail = lf.read()
+        except OSError:
+            _log_tail = ""
+        if _provider_limit_detected(_log_tail):
+            outcome.aborted = True
+            outcome.abort_reason = f"provider_limit: {_log_tail.strip()[-400:]}"
     if sandbox and sandbox.enabled:
         try:
             cid = open(cidfile, encoding="utf-8").read().strip()

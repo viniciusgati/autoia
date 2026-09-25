@@ -137,6 +137,11 @@ def summarize_step(settings, session_factory, step_id: int) -> bool:
             model=(task.model or "").strip() or None,
             on_event=None,
             kimi_cost_per_interaction=0.0,
+            # Resumo é LLM pura (lê eventos/diff, escreve JSON): não sobe emulador.
+            # Sem este flag cada "O que foi entregue" bootava um emulador Android
+            # completo (qemu ~4 GB / 1 core) só para ler o banco — sobrecarregava o
+            # host e empurrava as execuções reais para o watchdog de 900s.
+            skip_device_bootstrap=True,
         )
 
         data = verdicts.read_step_summary(checkout)

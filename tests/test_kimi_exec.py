@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import subprocess
 import sys
 import time
 
@@ -204,7 +205,50 @@ def test_no_progress_watchdog_aborts_on_silence(tmp_path):
     assert outcome.aborted
     assert outcome.timed_out
     assert "sem progresso" in outcome.abort_reason
+    assert "nenhuma linha no stdout" in outcome.abort_reason  # nunca emitiu nada
     assert elapsed < 20, f"deveria abortar rápido, levou {elapsed:.1f}s"
+
+
+def test_stall_reason_distingue_cli_nao_subida_de_silence_posterior():
+    """O motivo do kill diz SE o executor chegou a falar: sem isso o boot preso do
+    emulador e o hang do LLM produziam a mesma mensagem (task 195)."""
+    from app.worker.exec_common import stall_reason
+
+    with_stdout = stall_reason(900, True)
+    without = stall_reason(900, False)
+    assert with_stdout == "timeout sem progresso (900s sem saída)"
+    assert "sem progresso" in without
+    assert "nenhuma linha no stdout desde o spawn" in without
+    # marcador usado por guardrails/verificação continua presente nos dois
+    assert "sem progresso" in without and "sem progresso" in with_stdout
+
+
+def test_no_progress_watchdog_reset_com_atividade(tmp_path):
+    """Uma linha nova no stdout REINICIA o orçamento do watchdog.
+
+    É o que a sentinela `AUTOIA_BOOTSTRAP_DONE` do bootstrap do sandbox faz: a
+    janela de boot (emulador Android, minutos, só stderr) não pode consumir o
+    orçamento da própria execução — era a causa do `timeout sem progresso (900s)`
+    no meio de fases legítimas (task 195).
+    """
+    from threading import Event
+
+    from app.worker.exec_common import make_no_progress_watchdog
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    last_activity = [time.monotonic()]
+    stalled = Event()
+    stop = make_no_progress_watchdog(2, proc, last_activity, stalled)
+    try:
+        time.sleep(1.4)  # antes do limite de 2s (sem atividade ainda)
+        assert not stalled.is_set()
+        last_activity[0] = time.monotonic()  # equivalente à sentinela do stdout
+        time.sleep(1.2)  # ~2,6s desde o spawn, ~1,2s desde a atividade
+        assert not stalled.is_set(), "atividade no stdout deveria ter reiniciado o relógio"
+    finally:
+        stop.set()
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 def test_kimi_captures_session_id_and_resumes(tmp_path):

@@ -99,6 +99,10 @@ DEFAULT_WHITELISTED_HOSTS: list[str] = [
     # opencode-go (`https://opencode.ai/zen/go/v1/chat/completions`).
     "opencode.ai",
     "api.opencode.ai",
+    # Catálogo/metadados de modelos do próprio opencode — a allowlist é por
+    # hostname EXATO (não há curinga de subdomínio), então precisa da entrada
+    # explícita: sem ela o host era negado com 403 no sandbox full.
+    "models.opencode.ai",
     # Providers de modelo oferecidos no seletor do opencode (fora do opencode-go).
     "api.deepseek.com",
     "api.moonshot.cn",
@@ -321,6 +325,15 @@ class Settings:
     sandbox_proxy_port: int = field(
         default_factory=lambda: _int("AUTOIA_SANDBOX_PROXY_PORT", 18080)
     )
+    # Ociosidade máxima de um TUNNEL (CONNECT) do proxy, em segundos. O streaming
+    # de um LLM pode ficar >30s sem primeiro byte (prompt grande + modelo de
+    # reasoning, host carregado) — fechar o túnel nessa janela mata a chamada e o
+    # executor fica em retry silencioso até o watchdog de "sem progresso"
+    # (task 195: `timeout sem progresso (900s sem saída)` com zero eventos).
+    # 0 = nunca fechar por ociosidade (só por fechamento real das pontas).
+    sandbox_proxy_idle_timeout: int = field(
+        default_factory=lambda: _int("AUTOIA_PROXY_IDLE_TIMEOUT", 600)
+    )
     # Home do usuário do host (dirs de estado das CLIs são montados de lá). Default:
     # expanduser("~"). Útil para ambientes de teste com home isolado.
     sandbox_home: str | None = field(
@@ -330,6 +343,29 @@ class Settings:
     # False -> fallback para execução direta + log de aviso (comportamento transitório).
     sandbox_fail_closed: bool = field(
         default_factory=lambda: _env("AUTOIA_SANDBOX_FAIL_CLOSED", "0") == "1"
+    )
+    # Máximo de execuções CONCORRENTES que sobem um emulador Android dentro do
+    # sandbox (perfil com `bootstrap_extra` do emulador). O `--workers` limita fases
+    # em geral; este limite protege o host contra N qemu simultâneos (~4 GB / 1 core
+    # cada) — a contenção de load/swap atrasava o boot e o primeiro token do LLM e
+    # disparava o watchdog de "sem progresso" (task 195). 0 = sem limite (sem slots).
+    android_max_concurrent: int = field(
+        default_factory=lambda: _int("AUTOIA_ANDROID_MAX_CONCURRENT", 2)
+    )
+    # Teto GLOBAL de execuções LLM simultâneas (fases + missões/resumos/PM/
+    # dispatcher), entre todos os processos. Cada sessão do opencode emite 2
+    # streams (agente + título) e a concorrência dispara 429 do provedor — o
+    # retry imediato do CLI amplifica o próprio pico (medido: 27 chamadas/min
+    # contra 2–5 normais → 17 erros no mesmo minuto). 0 = sem teto.
+    llm_max_concurrent: int = field(
+        default_factory=lambda: _int("AUTOIA_LLM_MAX_CONCURRENT", 2)
+    )
+    # Timeout das gerações LLM PURA (missão/resumo/PM/dispatcher): chamada única
+    # de JSON que normalmente leva segundos. O teto curto evita que uma geração
+    # travada segure um slot do teto global por `run_timeout` (5400 s no repo 4)
+    # e pushe as fases de verdade para trás na fila. 0 = usar `run_timeout`.
+    llm_bg_timeout: int = field(
+        default_factory=lambda: _int("AUTOIA_LLM_BG_TIMEOUT", 300)
     )
     # ── Janela de pico (sem cobrança dupla) ───────────────────────────────────────
     # Durante a janela de pico os workers NÃO reclamam novas execuções (steps de

@@ -121,17 +121,28 @@ class EffectiveSettings:
     verify_retries: int
     keep_workspaces: bool
     sandbox: sandbox_mod.SandboxConfig
+    # Máximo de execuções concorrentes que sobem emulador Android (0 = sem limite).
+    android_max_concurrent: int = 2
+    # Teto global de execuções LLM simultâneas entre processos (0 = sem teto).
+    llm_max_concurrent: int = 2
+    # Timeout das gerações LLM pura — 0 = usar `run_timeout`.
+    llm_bg_timeout: int = 300
     # Diretório da conta opencode-go deste repositório (XDG_DATA_HOME do opencode).
     # None = sem conta pinada/default: o executor usa a conta do host.
     opencode_account_dir: str | None = None
+    # Nome da conta opencode-go em uso nesta execução (None = host). Alimenta a
+    # rotação automática de conta quando a conta esgota (`provider_limit`).
+    opencode_account: str | None = None
 
 
 # Padrão do watchdog "sem progresso" para perfis de toolchain Android: builds
 # instrumentados longos (gradle connectedDebugAndroidTest) ficam >300s sem o
 # executor emitir saída enquanto a tool call roda — o default global mataria a
 # execução no meio da suíte. Aplicado quando o perfil efetivo é Android e o
-# repositório não define o próprio valor.
-ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT = 900
+# repositório não define o próprio valor. O bootstrap do emulador tem janela
+# PRÓPRIA (sentinela `AUTOIA_BOOTSTRAP_DONE` no stdout), então este valor mede
+# só o silêncio do executor.
+ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT = 2400
 _ANDROID_PROFILES = (
     toolchains.PROFILE_ANDROID_COMPOSE_37,
     toolchains.PROFILE_ANDROID_EMULATOR_35,
@@ -186,6 +197,7 @@ def _sandbox_config(settings: Settings, repo: Repository) -> sandbox_mod.Sandbox
         read_only=settings.sandbox_read_only,
         init=settings.sandbox_init,
         proxy_port=settings.sandbox_proxy_port,
+        proxy_idle_timeout=settings.sandbox_proxy_idle_timeout,
         home=settings.sandbox_home,
         # Um perfil de toolchain pinado não pode cair silenciosamente para o
         # host: isso reintroduziria exatamente a divergência que o perfil evita.
@@ -207,13 +219,20 @@ host_services_base=base,
     )
 
 
-def _effective(settings: Settings, repo: Repository, session: Session | None = None) -> EffectiveSettings:
+def _effective(
+    settings: Settings,
+    repo: Repository,
+    session: Session | None = None,
+    opencode_override: str | None = None,
+) -> EffectiveSettings:
     """Merge: configurações do repositório sobrescrevem as globais.
 
     `session` opcional: quando presente, a conta opencode-go do repositório é
     resolvida/materializada (pin > default) e o diretório vira
     `opencode_account_dir` no resultado. Chamadores de worker passam a sessão;
     rotas de leitura (workspace/diffs) deixam `None` (nenhuma I/O em disco no GET).
+    `opencode_override`: rotação fixada na fase (`TaskStep.opencode_account`) — usa
+    EXATAMENTE essa conta, se ainda existir no roster.
     """
     patterns = list(settings.risky_patterns)
     if repo.risky_patterns_extra:
@@ -223,7 +242,7 @@ def _effective(settings: Settings, repo: Repository, session: Session | None = N
                 patterns += extra
         except (json.JSONDecodeError, TypeError):
             pass
-    return EffectiveSettings(
+    eff = EffectiveSettings(
         max_attempts=repo.max_attempts if repo.max_attempts is not None else settings.max_attempts,
         max_pm_decisions=repo.max_pm_decisions if repo.max_pm_decisions is not None else settings.max_pm_decisions,
         run_timeout=repo.run_timeout if repo.run_timeout is not None else settings.run_timeout,
@@ -246,13 +265,18 @@ def _effective(settings: Settings, repo: Repository, session: Session | None = N
         max_repeated_searches=settings.max_repeated_searches,
         verify_retries=settings.verify_retries,
         keep_workspaces=settings.keep_workspaces,
+        android_max_concurrent=settings.android_max_concurrent,
+        llm_max_concurrent=settings.llm_max_concurrent,
+        llm_bg_timeout=settings.llm_bg_timeout,
         sandbox=_sandbox_config(settings, repo),
-        opencode_account_dir=(
-            opencode_accounts.effective_account_dir(settings, session, repo)
-            if session is not None
-            else None
-        ),
     )
+    if session is not None:
+        eff.opencode_account, eff.opencode_account_dir = (
+            opencode_accounts.resolve_account(
+                settings, session, repo, override=opencode_override
+            )
+        )
+    return eff
 
 
 def _effective_no_progress_timeout(settings: Settings, repo: Repository) -> int:
@@ -269,6 +293,22 @@ def _effective_no_progress_timeout(settings: Settings, repo: Repository) -> int:
     if profile_name in _ANDROID_PROFILES:
         return ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT
     return settings.no_progress_timeout
+
+
+def _effective_run_timeout(eff: EffectiveSettings, *, llm_pure: bool) -> int:
+    """Timeout da execução: fases usam `run_timeout`; gerações LLM pura
+    (missão/resumo/PM/dispatcher) usam um teto curto.
+
+    Sem o teto, uma geração travada segura um slot do teto global por
+    `run_timeout` (5400 s no repo 4) e empurra fases de verdade para trás na
+    fila — medido na task 196, esperando 8+ min por um slot ocupado por uma
+    missão da task 195. `llm_bg_timeout = 0` volta ao `run_timeout`.
+    """
+    if not llm_pure:
+        return eff.run_timeout
+    if eff.llm_bg_timeout > 0:
+        return min(eff.run_timeout, eff.llm_bg_timeout)
+    return eff.run_timeout
 
 
 def _effective_step_mode(step: TaskStep, task: Task) -> str:
@@ -1158,7 +1198,9 @@ def _run_executor(
     if sandbox.enabled:
         # Modo full: proxy de egress + liberar o host do remote git (fetch p/ merge).
         if sandbox.mode == sandbox_mod.SANDBOX_FULL:
-            sandbox_mod.ensure_egress_proxy(sandbox.proxy_port, eff.whitelisted_hosts)
+            sandbox_mod.ensure_egress_proxy(
+                sandbox.proxy_port, eff.whitelisted_hosts, sandbox.proxy_idle_timeout
+            )
             try:
                 remote_url = gitops.run_git(cwd, "remote", "get-url", "origin", check=False).stdout.strip()
                 if "://" in remote_url:
@@ -1255,6 +1297,17 @@ def _run_executor(
         gitops.lock_push(cwd)
     except gitops.GitError:
         log.warning("não foi possível bloquear push no checkout %s", cwd, exc_info=True)
+    # Slot de emulador: no máximo `android_max_concurrent` execuções com qemu ao
+    # mesmo tempo, entre TODOS os processos (workers forkados + chamado/chat).
+    # Depois o slot LLM (teto global de executores simultâneos — protege o
+    # provedor contra 429). Ordem fixa device → llm em todos os caminhos.
+    device_slot = exec_common.acquire_device_slot(
+        sandbox, eff.workspace_dir, eff.android_max_concurrent
+    )
+    llm_slot = exec_common.acquire_llm_slot(eff.workspace_dir, eff.llm_max_concurrent)
+    # `skip_device_bootstrap` marca as gerações LLM pura (missão/resumo/PM/
+    # dispatcher): teto de timeout curto para não segurar o slot por horas.
+    run_timeout = _effective_run_timeout(eff, llm_pure=skip_device_bootstrap)
     try:
         if executor == "opencode":
             outcome = opencode_exec.run_opencode(
@@ -1262,7 +1315,7 @@ def _run_executor(
                 cwd=cwd,
                 opencode_bin=eff.opencode_bin,
                 log_path=log_path,
-                timeout=eff.run_timeout,
+                timeout=run_timeout,
                 max_identical_calls=eff.max_identical_calls,
                 risky_patterns=eff.risky_patterns,
                 checkout_path=cwd,
@@ -1285,7 +1338,7 @@ def _run_executor(
                 cwd=cwd,
                 codex_bin=eff.codex_bin,
                 log_path=log_path,
-                timeout=eff.run_timeout,
+                timeout=run_timeout,
                 max_identical_calls=eff.max_identical_calls,
                 risky_patterns=eff.risky_patterns,
                 checkout_path=cwd,
@@ -1312,7 +1365,7 @@ def _run_executor(
                 cwd=cwd,
                 kimi_bin=eff.kimi_bin,
                 log_path=log_path,
-                timeout=eff.run_timeout,
+                timeout=run_timeout,
                 max_identical_calls=eff.max_identical_calls,
                 risky_patterns=eff.risky_patterns,
                 checkout_path=cwd,
@@ -1338,6 +1391,8 @@ def _run_executor(
             outcome.sandbox_scan = sandbox_scan
         return outcome
     finally:
+        exec_common.release_slot(llm_slot)
+        exec_common.release_slot(device_slot)
         try:
             gitops.unlock_push(cwd)
         except gitops.GitError:
@@ -1353,7 +1408,7 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         task = step.task
         repo = task.repository
         base = repo.default_branch
-        eff = _effective(settings, repo, s)
+        eff = _effective(settings, repo, s, opencode_override=step.opencode_account)
         branch = task.branch or f"{eff.branch_prefix}/task-{task.id}"
 
         # Workspace isolado por task — cada task tem seu próprio clone, sem conflito
@@ -1845,6 +1900,20 @@ def _parse_provider_retry_at(reason: str) -> datetime:
     return utcnow() + timedelta(minutes=5)
 
 
+def _next_opencode_account(s: Session, eff: EffectiveSettings, task: Task) -> str | None:
+    """Próxima conta opencode-go da cadeia após a em uso (rotação pós-limite).
+
+    `provider_limit` no executor opencode com conta de roster em uso → a fase
+    tenta a PRÓXIMA conta da cadeia (`account_chain`: pin > default > demais do
+    roster) em vez de só esperar `retry_at`. Retorna o nome da próxima conta, ou
+    None quando não há rotação possível: executor não-opencode, conta do host em
+    uso ou a atual é a última da cadeia (a fase então aguarda como hoje).
+    """
+    if task.executor != "opencode" or eff.opencode_account is None:
+        return None
+    return opencode_accounts.next_account(s, task.repository, eff.opencode_account)
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None, head_before: str | None = None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -1884,19 +1953,36 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         if outcome.aborted:
             if reason.startswith("provider_limit:"):
                 # Limite de uso do provedor (usage/rate limit) NÃO é defeito de
-                # código nem de infra: re-enfileira a fase para retomar SOZINHA
-                # quando o provedor liberar (retry_at no futuro). Não consome
-                # attempt nem faz bounce-back.
-                retry_at = _parse_provider_retry_at(reason)
+                # código nem de infra: re-enfileira a fase — com o executor
+                # opencode e mais contas no roster, TROCA para a próxima conta e
+                # retoma na hora; sem rotação, agenda `retry_at` (retomada
+                # automática quando o provedor liberar). Não consome attempt nem
+                # faz bounce-back.
+                next_acct = _next_opencode_account(s, eff, task)
+                retry_at = None if next_acct else _parse_provider_retry_at(reason)
                 _system_event(
                     s, step, "provider_limit",
-                    {"reason": reason, "retry_at": retry_at.isoformat()},
+                    {
+                        "reason": reason,
+                        "retry_at": retry_at.isoformat() if retry_at else None,
+                        "opencode_account": eff.opencode_account,
+                        "rotated_to": next_acct,
+                    },
                 )
                 task.status = TASK_IN_PROGRESS
                 task.error = None
                 step.status = STEP_PENDING
-                step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
-                step.retry_at = retry_at
+                if next_acct:
+                    step.opencode_account = next_acct
+                    step.retry_at = None
+                    step.error = (
+                        f"limite do provedor na conta {eff.opencode_account} — "
+                        f"tentando conta {next_acct}"
+                    )
+                else:
+                    step.opencode_account = None
+                    step.retry_at = retry_at
+                    step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
                 step.started_at = None
                 step.finished_at = None
                 s.commit()
@@ -1948,6 +2034,45 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         if role in VERDICT_EXPECTED:
             expected = VERDICT_EXPECTED[role]
             if verdict_label != expected:
+                # Veredicto AUSENTE na VERIFICAÇÃO (verify): a validação não avaliou o
+                # código (falha de infraestrutura/executor). Em vez de bounce-back para
+                # o developer (não há defeito a corrigir), passa o veredicto final ao
+                # AVALIADOR (assess) quando ele existe na sequência — ele decide por
+                # revisão de código/diff, sem depender da infraestrutura que quebrou.
+                if (
+                    role == "verify"
+                    and verdict_label is None
+                    and next(
+                        (st for st in _active_steps(task)
+                         if st.position > step.position
+                         and (st.robot.role if st.robot else "") == "assess"),
+                        None,
+                    )
+                    is not None
+                ):
+                    _system_event(
+                        s, step, "verify_inconclusive",
+                        {"reason": "veredicto AUSENTE (esperado PASS)"},
+                    )
+                    step.status = STEP_DONE
+                    step.verdict = "INCONCLUSIVE"
+                    task.current_step = step.position
+                    assess = next(
+                        st for st in _active_steps(task)
+                        if st.position > step.position
+                        and (st.robot.role if st.robot else "") == "assess"
+                    )
+                    assess.status = STEP_PENDING
+                    _system_event(
+                        s, step, "handoff_to_assess",
+                        {"from_position": step.position,
+                         "reason": "veredicto AUSENTE (esperado PASS)",
+                         "next": assess.position,
+                         "robot": assess.robot.name if assess.robot else None},
+                    )
+                    _finish(step)
+                    s.commit()
+                    return None
                 trigger = _handle_failure(
                     eff, s, step, task,
                     f"veredicto {verdict_label or 'AUSENTE'} (esperado {expected})",
@@ -2250,18 +2375,35 @@ def _decide_subtask_implement(
         if abort_reason:
             if abort_reason.startswith("provider_limit:"):
                 # Limite do provedor no meio de uma subtarefa: re-enfileira a fase
-                # (as subtarefas voltam a pendente) para retomar sozinha quando o
-                # provedor liberar — sem consumir tentativas.
-                retry_at = _parse_provider_retry_at(abort_reason)
+                # (as subtarefas voltam a pendente) — com executor opencode e mais
+                # contas no roster, TROCA para a próxima conta e retoma na hora;
+                # sem rotação, agenda `retry_at` (retomada automática). Sem
+                # consumir tentativas.
+                next_acct = _next_opencode_account(s, eff, task)
+                retry_at = None if next_acct else _parse_provider_retry_at(abort_reason)
                 _system_event(
                     s, step, "provider_limit",
-                    {"reason": abort_reason, "retry_at": retry_at.isoformat()},
+                    {
+                        "reason": abort_reason,
+                        "retry_at": retry_at.isoformat() if retry_at else None,
+                        "opencode_account": eff.opencode_account,
+                        "rotated_to": next_acct,
+                    },
                 )
                 task.status = TASK_IN_PROGRESS
                 task.error = None
                 step.status = STEP_PENDING
-                step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
-                step.retry_at = retry_at
+                if next_acct:
+                    step.opencode_account = next_acct
+                    step.retry_at = None
+                    step.error = (
+                        f"limite do provedor na conta {eff.opencode_account} — "
+                        f"tentando conta {next_acct}"
+                    )
+                else:
+                    step.opencode_account = None
+                    step.retry_at = retry_at
+                    step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
                 step.started_at = None
                 step.finished_at = None
                 for su in task.subtasks:
@@ -2446,12 +2588,40 @@ def _decide_subtask_verify(
         if result.startswith("inconclusive:"):
             # Validação não conseguiu avaliar o código (veredicto AUSENTE, timeout,
             # executor morreu) mesmo após retry — NÃO há defeito identificado para
-            # o developer corrigir: pausa com diagnóstico claro (intervenção humana).
+            # o developer corrigir. Em vez de parar em needs_review, o trabalho
+            # passa para a próxima fase se ela for o AVALIADOR (assess) — o robô
+            # que faz o veredicto FINAL por revisão de código/diff, sem depender
+            # da infraestrutura que quebrou a verificação. Só para em intervenção
+            # humana quando não há assessor à frente.
             _system_event(s, step, "verify_inconclusive", {"reason": result})
             reason = (
                 f"validação inconclusiva após retry — sem defeito identificado no "
                 f"código (veredicto ausente/falha de infraestrutura): {result}"
             )
+            assess = next(
+                (
+                    st
+                    for st in _active_steps(task)
+                    if st.position > step.position
+                    and (st.robot.role if st.robot else "") == "assess"
+                ),
+                None,
+            )
+            if assess is not None:
+                step.status = STEP_DONE
+                step.verdict = "INCONCLUSIVE"
+                step.error = reason
+                task.current_step = step.position
+                assess.status = STEP_PENDING
+                _system_event(
+                    s, step, "handoff_to_assess",
+                    {"from_position": step.position, "reason": reason,
+                     "next": assess.position, "robot": assess.robot.name if assess.robot else None},
+                )
+                _finish(step)
+                s.commit()
+                return None
+
             task.status = TASK_NEEDS_REVIEW
             task.error = reason
             step.status = STEP_FAILED
@@ -2518,16 +2688,34 @@ def _decide_subtask_verify(
             return {"task_id": task.id, "reason": task.error}
 
         if result.startswith("provider_limit:"):
-            retry_at = _parse_provider_retry_at(result)
+            # Limite do provedor na verificação: re-enfileira — com executor
+            # opencode e mais contas no roster, rota a conta e retoma na hora;
+            # senão, agenda `retry_at` (retomada automática sem consumir).
+            next_acct = _next_opencode_account(s, eff, task)
+            retry_at = None if next_acct else _parse_provider_retry_at(result)
             _system_event(
                 s, step, "provider_limit",
-                {"reason": result, "retry_at": retry_at.isoformat()},
+                {
+                    "reason": result,
+                    "retry_at": retry_at.isoformat() if retry_at else None,
+                    "opencode_account": eff.opencode_account,
+                    "rotated_to": next_acct,
+                },
             )
             task.status = TASK_IN_PROGRESS
             task.error = None
             step.status = STEP_PENDING
-            step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
-            step.retry_at = retry_at
+            if next_acct:
+                step.opencode_account = next_acct
+                step.retry_at = None
+                step.error = (
+                    f"limite do provedor na conta {eff.opencode_account} — "
+                    f"tentando conta {next_acct}"
+                )
+            else:
+                step.opencode_account = None
+                step.retry_at = retry_at
+                step.error = f"limite do provedor — retomada automática em {retry_at.isoformat()}"
             step.started_at = None
             step.finished_at = None
             s.commit()
@@ -2701,6 +2889,10 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
             repo_id=task.repository_id,
             task_id=task_id,
             skills_dir=skills_dir,
+            # PM é LLM pura (lê o contexto, escreve autoia_verdict.txt com a
+            # decisão): não precisa de device — sem este flag toda decisão de PM
+            # subia um emulador Android no perfil android-emulator-*.
+            skip_device_bootstrap=True,
         )
     finally:
         stop.set()

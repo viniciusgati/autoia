@@ -53,6 +53,7 @@ from .exec_common import (
     make_stop_watchdog,
     make_watchdog,
     register_proc,
+    stall_reason,
     unregister_proc,
 )
 from .sandbox import SandboxConfig
@@ -278,6 +279,7 @@ def _run_codex_stream(
         seq = 0
         interactions = 0
         final_text = ""
+        saw_stdout = False
 
         def _persist(kind: str, payload: dict, cost: float = 0.0) -> str | None:
             nonlocal seq
@@ -300,6 +302,7 @@ def _run_codex_stream(
                 line = line.strip()
                 if not line:
                     continue
+                saw_stdout = True
                 try:
                     obj = json.loads(line)
                 except json.JSONDecodeError:
@@ -418,7 +421,7 @@ def _run_codex_stream(
     elif stalled.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True
-        outcome.abort_reason = f"timeout sem progresso ({no_progress_timeout}s sem saída)"
+        outcome.abort_reason = stall_reason(no_progress_timeout, saw_stdout)
     elif timed_out.is_set() and not outcome.aborted:
         outcome.aborted = True
         outcome.timed_out = True

@@ -419,6 +419,10 @@ def _run_dispatch(settings, eff, session_factory, task_id: int, checkout: str, b
         eff, executor, prompt,
         cwd=checkout, log_path=log_path, model=model,
         on_event=on_event, repo_id=repo_id, task_id=task_id,
+        # Dispatcher é LLM pura (lê estado, escreve autoia_dispatch.json): não
+        # precisa de device — sem este flag cada mensagem de chat subia um
+        # emulador Android no perfil android-emulator-*.
+        skip_device_bootstrap=True,
     )
     decision = verdicts.read_dispatch(checkout)
     verdicts.remove_dispatch(checkout)

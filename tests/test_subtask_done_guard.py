@@ -415,3 +415,89 @@ def test_rededaracao_apos_ausente_nao_e_rejeitada(sub_flow, tmp_path):
     state = _task_state(sub_flow, task_id)
     assert state["subtasks"][0]["status"] == "implemented"
     assert "subtask_done_rejected" not in (state["error"] or "")
+
+
+def _com_avaliador_pipeline(flow) -> int:
+    """Pipeline developer → tester → avaliador (o assess faz o veredicto final)."""
+    client = flow["client"]
+    robots = client.get(f"/api/robots?repository_id={flow['repo_id']}").json()
+    by_name = {r["name"]: r["id"] for r in robots}
+    resp = client.post(
+        "/api/pipelines",
+        json={
+            "name": "guard-assess-pipeline",
+            "repository_id": flow["repo_id"],
+            "steps": [
+                {"position": 0, "robot_id": by_name["developer"]},
+                {"position": 1, "robot_id": by_name["tester"]},
+                {"position": 2, "robot_id": by_name["avaliador"]},
+            ],
+        },
+    )
+    assert resp.status_code == 201, resp.text
+    return resp.json()["id"]
+
+
+def _kimi_inconcluso_assess_pass(tmp_path) -> str:
+    """Fake kimi: implement escreve `autoia_subtasks_done.json` ([1]); verify sai
+    SEM veredicto (AUSENTE → inconclusivo → encaminha ao assessor); o assessor
+    (fase com 'AVALIAÇÃO FINAL' no prompt) emite PASS — decide o veredicto final
+    por revisão de código/diff."""
+    script = tmp_path / f"kimi_inconcl_assess_{len(list(tmp_path.glob('kimi_inconcl_assess_*')))}"
+    script.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys, json\n"
+        "print(json.dumps({'role': 'assistant', 'content': 'ok'}))\n"
+        "sys.stdout.flush()\n"
+        "import os\n"
+        "prompt = sys.argv[sys.argv.index('-p') + 1] if '-p' in sys.argv else ''\n"
+        "if 'AVALIAÇÃO FINAL' in prompt.upper():\n"
+        "    with open('autoia_verdict.txt', 'w') as f:\n"
+        "        f.write('PASS\\nSUMMARY: avaliação por revisão de código; infra não permitiu teste dinâmico')\n"
+        "elif 'VEREDICTO' in prompt.upper():\n"
+        "    pass  # verify: exit 0, sem autoia_verdict.txt (inconclusiva)\n"
+        "else:\n"
+        "    with open('autoia_subtasks_done.json', 'w') as f:\n"
+        "        f.write('[1]')\n"
+    )
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return str(script)
+
+
+def test_inconclusivo_com_avaliador_adiante_pass_ao_assess(sub_flow, tmp_path):
+    """Verificação inconclusiva (veredicto AUSENTE após retry) com AVALIADOR na
+    sequência: o pipeline passa o trabalho ao assessor (que faz o veredicto final
+    por revisão de código/diff) em vez de parar em needs_review. O assessor decide
+    PASS/FAIL; aqui emite PASS e a task conclui com merge."""
+    settings = sub_flow["settings"]
+    settings.kimi_bin = _kimi_inconcluso_assess_pass(tmp_path)
+    settings.task_budget = 100.0
+    settings.verify_retries = 1
+    task_id = _start_task(sub_flow, _com_avaliador_pipeline(sub_flow))
+
+    # implement: declaração aceita → implementada
+    _claim_and_execute(sub_flow)
+    # verify: AUSENTE 2x (1 retry) → inconclusivo → encaminha ao assessor
+    _claim_and_execute(sub_flow)
+
+    state = _task_state(sub_flow, task_id)
+    # NÃO parou em needs_review: verify concluiu e o assessor ficou pending
+    assert state["status"] == "in_progress"
+    assert state["steps"][1]["status"] == "done"
+    assert state["steps"][2]["status"] == "pending"
+
+    # auditoria: verify_inconclusive + handoff explícito ao assessor
+    from app.models import Task
+
+    with sub_flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        verify_step = sorted(t.steps, key=lambda x: x.position)[1]
+        kinds = [e.kind for e in verify_step.events]
+        assert "verify_inconclusive" in kinds
+        assert "handoff_to_assess" in kinds
+
+    # assessor roda (fake escreve PASS) → task conclui com merge
+    _claim_and_execute(sub_flow)
+    state = _task_state(sub_flow, task_id)
+    assert state["status"] == "done"
+    assert state["steps"][2]["status"] == "done"

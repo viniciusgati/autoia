@@ -111,6 +111,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         # Próximo instante em que a fase pode ser reclamada (retry após limite
         # de uso do provedor): o claim ignora steps com retry_at no futuro.
         ("retry_at", "DATETIME"),
+        # Conta opencode-go fixada na fase (rotação automática pós-provider_limit).
+        ("opencode_account", "VARCHAR(100)"),
     ],
     "pipeline_steps": [
         ("post_merge", "BOOLEAN DEFAULT 0 NOT NULL"),

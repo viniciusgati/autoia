@@ -327,10 +327,13 @@ def test_cleanup_remove_apenas_concluidas_antigas(bench_settings):
 
 def test_effective_no_progress_timeout_android_auto_policy():
     """O watchdog "sem progresso" efetivo segue: repo explícito > auto-policy
-    Android (900s) > global. Repo não-Android sem valor usa o global."""
+    Android > global. Repo não-Android sem valor usa o global."""
     from types import SimpleNamespace
 
-    from app.worker.runner import _effective_no_progress_timeout
+    from app.worker.runner import (
+        ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT,
+        _effective_no_progress_timeout,
+    )
 
     base = SimpleNamespace(
         no_progress_timeout=None,
@@ -341,13 +344,14 @@ def test_effective_no_progress_timeout_android_auto_policy():
     # Repo não-Android sem valor explícito: herda o global.
     assert _effective_no_progress_timeout(settings, base) == 300
 
-    # Perfil Android efetivo (do repo): auto-policy de 900s.
+    # Perfil Android efetivo (do repo): auto-policy própria (maior que o
+    # global — suítes instrumentadas ficam minutos sem saída do executor).
     android_repo = SimpleNamespace(no_progress_timeout=None, sandbox_profile="android-emulator-35")
-    assert _effective_no_progress_timeout(settings, android_repo) == 900
+    assert _effective_no_progress_timeout(settings, android_repo) == ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT
 
     # Perfil Android global (repo herda): auto-policy também vale.
     android_settings = SimpleNamespace(no_progress_timeout=300, sandbox_profile="android-compose-37")
-    assert _effective_no_progress_timeout(android_settings, base) == 900
+    assert _effective_no_progress_timeout(android_settings, base) == ANDROID_NO_PROGRESS_TIMEOUT_DEFAULT
 
     # Valor explícito do repo prevalece (inclusive 0 = desliga o watchdog).
     custom = SimpleNamespace(no_progress_timeout=1500, sandbox_profile="android-emulator-35")
@@ -355,3 +359,27 @@ def test_effective_no_progress_timeout_android_auto_policy():
     disabled = SimpleNamespace(no_progress_timeout=0, sandbox_profile="android-emulator-35")
     assert _effective_no_progress_timeout(settings, disabled) == 0
 
+
+
+def test_effective_run_timeout_liga_teto_curto_solo_pra_llm_pura():
+    """Fases usam `run_timeout`; missão/resumo/PM/dispatcher usam o teto curto —
+    senão uma geração travada segura um slot do teto global por horas e empurra
+    fases de verdade na fila (task 196 esperando 8+ min por um slot)."""
+    from types import SimpleNamespace
+
+    from app.worker.runner import _effective_run_timeout
+
+    eff = SimpleNamespace(run_timeout=5400, llm_bg_timeout=300)
+
+    # Fase normal: timeout cheio (repo 4 = 5400 s).
+    assert _effective_run_timeout(eff, llm_pure=False) == 5400
+    # Geração LLM pura: teto curto.
+    assert _effective_run_timeout(eff, llm_pure=True) == 300
+    # Teto maior que o timeout da fase não estende nada.
+    assert _effective_run_timeout(
+        SimpleNamespace(run_timeout=120, llm_bg_timeout=300), llm_pure=True
+    ) == 120
+    # `llm_bg_timeout = 0` desliga o teto (volta ao run_timeout).
+    assert _effective_run_timeout(
+        SimpleNamespace(run_timeout=5400, llm_bg_timeout=0), llm_pure=True
+    ) == 5400

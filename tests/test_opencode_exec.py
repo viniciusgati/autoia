@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import stat
+import time
 
 import pytest
 
@@ -297,3 +298,173 @@ def test_resume_ok_nao_faz_fallback(tmp_path):
     argv = (cwd / "argv.txt").read_text().split()
     assert "--session" in argv
     assert argv.count("--session") == 1
+
+
+def test_error_event_quota_classificado_como_provider_limit(tmp_path):
+    """Evento `error` com marca de limitação do provedor (usage limit de uma conta
+    opencode-go esgotada) vira `provider_limit:` — o runner agenda retomada ou
+    ROTACIONA para a próxima conta, em vez de tratar como defeito de código."""
+    lines = [
+        _text("começando"),
+        {"type": "error", "part": {"type": "error", "message": "You've hit your usage limit. Upgrade to Pro."}},
+    ]
+    outcome, events, _ = _run(tmp_path, lines)
+    assert outcome.aborted
+    assert outcome.abort_reason.startswith("provider_limit:")
+    sys_events = [p["error"] for k, p, _ in events if k == "system" and "error" in p]
+    assert sys_events and "usage limit" in sys_events[0]
+
+
+def test_error_event_normal_nao_e_provider_limit(tmp_path):
+    """Erro genérico do opencode continua sendo abort normal (`opencode:`), não
+    provider_limit."""
+    lines = [
+        _text("x"),
+        {"type": "error", "part": {"type": "error", "message": "Internal server error"}},
+    ]
+    outcome, _, _ = _run(tmp_path, lines)
+    assert outcome.aborted
+    assert outcome.abort_reason.startswith("opencode:")
+    assert "provider_limit" not in outcome.abort_reason
+
+
+def test_saida_nao_zero_com_quota_no_log_classificada_provider_limit(tmp_path):
+    """Sem evento `error` (o CLI morre com status != 0 escrevendo a limitação no
+    log/stderr), o fallback pós-run classifica `provider_limit:`."""
+    fake = tmp_path / "fake_quota"
+    fake.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "print('step-start')\n"
+        "sys.stdout.flush()\n"
+        "sys.stderr.write('quota exceeded, try again at 08:00 PM\\n')\n"
+        "sys.exit(1)\n"
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+
+    def on_event(kind, payload, cost):
+        return None
+
+    outcome = opencode_exec.run_opencode(
+        "prompt-x", cwd=str(cwd), opencode_bin=str(fake),
+        log_path=str(tmp_path / "run.log"), timeout=30,
+        max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        on_event=on_event,
+    )
+    assert outcome.exit_code == 1
+    assert outcome.aborted
+    assert outcome.abort_reason.startswith("provider_limit:")
+
+
+# ---------------------------------------------------------------------------
+# Cota do provedor no log PRÓPRIO do opencode (task 195)
+# ---------------------------------------------------------------------------
+
+
+def _estado(tmp_path, linhas: list[str]) -> str:
+    log_dir = tmp_path / "opencode" / "log"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    (log_dir / "opencode.log").write_text("".join(l + "\n" for l in linhas))
+    return str(tmp_path)
+
+
+def test_opencode_state_log_usa_xdg_e_cai_no_home():
+    assert opencode_exec.opencode_state_log({"HOME": "/home/x"}) == (
+        "/home/x/.local/share/opencode/log/opencode.log"
+    )
+    assert opencode_exec.opencode_state_log({"HOME": "/h", "XDG_DATA_HOME": "/acc"}) == (
+        "/acc/opencode/log/opencode.log"
+    )
+    assert opencode_exec.opencode_state_log({"XDG_DATA_HOME": "/acc"}) == (
+        "/acc/opencode/log/opencode.log"
+    )
+
+
+def test_provider_limit_detecta_erro_fresco(tmp_path):
+    """`Go usage limit exceeded` recente no log do opencode → classificado."""
+    from datetime import datetime, timezone
+
+    agora = datetime.now(timezone.utc).isoformat()
+    xdg = _estado(tmp_path, [
+        f'timestamp={agora} level=ERROR run=a message="stream error" '
+        'error.error="AI_APICallError: Go usage limit exceeded"',
+    ])
+    msg = opencode_exec.provider_limit_from_opencode_state(
+        {"XDG_DATA_HOME": xdg}, started=time.time() - 10
+    )
+    assert msg is not None
+    assert "usage limit" in msg
+
+
+def test_provider_limit_ignora_erro_antigo_ou_de_outro_nivel(tmp_path):
+    """O arquivo é compartilhado por todos os processos e nunca é truncado: só
+    aceitamos `level=error` com timestamp DEPOIS do início do run atual."""
+    from datetime import datetime, timezone, timedelta
+
+    antigo = (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat()
+    xdg = _estado(tmp_path, [
+        f'timestamp={antigo} level=ERROR run=velho error.error="Go usage limit exceeded"',
+        f'timestamp={antigo} level=INFO run=velho message="quota" ',
+    ])
+    assert opencode_exec.provider_limit_from_opencode_state(
+        {"XDG_DATA_HOME": xdg}, started=time.time() - 10
+    ) is None
+
+
+def test_provider_limit_sem_arquivo_retorna_none(tmp_path):
+    assert opencode_exec.provider_limit_from_opencode_state(
+        {"XDG_DATA_HOME": str(tmp_path / "nao-existe")}, started=time.time()
+    ) is None
+
+
+def _hang_fake(tmp_path) -> str:
+    """CLI que NÃO emite nada no stdout (simula o opencode silencioso na cota)."""
+    fake = tmp_path / "fake_opencode_silent"
+    fake.write_text("#!/usr/bin/env python3\nimport time\ntime.sleep(30)\n")
+    fake.chmod(fake.stat().st_mode | stat.S_IEXEC)
+    return str(fake)
+
+
+def test_run_opencode_reclassifica_stall_como_provider_limit(tmp_path):
+    """O hang silencioso de cota vira `provider_limit:` (não 'timeout sem
+    progresso') — assim o runner rotaciona a conta do roster em vez de
+    bounce-back (task 195: fase do developer presa ~40 min)."""
+    from datetime import datetime, timezone
+
+    agora = datetime.now(timezone.utc).isoformat()
+    xdg = _estado(tmp_path, [
+        f'timestamp={agora} level=ERROR run=a message="stream error" '
+        'error.error="AI_APICallError: Go usage limit exceeded"',
+    ])
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+
+    outcome = opencode_exec.run_opencode(
+        "prompt-x", cwd=str(cwd), opencode_bin=_hang_fake(tmp_path),
+        log_path=str(tmp_path / "run.log"), timeout=30,
+        max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        no_progress_timeout=1,
+        extra_env={"XDG_DATA_HOME": xdg},
+        on_event=lambda *a: None,
+    )
+    assert outcome.aborted
+    assert outcome.abort_reason.startswith("provider_limit:")
+    assert "usage limit" in outcome.abort_reason
+
+
+def test_run_opencode_stall_sem_cota_continua_sendo_timeout(tmp_path):
+    """Sem marcador de cota fresco, o silêncio continua sendo 'sem progresso'."""
+    cwd = tmp_path / "checkout"
+    cwd.mkdir(exist_ok=True)
+    outcome = opencode_exec.run_opencode(
+        "prompt-x", cwd=str(cwd), opencode_bin=_hang_fake(tmp_path),
+        log_path=str(tmp_path / "run2.log"), timeout=30,
+        max_identical_calls=3, risky_patterns=[], checkout_path=str(cwd),
+        no_progress_timeout=1,
+        extra_env={"XDG_DATA_HOME": str(tmp_path / "vazio")},
+        on_event=lambda *a: None,
+    )
+    assert outcome.aborted
+    assert "sem progresso" in outcome.abort_reason

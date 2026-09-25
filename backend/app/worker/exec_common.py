@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import signal
 import subprocess
@@ -131,6 +132,100 @@ def task_stop_path(workspace_dir: str, task_id: int) -> str:
     return os.path.join(workspace_dir, f".stop-task-{task_id}")
 
 
+# ---------------------------------------------------------------------------
+# Slots de execução (semáforo entre PROCESSOS) — emulador Android e LLM
+# ---------------------------------------------------------------------------
+
+def needs_emulator_slot(sandbox: SandboxConfig | None) -> bool:
+    """True quando a execução vai subir um EMULADOR dentro do container.
+
+    O `bootstrap_extra` é o bootstrap do emulador (`toolchains._EMULATOR_BOOTSTRAP`);
+    só ele consome o recurso escasso (qemu ~4 GB + KVM + CPU do host). Execuções
+    com `skip_device_bootstrap` (resumo/missão/PM/dispatcher — LLM pura) e perfis
+    sem emulador não entram aqui.
+    """
+    return bool(
+        sandbox is not None
+        and sandbox.enabled
+        and getattr(sandbox, "bootstrap_extra", "")
+    )
+
+
+def _acquire_slot(kind: str, workspace_dir: str | None, limit: int) -> object | None:
+    """Segura um slot de `workspace_dir/.<kind>-slots/<n>.lock` (flock exclusivo).
+
+    Semáforo entre PROCESSOS: o worker roda N processos forkados e há ainda os
+    workers de chamado/chat — um `threading.Semaphore` não os cobre. Liberado
+    sozinho se o processo morrer. `limit <= 0` ou sem workspace = sem slot.
+    """
+    if limit <= 0 or not workspace_dir:
+        return None
+    slot_dir = os.path.join(workspace_dir, f".{kind}-slots")
+    try:
+        os.makedirs(slot_dir, exist_ok=True)
+    except OSError:
+        # Sem como criar os locks → não segura a fase por causa disso.
+        return None
+    while True:
+        for index in range(limit):
+            try:
+                fh = open(os.path.join(slot_dir, f"{index}.lock"), "a+")
+            except OSError:
+                continue
+            try:
+                fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                fh.close()
+                continue
+            return fh
+        # Todos ocupados: espera e tenta de novo (o próximo é liberado quando uma
+        # execução terminar — cada fase tem `run_timeout`).
+        time.sleep(1.0)
+
+
+def acquire_device_slot(
+    sandbox: SandboxConfig | None,
+    workspace_dir: str | None,
+    limit: int,
+) -> object | None:
+    """Slot de execução COM emulador (liberar com `release_slot`).
+
+    Só quando `needs_emulator_slot`: sem emulador, `limit <= 0` ou sem workspace
+    devolve `None`. A espera é segura — o heartbeat do worker e o processamento
+    de `.stop-*` rodam em outra thread, iniciada antes de `execute_step`.
+    """
+    if not needs_emulator_slot(sandbox):
+        return None
+    return _acquire_slot("device", workspace_dir, limit)
+
+
+def acquire_llm_slot(workspace_dir: str | None, limit: int) -> object | None:
+    """Slot de execução LLM (liberar com `release_slot`) — TETO GLOBAL de
+    executores simultâneos (fases + missões/resumos/PM/dispatcher).
+
+    Protege o provedor: cada sessão do opencode emite 2 streams (agente +
+    título) e a concorrência dispara 429 (`Rate limit exceeded`) — o retry
+    imediato do CLI amplifica o próprio pico (medido: 27 chamadas/min vs. 2–5
+    normais → 17 erros no mesmo minuto). A ordem de aquisição é SEMPRE device →
+    llm (consistente em todos os caminhos, sem ciclo).
+    """
+    return _acquire_slot("llm", workspace_dir, limit)
+
+
+def release_slot(handle: object | None) -> None:
+    """Libera um slot obtido por `acquire_*_slot` (no-op com `None`)."""
+    if handle is None:
+        return
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)  # type: ignore[attr-defined]
+    except (OSError, ValueError):
+        pass
+    try:
+        handle.close()  # type: ignore[attr-defined]
+    except OSError:
+        pass
+
+
 @dataclass
 class ExecOutcome:
     """Resultado de uma execução do robô (kimi ou opencode)."""
@@ -190,6 +285,22 @@ def make_watchdog(timeout: int, proc: subprocess.Popen) -> tuple[threading.Timer
     return timer, timed_out
 
 
+def stall_reason(stall_seconds: int, saw_stdout: bool) -> str:
+    """Motivo legível do kill por "sem progresso".
+
+    `saw_stdout=False` é o caso da task 195: o processo viveu todo o orçamento
+    sem emitir NENHUMA linha — CLI que não subiu, bootstrap preso ou chamada de
+    LLM travada antes do primeiro evento. Sem essa distinção o diagnóstico era
+    ambíguo (boot do emulador e hang do executor pareciam idênticos).
+    """
+    if saw_stdout:
+        return f"timeout sem progresso ({stall_seconds}s sem saída)"
+    return (
+        f"timeout sem progresso ({stall_seconds}s sem saída — nenhuma linha no "
+        "stdout desde o spawn: CLI ou bootstrap não subiu)"
+    )
+
+
 def make_no_progress_watchdog(
     stall_seconds: int,
     proc: subprocess.Popen,
@@ -201,8 +312,13 @@ def make_no_progress_watchdog(
 
     Cobre casos de hang do CLI/LLM (ex.: kimi estagnado em reasoning) que o timeout
     total só pegaria no fim. Retorna um `Event` de parada p/ o chamador cancelar.
+
+    O intervalo de checagem é no máximo 5s e, para valores pequenos, proporcional
+    ao próprio limite (senão um `stall_seconds=1` só dispararia em 5s e os testes
+    de watchdog não conseguiriam discriminar).
     """
     stop = threading.Event()
+    poll = max(0.1, min(5.0, stall_seconds / 2.0))
 
     def _watch() -> None:
         while not stop.is_set():
@@ -210,7 +326,7 @@ def make_no_progress_watchdog(
                 stalled.set()
                 kill_group(proc)
                 return
-            stop.wait(timeout=5)
+            stop.wait(timeout=poll)
 
     t = threading.Thread(target=_watch, daemon=True, name="no-progress-watchdog")
     t.start()

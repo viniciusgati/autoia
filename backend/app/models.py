@@ -589,6 +589,10 @@ class TaskStep(Base):
     # a `pending` com `retry_at` no futuro — o claim ignora até passar — e a task
     # retoma SOZINHA quando o provedor libera. NULL = sem espera.
     retry_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    # Conta opencode-go fixada para a PRÓXIMA execução desta fase (rotação
+    # automática após `provider_limit:` na conta em uso — só executor `opencode`).
+    # None = começa a cadeia do repositório (pin > default > restante do roster).
+    opencode_account: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Fase substituída por uma mudança de pipeline (`change-pipeline`): fica ARQUIVADA
     # (histórico/RunEvent preservado), mas é ignorada pelo worker e pela UI atual.
     archived: Mapped[bool] = mapped_column(Boolean, default=False)

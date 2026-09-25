@@ -357,8 +357,35 @@ def test_egress_proxy_denies_unknown_host():
         sb.stop_egress_proxy()
 
 
+def test_egress_proxy_nao_permite_loopback_por_padrao():
+    """`127.0.0.1`/`localhost` NÃO estão na allowlist.
+
+    No modo `full` o proxy resolve o loopback no HOST (não no contêiner), então
+    liberá-los em qualquer porta deixava o container alcançar qualquer serviço
+    local do host (banco, API interna). O tráfego local do próprio contêiner não
+    passa do proxy: `_container_env` define `NO_PROXY` com o loopback.
+    """
+    import socket
+
+    sb.stop_egress_proxy()
+    sb._proxy_allowlist.clear()
+    sb._proxy_allowlist.update(sb._DEFAULT_PROXY_HOSTS)
+    port = _start_proxy()
+    try:
+        s = socket.create_connection(("127.0.0.1", port), timeout=3)
+        s.sendall(b"CONNECT 127.0.0.1:5432 HTTP/1.1\r\nHost: 127.0.0.1:5432\r\n\r\n")
+        resp = s.recv(1024).decode(errors="replace")
+        assert "403" in resp.split("\r\n")[0]
+        s.close()
+    finally:
+        sb.stop_egress_proxy()
+
+
 def test_egress_proxy_http_forward_allowlisted(tmp_path):
-    """HTTP forward via proxy para host permitido funciona (servidor local)."""
+    """HTTP forward via proxy para host permitido funciona (servidor local).
+
+    O loopback precisa de opt-in explícito na allowlist (fora do default).
+    """
     import http.server
     import socketserver
     import threading
@@ -380,8 +407,11 @@ def test_egress_proxy_http_forward_allowlisted(tmp_path):
         t.start()
 
         sb.stop_egress_proxy()
-        # permite 127.0.0.1 com a porta do alvo (default já inclui loopback)
-        port = _start_proxy()
+        sb._proxy_allowlist.clear()
+        sb._proxy_allowlist.update(sb._DEFAULT_PROXY_HOSTS)
+        port = sb.ensure_egress_proxy(
+            0, whitelist=["registry.npmjs.org", "127.0.0.1"]
+        )
         try:
             proxy_handler = urllib.request.ProxyHandler({
                 "http": f"http://127.0.0.1:{port}",
@@ -393,6 +423,330 @@ def test_egress_proxy_http_forward_allowlisted(tmp_path):
         finally:
             sb.stop_egress_proxy()
             target.shutdown()
+
+
+# ---------------------------------------------------------------------------
+# Ociosidade do túnel (CONNECT) — regressão do "timeout sem progresso (900s)"
+# ---------------------------------------------------------------------------
+
+
+def _slow_target(delay: float):
+    """Servidor TCP que lê o request e só responde depois de `delay` segundos."""
+    import socket
+    import threading
+
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", 0))
+    srv.listen(5)
+    port = srv.getsockname()[1]
+
+    def serve():
+        try:
+            conn, _ = srv.accept()
+        except OSError:
+            return
+        try:
+            conn.recv(65536)
+            time.sleep(delay)
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return srv, port
+
+
+def _tunnel_request(proxy_port: int, host: str, port: int, timeout: float) -> str:
+    """CONNECT + POST pelo proxy; devolve a resposta (string vazia se fechado)."""
+    import socket
+
+    s = socket.create_connection(("127.0.0.1", proxy_port), timeout=timeout)
+    try:
+        s.sendall(
+            f"CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n".encode()
+        )
+        head = s.recv(1024).decode(errors="replace")
+        if "200" not in head.split("\r\n")[0]:
+            return ""
+        s.sendall(
+            b"POST /v1/chat HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\nping"
+        )
+        chunks = []
+        while True:
+            data = s.recv(4096)
+            if not data:
+                break
+            chunks.append(data)
+        return b"".join(chunks).decode(errors="replace")
+    finally:
+        s.close()
+
+
+def test_egress_proxy_tunel_sobrevive_ociosidade_curta():
+    """O túnel NÃO é fechado por ociosidade curta.
+
+    Um LLM pode demorar vários segundos (prompt grande + reasoning) até o
+    primeiro byte. O default antigo de 30s fechava o túnel no meio da chamada e o
+    executor ficava em retry silencioso até o watchdog de "sem progresso"
+    (task 195: `timeout sem progresso (900s sem saída)` com zero eventos).
+    """
+    sb.stop_egress_proxy()
+    sb._proxy_allowlist.clear()
+    sb._proxy_allowlist.update(sb._DEFAULT_PROXY_HOSTS)
+    proxy_port = sb.ensure_egress_proxy(0, whitelist=["127.0.0.1"], idle_timeout=30)
+    srv, target_port = _slow_target(delay=3.0)
+    try:
+        body = _tunnel_request(proxy_port, "127.0.0.1", target_port, timeout=15)
+        assert "200" in body
+        assert body.endswith("ok")
+    finally:
+        sb.stop_egress_proxy()
+        srv.close()
+
+
+def test_egress_proxy_tunel_fecha_apos_idle_e_registra_log(caplog):
+    """Com `AUTOIA_PROXY_IDLE_TIMEOUT` atingido, o túnel é fechado E logado —
+    antes o fechamento era silencioso (impossível diagnosticar o hang do executor)."""
+    import logging
+
+    sb.stop_egress_proxy()
+    sb._proxy_allowlist.clear()
+    sb._proxy_allowlist.update(sb._DEFAULT_PROXY_HOSTS)
+    proxy_port = sb.ensure_egress_proxy(0, whitelist=["127.0.0.1"], idle_timeout=1)
+    srv, target_port = _slow_target(delay=30.0)
+    try:
+        with caplog.at_level(logging.WARNING, logger="autoia.worker.sandbox"):
+            body = _tunnel_request(proxy_port, "127.0.0.1", target_port, timeout=15)
+        assert body == ""  # conexão fechada antes da resposta
+        assert any("ocioso por" in r.message for r in caplog.records)
+    finally:
+        sb.stop_egress_proxy()
+        srv.close()
+
+
+def test_egress_proxy_idle_timeout_volta_ao_default_no_stop():
+    """`stop_egress_proxy` restaura a ociosidade default (isolamento entre testes
+    e entre execuções do worker)."""
+    sb.stop_egress_proxy()
+    sb.ensure_egress_proxy(0, idle_timeout=1)
+    assert sb._proxy_idle_timeout == 1
+    sb.stop_egress_proxy()
+    assert sb._proxy_idle_timeout == sb._DEFAULT_PROXY_IDLE_TIMEOUT
+
+
+def test_egress_server_handle_error_sem_traceback(caplog):
+    """Conexão derrubada pelo cliente vira UMA linha em DEBUG.
+
+    O `handle_error` padrão do socketserver imprimia ~10 linhas de traceback por
+    conexão de keep-alive perdida — o worker.log crescia ~230 MB/dia e afogava os
+    avisos reais (task 195).
+    """
+    import logging
+
+    server = sb._EgressServer(("127.0.0.1", 0), sb._EgressHandler)
+    try:
+        with caplog.at_level(logging.DEBUG, logger="autoia.worker.sandbox"):
+            try:
+                raise ConnectionResetError(104, "Connection reset by peer")
+            except ConnectionResetError:
+                server.handle_error(None, ("172.17.0.2", 41926))
+    finally:
+        server.server_close()
+    linhas = [r for r in caplog.records if "desconectou" in r.message]
+    assert len(linhas) == 1
+    assert "Traceback" not in caplog.text
+    assert "172.17.0.2" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# NO_PROXY do container + sentinela do bootstrap
+# ---------------------------------------------------------------------------
+
+
+def test_container_env_full_nao_manda_loopback_no_proxy():
+    env = sb.runtime_environment(sb.SandboxConfig(mode="full", proxy_port=18081))
+    assert env["HTTP_PROXY"] == "http://host.docker.internal:18081"
+    assert env["NO_PROXY"] == sb.NO_PROXY_LOCAL
+    assert env["no_proxy"] == sb.NO_PROXY_LOCAL
+    assert "127.0.0.1" in env["NO_PROXY"]
+    # serviços do host continuam pelo proxy (allowlist), fora do NO_PROXY
+    assert "host.docker.internal" not in env["NO_PROXY"]
+
+
+def test_container_env_off_e_fs_sem_proxy():
+    for mode in ("off", "fs"):
+        env = sb.runtime_environment(sb.SandboxConfig(mode=mode))
+        assert "HTTP_PROXY" not in env
+        assert "NO_PROXY" not in env
+
+
+def test_build_sandbox_command_sentinela_do_bootstrap_antes_da_cli(tmp_path):
+    """O bootstrap emite `AUTOIA_BOOTSTRAP_DONE` no STDOUT antes da CLI: o boot do
+    emulador escreve só em stderr e o watchdog de "sem progresso" mede silêncio no
+    stdout desde o spawn — sem a sentinela a janela de boot consumia o orçamento
+    da própria execução (task 195)."""
+    checkout = str(tmp_path / "checkout")
+    ws = str(tmp_path / "ws")
+    os.makedirs(checkout)
+    os.makedirs(ws)
+    cfg = _cfg(
+        "full",
+        image="autoia-android-emu:2026-09",
+        profile="android-emulator-35",
+        environment={"AUTOIA_TOOLCHAIN_PROFILE": "android-emulator-35", "AUTOIA_ANDROID_EMULATOR": "1"},
+        bootstrap_extra='if [ "${AUTOIA_ANDROID_EMULATOR:-}" = "1" ]; then\n  echo boot\nfi\n',
+    )
+    cmd = sb.build_sandbox_command(
+        ["opencode", "run", "x", "--format", "json"], config=cfg,
+        checkout=checkout, workspace_dir=ws, cli_bin="/usr/bin/opencode",
+    )
+    joined = " ".join(cmd)
+    assert sb.BOOTSTRAP_SENTINEL in joined
+    assert joined.index(sb.BOOTSTRAP_SENTINEL) < joined.index('exec "$@"')
+
+
+# ---------------------------------------------------------------------------
+# Slots de execução com emulador (semáforo entre processos)
+# ---------------------------------------------------------------------------
+
+
+def _emu_cfg(**kw) -> sb.SandboxConfig:
+    return sb.SandboxConfig(mode="full", bootstrap_extra="echo boot\n", **kw)
+
+
+def test_needs_emulator_slot_so_quando_sobe_emulador():
+    assert exec_common.needs_emulator_slot(_emu_cfg()) is True
+    # sem bootstrap de emulador (resumo/missão/PM = LLM pura) → não ocupa slot
+    assert exec_common.needs_emulator_slot(sb.SandboxConfig(mode="full")) is False
+    # perfil genérico / sandbox desligado → não ocupa slot
+    assert exec_common.needs_emulator_slot(sb.SandboxConfig(mode="off", bootstrap_extra="x")) is False
+    assert exec_common.needs_emulator_slot(None) is False
+
+
+def test_device_slot_sem_limite_ou_sem_emulador_e_noop(tmp_path):
+    """`limit=0`, perfil sem emulador ou sem workspace → não segura nada."""
+    assert exec_common.acquire_device_slot(_emu_cfg(), str(tmp_path), 0) is None
+    assert exec_common.acquire_device_slot(sb.SandboxConfig(mode="full"), str(tmp_path), 2) is None
+    assert exec_common.acquire_device_slot(_emu_cfg(), None, 2) is None
+    # release de None é no-op
+    exec_common.release_slot(None)
+
+
+def test_device_slot_limita_concorrencia_entre_processos(tmp_path):
+    """Com `limit=1`, a segunda execução só consegue o slot quando a primeira
+    libera — é o que segura o host contra N qemu simultâneos (task 195)."""
+    import threading
+
+    sandbox = _emu_cfg()
+    ws = str(tmp_path)
+    first = exec_common.acquire_device_slot(sandbox, ws, 1)
+    assert first is not None
+
+    second: list = []
+
+    def other() -> None:
+        second.append(exec_common.acquire_device_slot(sandbox, ws, 1))
+
+    t = threading.Thread(target=other, daemon=True)
+    t.start()
+    t.join(timeout=0.5)
+    assert second == [], "segunda execução deveria estar bloqueada no slot"
+
+    exec_common.release_slot(first)
+    t.join(timeout=10)
+    assert len(second) == 1 and second[0] is not None
+    exec_common.release_slot(second[0])
+
+    # slot devolvido → volta a ficar disponível
+    third = exec_common.acquire_device_slot(sandbox, ws, 1)
+    assert third is not None
+    exec_common.release_slot(third)
+
+
+def test_run_executor_devolve_slots_no_finally(tmp_path, monkeypatch):
+    """O dispatch adquire os slots (emulador + LLM) com os limites efetivos e os
+    devolve no `finally` — inclusive quando a execução falha/aborta (senão vazaríam
+    e travariam as próximas fases para sempre)."""
+    from app.worker import runner
+
+    dev: list = []
+    monkeypatch.setattr(
+        exec_common, "acquire_device_slot", lambda *a, **k: dev.append(a[2]) or object()
+    )
+    llm: list = []
+    monkeypatch.setattr(
+        exec_common, "acquire_llm_slot", lambda *a, **k: llm.append(a[1]) or object()
+    )
+    released: list = []
+    monkeypatch.setattr(exec_common, "release_slot", released.append)
+
+    fake = _fake_script(tmp_path, "fake_slot", "#!/usr/bin/env python3\nprint('')\n")
+    eff = runner.EffectiveSettings(
+        max_attempts=1, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
+        cost_per_interaction=0.01, pm_budget_topup=0, risky_patterns=[],
+        whitelisted_hosts=[], db_rule="", kimi_bin=fake, opencode_bin="opencode",
+        opencode_model="", codex_bin="codex", codex_model="",
+        log_dir=str(tmp_path / "logs"), workspace_dir=str(tmp_path / "ws"),
+        branch_prefix="autoia", max_identical_calls=3, no_progress_timeout=0,
+        max_repeated_searches=6, verify_retries=1, keep_workspaces=True,
+        android_max_concurrent=7, llm_max_concurrent=5,
+        sandbox=sb.SandboxConfig(mode="off"),
+    )
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    runner._run_executor(
+        eff, "kimi", "prompt", cwd=str(checkout), log_path=str(tmp_path / "x.log")
+    )
+    assert dev == [7]
+    assert llm == [5]
+    assert len(released) == 2, "os DOIS slots (device e llm) devem ser devolvidos"
+
+
+def test_llm_slot_limita_concorrencia(tmp_path):
+    """Com `limit=1`, a segunda execução só entra quando a primeira liberar —
+    é o que segura o pico de chamadas ao provedor (429 em cascata)."""
+    import threading
+
+    ws = str(tmp_path)
+    first = exec_common.acquire_llm_slot(ws, 1)
+    assert first is not None
+
+    second: list = []
+
+    def other() -> None:
+        second.append(exec_common.acquire_llm_slot(ws, 1))
+
+    t = threading.Thread(target=other, daemon=True)
+    t.start()
+    t.join(timeout=0.5)
+    assert second == [], "segunda execução deveria estar bloqueada no slot LLM"
+
+    exec_common.release_slot(first)
+    t.join(timeout=10)
+    assert len(second) == 1 and second[0] is not None
+    exec_common.release_slot(second[0])
+
+
+def test_llm_slot_sem_limite_e_noop(tmp_path):
+    """`limit=0` (sem teto) ou sem workspace → não segura nada; release(None) idem."""
+    assert exec_common.acquire_llm_slot(str(tmp_path), 0) is None
+    assert exec_common.acquire_llm_slot(None, 2) is None
+    exec_common.release_slot(None)
+
+
+def test_llm_slot_sem_emulador_nao_usa_slot_de_device(tmp_path):
+    """Sandbox sem `bootstrap_extra` (LLM pura) não ocupa slot de emulador,
+    mas OCUPA o de LLM — é justamente o que limita missões/resumos/PM."""
+    assert exec_common.needs_emulator_slot(sb.SandboxConfig(mode="full")) is False
+    assert exec_common.acquire_device_slot(
+        sb.SandboxConfig(mode="full"), str(tmp_path), 2
+    ) is None
+    slot = exec_common.acquire_llm_slot(str(tmp_path), 2)
+    assert slot is not None
+    exec_common.release_slot(slot)
 
 
 # ---------------------------------------------------------------------------

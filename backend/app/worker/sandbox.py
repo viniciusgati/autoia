@@ -30,6 +30,7 @@ import select
 import shutil
 import socket
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -44,8 +45,28 @@ SANDBOX_FS = "fs"
 SANDBOX_FULL = "full"
 VALID_SANDBOX_MODES = (SANDBOX_OFF, SANDBOX_FS, SANDBOX_FULL)
 
-# Hosts sempre liberados no proxy (serviços do host + loopback).
-_DEFAULT_PROXY_HOSTS = {"host.docker.internal", "localhost", "127.0.0.1"}
+# Hosts sempre liberados no proxy (serviços do host via host-gateway).
+# Loopback NÃO entra aqui de propósito: `127.0.0.1`/`localhost` no proxy resolve
+# no HOST (não no contêiner), então liberá-los em qualquer porta deixava o
+# container alcançar qualquer serviço de loopback do host (banco, API interna).
+# O tráfego local do próprio contêiner não usa o proxy: `_container_env` define
+# `NO_PROXY` com o loopback. Serviços do host são via `AUTOIA_HOST_SERVICES_BASE`.
+_DEFAULT_PROXY_HOSTS = {"host.docker.internal"}
+
+# Destinos que NUNCA devem passar pelo proxy no modo "full" (o loopback é o do
+# PRÓPRIO contêiner; o do host só é alcançável via `host.docker.internal`).
+NO_PROXY_LOCAL = "localhost,127.0.0.1,::1"
+
+# Ociosidade do túnel (segundos). Configurável por `ensure_egress_proxy` (vem de
+# `Settings.sandbox_proxy_idle_timeout`). 0 = sem limite de ociosidade.
+_DEFAULT_PROXY_IDLE_TIMEOUT = 600
+_proxy_idle_timeout: int = _DEFAULT_PROXY_IDLE_TIMEOUT
+
+# Marcador emitido pelo bootstrap do sandbox no STDOUT logo antes de subir a CLI:
+# o watchdog de "sem progresso" mede silêncio no stdout DESDE o spawn do processo
+# e o boot do emulador Android escreve só em stderr — sem essa linha a janela de
+# boot consumiria o orçamento da própria execução (task 195).
+BOOTSTRAP_SENTINEL = "AUTOIA_BOOTSTRAP_DONE"
 
 # Backend de isolamento: "docker" (default) ou "bwrap" (fallback leve, FS-only).
 BACKEND_DOCKER = "docker"
@@ -82,6 +103,8 @@ class SandboxConfig:
     # contêiner via `docker rm -f` (cidfile).
     init: bool = False
     proxy_port: int = 18080
+    # Ociosidade máxima de um túnel do proxy (segundos; 0 = sem limite).
+    proxy_idle_timeout: int = 600
     home: str | None = None
     fail_closed: bool = False
     host_services_base: str = "http://127.0.0.1"
@@ -504,7 +527,13 @@ def _container_env(config: SandboxConfig, extra_env: dict | None) -> dict[str, s
         env["HTTPS_PROXY"] = proxy
         env["http_proxy"] = proxy
         env["https_proxy"] = proxy
-        env["NO_PROXY"] = ""
+        # O loopback NÃO passa pelo proxy: `127.0.0.1`/`localhost` no proxy
+        # resolve no HOST (o túnel morria com "connection refused" para serviços
+        # que existem DENTRO do contêiner, ex.: o emulador Android em :8554).
+        # Serviços do host continuam acessíveis via `host.docker.internal`
+        # (allowlist), que fica propositalmente fora daqui.
+        env["NO_PROXY"] = NO_PROXY_LOCAL
+        env["no_proxy"] = NO_PROXY_LOCAL
     if extra_env:
         env.update(extra_env)
     return env
@@ -675,8 +704,13 @@ def build_sandbox_command(
             'ln -sfn "$JAVA_HOME" "$HOME/.jdks/jbr-21.0.11"; '
             'ln -sfn "$JAVA_HOME" "$HOME/android-studio/jbr"; '
             + (bootstrap_extra if bootstrap_extra else "")
+            # Sentinela no STDOUT antes da CLI: o boot do emulador (bootstrap_extra)
+            # escreve só em stderr e pode levar minutos — sem esta linha o watchdog
+            # de "sem progresso" contaria a janela de boot como silêncio do executor
+            # e mataria a fase no meio do boot (task 195).
             # bootstrap_extra termina em nova linha (bloco `if/fi`); `;` solto
             # após nova linha é erro de sintaxe — usar nova linha antes do exec.
+            + f'\necho "{BOOTSTRAP_SENTINEL}"\n'
             + ("\nexec \"$@\"" if bootstrap_extra else 'exec "$@"')
         )
         docker_cmd += [config.image, "/bin/bash", "-lc", bootstrap, "autoia", *cmd]
@@ -753,6 +787,10 @@ def build_bwrap_command(
 _proxy_allowlist: set[str] = set(_DEFAULT_PROXY_HOSTS)
 _proxy_lock = threading.Lock()
 _proxy_server: ThreadingHTTPServer | None = None
+# Alvo já logado como negado (403) — evita inundar o worker.log quando um cliente
+# ignora `NO_PROXY`/allowlist e entra em retry (cap por segurança).
+_deny_log: set[str] = set()
+_DENY_LOG_CAP = 100
 
 
 def add_proxy_hosts(hosts: list[str]) -> None:
@@ -762,7 +800,11 @@ def add_proxy_hosts(hosts: list[str]) -> None:
                 _proxy_allowlist.add(h.split(":")[0].lower())
 
 
-def ensure_egress_proxy(port: int, whitelist: list[str] | None = None) -> int:
+def ensure_egress_proxy(
+    port: int,
+    whitelist: list[str] | None = None,
+    idle_timeout: int | None = None,
+) -> int:
     """Garante o proxy de egress rodando no host (daemon thread). Retorna a porta.
 
     O proxy é POR PROCESSO (variável de módulo): num worker multi-processo, dois
@@ -770,16 +812,21 @@ def ensure_egress_proxy(port: int, whitelist: list[str] | None = None) -> int:
     de uma fase e a geração de missão em paralelo). Se a porta já estiver ocupada
     por um proxy equivalente (mesma allowlist), REUSA-a em vez de falhar a fase —
     a execução segue com o proxy já existente.
+
+    `idle_timeout` (segundos) é o limite de ociosidade de um túnel CONNECT; a
+    primeira chamada que informar fixa o valor do proxy deste processo.
     """
-    global _proxy_server
+    global _proxy_server, _proxy_idle_timeout
     with _proxy_lock:
+        if idle_timeout is not None and idle_timeout >= 0:
+            _proxy_idle_timeout = idle_timeout
         if whitelist:
             _proxy_allowlist.update(h.lower() for h in whitelist)
         if _proxy_server is None:
             try:
                 # Bind 0.0.0.0: o contêiner chega no host via host-gateway (bridge). A
                 # proteção é a allowlist fail-closed — fora dela, 403/recusa.
-                server = ThreadingHTTPServer(("0.0.0.0", port), _EgressHandler)
+                server = _EgressServer(("0.0.0.0", port), _EgressHandler)
             except OSError:
                 # Porta já em uso por outro processo do worker (proxy equivalente).
                 # Não é um erro: reutiliza o proxy existente e segue a execução.
@@ -797,12 +844,35 @@ def ensure_egress_proxy(port: int, whitelist: list[str] | None = None) -> int:
 
 
 def stop_egress_proxy() -> None:
-    global _proxy_server
+    global _proxy_server, _proxy_idle_timeout
     with _proxy_lock:
         if _proxy_server is not None:
             _proxy_server.shutdown()
             _proxy_server.server_close()
             _proxy_server = None
+        _proxy_idle_timeout = _DEFAULT_PROXY_IDLE_TIMEOUT
+
+
+class _EgressServer(ThreadingHTTPServer):
+    """HTTPServer com backlog decente: o default (5) estoura quando vários
+    túneis LLM + downloads de dependências sobem juntos e o cliente recebe
+    conexão recusada (falha que o executor trata como hang silencioso)."""
+
+    request_queue_size = 64
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        """Cliente que derrubou a conexão: UMA linha em DEBUG, não traceback.
+
+        O `handle_error` padrão do socketserver imprime ~10 linhas por conexão
+        perdida (comum num proxy: keep-alive fechado pelo cliente). Sem isto o
+        worker.log crescia ~230 MB/dia e afogava os avisos reais (task 195).
+        """
+        exc = sys.exc_info()[1]
+        log.debug(
+            "proxy egress: cliente %s:%s desconectou (%s)",
+            client_address[0], client_address[1], exc,
+        )
 
 
 class _EgressHandler(BaseHTTPRequestHandler):
@@ -829,6 +899,17 @@ class _EgressHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+        # Diagnóstico de quem tentou (uma linha POR ALVO): um cliente que ignora
+        # `NO_PROXY`/allowlist e re-tenta fica evidente sem afogar o log. A chave
+        # é só o alvo (não o cliente) para o cap de100 não ser gasto por variantes
+        # de IP do mesmo host.
+        key = self.path[:160]
+        if key not in _deny_log and len(_deny_log) < _DENY_LOG_CAP:
+            _deny_log.add(key)
+            log.warning(
+                "proxy egress: negado 403 para %s (cliente %s:%s)",
+                key, self.client_address[0], self.client_address[1],
+            )
 
     def _forward_http(self) -> None:
         url = urlsplit(self.path)
@@ -838,7 +919,8 @@ class _EgressHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(length) if length else None
         try:
-            conn = HTTPConnection(url.hostname, url.port or 80, timeout=30)
+            idle = _proxy_idle_timeout
+            conn = HTTPConnection(url.hostname, url.port or 80, timeout=idle or None)
             conn.request(self.command, url.path or "/", body, dict(self.headers))
             resp = conn.getresponse()
             self.send_response(resp.status)
@@ -875,15 +957,34 @@ class _EgressHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
         sockets = [self.connection, out]
         self.close_connection = True
+        # Túnel só fecha quando uma das pontas fecha (FIN) ou quando fica
+        # `idle_timeout` sem NENHUM byte. O default antigo era 30s — matava
+        # chamadas de LLM que demoram mais que isso para o primeiro byte
+        # (prompt grande + reasoning sob carga) e o executor entrava em retry
+        # silencioso até o watchdog de "sem progresso".
+        idle_limit = _proxy_idle_timeout
+        # Poll do select limitado pelo próprio idle: com idle baixo (ex.: teste
+        # ou operador apertando) o fechamento precisa acontecer em ~idle, não na
+        # próxima borda de 30s.
+        poll = min(30, idle_limit) if idle_limit else 30
+        last_data = time.monotonic()
         try:
             while True:
-                readable, _, _ = select.select(sockets, [], [], 30)
+                readable, _, _ = select.select(sockets, [], [], poll)
                 if not readable:
-                    break
+                    if idle_limit and time.monotonic() - last_data >= idle_limit:
+                        log.warning(
+                            "proxy egress: túnel %s:%s ocioso por %ss — fechando "
+                            "(AUTOIA_PROXY_IDLE_TIMEOUT)",
+                            host, port, idle_limit,
+                        )
+                        break
+                    continue
                 for s in readable:
                     data = s.recv(65536)
                     if not data:
                         return
+                    last_data = time.monotonic()
                     (out if s is self.connection else self.connection).sendall(data)
         except OSError:
             pass

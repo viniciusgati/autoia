@@ -312,6 +312,20 @@ FALHAS:
   saída: <trecho real da saída>
 - critério 2: ...
 
+### Se a infraestrutura impedir a verificação
+Se você NÃO CONSEGUIR rodar a verificação necessária por problema de INFRAESTRUTURA
+(emulador/navegador indisponível, permissão negada, timeout, ferramenta quebrada),
+NÃO deixe a fase sem veredicto — "veredicto ausente" trava o pipeline e não ajuda
+ninguém. Nesse caso:
+1. Reduza a verificação ao que é DETERMINÍSTICO e disponível: revise o diff da branch
+   contra a base, valide os critérios por análise do código e rode a suíte headless/
+   unitária se existir.
+2. Escreva `autoia_verdict.txt` mesmo assim, com o que você CONSEGUIU verificar e uma
+   seção explícita `NÃO VERIFICADO:` listando o que a infraestrutura impediu e por quê.
+3. Se a evidência insuficiente for séria (critérios centrais não validáveis), emita
+   FAIL com a justificativa de infraestrutura — a decisão final é do avaliador (fase
+   assess), que revisa o código e decide se a entrega está completa.
+
 ### Exemplo (PASS)
 PASS
 SUMMARY: rodei `pytest` (4 testes, 4 passaram). Validei os critérios 1–3; todos atendidos.
@@ -328,6 +342,12 @@ Esta fase é a AVALIAÇÃO FINAL da tarefa, ANTES da integração (merge).
   lixo (arquivos temporários, debug, credenciais) e sem dívidas não justificadas.
 - NÃO altere código nem arquivos do projeto: você AVALIA e REPORTA. Correções voltam
   automaticamente (bounce-back) com o seu relatório.
+- Se a fase de verificação anterior terminou INCONCLUSIVA (veredicto ausente por falha
+  de infraestrutura — emulador/navegador/teste que não rodou), VOCÊ é o robô que decide
+  o veredicto final: valide os critérios por REVISÃO DO CÓDIGO E DO DIFF (não dependa da
+  infraestrutura que quebrou) e emita PASS/FAIL. Deixe explícito no SUMMARY o que não
+  pôde ser validado dinamicamente e por quê; só emita FAIL se houver defeito real no
+  código ou evidência insuficiente para confiar na entrega.
 - Só depois de avaliar tudo, escreva o arquivo `autoia_verdict.txt` na raiz do
   repositório com a PRIMEIRA linha exatamente:
 
