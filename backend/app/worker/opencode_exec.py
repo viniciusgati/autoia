@@ -312,7 +312,14 @@ def _run_opencode_once(
     # mas o `--dir` vai dentro do container (workdir absoluto) — um caminho
     # relativo não resolve lá ("Failed to change directory", task 127).
     cwd = os.path.abspath(cwd)
-    cmd = [opencode_bin, "run", prompt, "--format", "json", "--dir", cwd]
+    # `--auto`: aprova permissões não-negadas. Sem ele, uma ferramenta que toca um
+    # path fora do checkout (`external_directory`: /tmp, outra task em
+    # data/workspaces/<repo>) vira "permission requested ... auto-rejecting" e a
+    # sessão MORRE ali — sem resposta final, sem `autoia_verdict.txt`/`autoia_decision.json`
+    # → o worker vê veredicto AUSENTE, faz bounce-back e a fase repete o mesmo caminho
+    # até esgotar tentativas (task 198: avaliador e PM morreram assim 3x). A contenção
+    # real continua sendo o sandbox (FS/rede/privilégios), não a permissão da CLI.
+    cmd = [opencode_bin, "run", prompt, "--format", "json", "--dir", cwd, "--auto"]
     if resume_session_id:
         # Retoma a MESMA sessão da execução anterior (contexto/cache preservados).
         cmd += ["--session", resume_session_id]

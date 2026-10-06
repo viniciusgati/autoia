@@ -367,6 +367,22 @@ SUMMARY: relatório estruturado das falhas (abaixo)
   ATUAL do checkout (git log, git diff) e emita um veredicto NOVO baseado no código
   atual — NUNCA republique o veredicto anterior sem re-avaliar.
 
+### Se o ambiente de avaliação falhar
+O build/teste de ambiente NÃO é sua fase: as evidências dinâmicas já vêm das fases
+anteriores (resumos e relatórios no handoff — ex.: suíte unitária verde, assemble OK,
+verificação PASS). Se um comando de build/rede falhar, der timeout, der 403/erro de
+download ou tiver a permissão NEGADA, NÃO tente consertar o ambiente nem diagnosticar
+a rede: isso já derrubou execuções desta fase sem veredicto e a tarefa inteira voltou
+para correção. Nesse caso:
+1. Pare o experimento e finalize a avaliação por REVISÃO DO CÓDIGO E DO DIFF, usando as
+   evidências do handoff — deixe explícito no SUMMARY o que não foi re-executado aqui.
+2. Você NUNCA termina sem gravar `autoia_verdict.txt`: sem o arquivo o sistema registra
+   "veredicto AUSENTE (esperado PASS)", a fase reprova, o trabalho volta para o developer
+   e a sua avaliação é perdida. Gravar o veredicto vem ANTES de qualquer tentativa longa
+   de ambiente.
+3. Só FAIL se houver defeito real no código ou evidência insuficiente para confiar na
+   entrega — indisponibilidade de infraestrutura não é defeito.
+
 Se QUALQUER critério não atendido, escopo estourado ou problema de qualidade, o
 veredicto é FAIL. No FAIL, use EXATAMENTE este formato no SUMMARY (é o que o developer
 usará para corrigir):

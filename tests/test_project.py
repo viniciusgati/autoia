@@ -144,6 +144,28 @@ def test_build_prompt_guardrails_explicit():
     assert "DATABASE_URL" in prompt
 
 
+def test_contract_assess_finaliza_mesmo_com_ambiente_falhando():
+    """Regressão (task 198): o avaliador passou as 3 tentativas tentando fazer o
+    Gradle/rede funcionarem dentro do sandbox, teve permissão negada, morreu sem
+    gravar `autoia_verdict.txt` → "veredicto AUSENTE", bounce-back do developer e
+    escala do PM. O contrato precisa mandá-lo PARAR o ambiente e gravar o veredicto."""
+    from app.models import Robot, Task
+    from app.prompts import CONTRACT_ASSESS, build_prompt
+
+    assert "Se o ambiente de avaliação falhar" in CONTRACT_ASSESS
+    assert "NÃO tente consertar o ambiente" in CONTRACT_ASSESS
+    assert "NUNCA termina sem gravar `autoia_verdict.txt`" in CONTRACT_ASSESS
+
+    # e o contrato chega ao prompt do robô avaliador
+    prompt = build_prompt(
+        Robot(name="avaliador", role="assess", mission="Avalie a tarefa."),
+        Task(title="t", description="d"),
+        "",
+        "main",
+    )
+    assert "Se o ambiente de avaliação falhar" in prompt
+
+
 def test_ensure_agents_md_preserves_tracked(bare_repo, tmp_path):
     """AGENTS.md já versionado pelo repositório prevalece (não é sobrescrito)."""
     dest = str(tmp_path / "clone")

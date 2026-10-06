@@ -164,6 +164,18 @@ def test_model_passed_as_flag(tmp_path):
     assert "provider/modelo-x" in argv
 
 
+def test_auto_aprova_permissao_sem_matar_o_run(tmp_path):
+    """Regressão (task 198): sem `--auto`, uma ferramenta que toca path fora do
+    checkout dispara `permission requested: external_directory ... auto-rejecting`
+    e a sessão MORRE ali — sem texto final, sem `autoia_verdict.txt` → o worker vê
+    "veredicto AUSENTE", faz bounce-back e a fase repete o mesmo caminho até esgotar
+    tentativas (avaliador e PM da task 198 morreram assim)."""
+    lines = [_text("ok"), _finish(0.001)]
+    _, _, cwd = _run(tmp_path, lines)
+    argv = (cwd / "argv.txt").read_text().split()
+    assert "--auto" in argv
+
+
 def test_dir_sempre_absoluto(tmp_path, monkeypatch):
     """Regressão (task 127): o `--dir` vai dentro do container (workdir absoluto)
     — um cwd relativo (`data/workspaces/...`) não resolve lá. Deve virar absoluto."""
