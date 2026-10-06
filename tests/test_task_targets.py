@@ -20,6 +20,7 @@ from app.models import Task
 from app.prompts import build_prompt
 from app.worker import runner
 from app.worker import project as project_mod
+from conftest import rich_proposal
 
 
 def _new_app(settings, bare_repo):
@@ -79,7 +80,7 @@ def test_task_targets_vazio_recusa_cross_repo(settings, bare_repo, tmp_path):
     client = flow["client"]
     settings.kimi_bin = _kimi_cross(
         tmp_path,
-        [{"title": "doc", "description": "d", "kind": "chore", "repository": "docs"}],
+        [rich_proposal(title="doc", kind="chore", repository="docs")],
     )
     settings.task_budget = 100.0
 
@@ -123,7 +124,7 @@ def test_task_targets_permitido_cria_proposta(settings, bare_repo, tmp_path):
 
     settings.kimi_bin = _kimi_cross(
         tmp_path,
-        [{"title": "doc", "description": "d", "kind": "chore", "repository": "docs"}],
+        [rich_proposal(title="doc", kind="chore", repository="docs")],
     )
     settings.task_budget = 100.0
 
@@ -153,7 +154,7 @@ def test_task_targets_fora_da_lista_recusado(settings, bare_repo, tmp_path):
 
     settings.kimi_bin = _kimi_cross(
         tmp_path,
-        [{"title": "x", "description": "d", "kind": "chore", "repository": "api"}],
+        [rich_proposal(title="x", kind="chore", repository="api")],
     )
     settings.task_budget = 100.0
 
@@ -217,6 +218,10 @@ def test_external_context_entra_no_prompt_e_no_agents_md(settings, bare_repo):
     assert "docs" in prompt
     assert "Deploy DNS: https://app.exemplo.com" in prompt
     assert "criar tarefas" in prompt
+    # Ferramenta de propostas: surface (pipeline), depends_on (ordem) e descrição rica.
+    assert "surface" in prompt
+    assert "depends_on" in prompt
+    assert "Critérios de aceite" in prompt
 
     # AGENTS.md: a seção entra no template gerado
     md = project_mod.build_agents_md("python", repo_context=repo_context)
@@ -233,8 +238,8 @@ def test_repo_proposals_endpoint_lista_do_projeto(settings, bare_repo, tmp_path)
     settings.kimi_bin = _kimi_cross(
         tmp_path,
         [
-            {"title": "doc a", "description": "d", "kind": "chore", "repository": "docs"},
-            {"title": "doc b", "description": "d", "kind": "chore", "repository": "docs"},
+            rich_proposal(title="doc a", kind="chore", repository="docs"),
+            rich_proposal(title="doc b", kind="chore", repository="docs"),
         ],
     )
     settings.task_budget = 100.0

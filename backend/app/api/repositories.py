@@ -237,7 +237,7 @@ def list_repo_proposals(
             Task.repository_id == repo_id,
             TaskProposal.status != "rejected",
         )
-        .order_by(TaskProposal.id.desc())
+        .order_by(TaskProposal.task_id.desc(), TaskProposal.position.asc())
         .limit(100)
         .all()
     )

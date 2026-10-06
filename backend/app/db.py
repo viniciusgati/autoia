@@ -73,6 +73,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("pm_decisions", "INTEGER DEFAULT 0 NOT NULL"),
         ("feedback", "TEXT"),
         ("parent_task_id", "INTEGER REFERENCES tasks(id)"),
+        # Dependência de execução entre tasks (encadeamento de propostas aceitas).
+        ("depends_on_task_id", "INTEGER REFERENCES tasks(id)"),
         ("executor", "VARCHAR(20) DEFAULT 'kimi' NOT NULL"),
         ("details", "TEXT"),
         ("resume_instruction", "TEXT"),
@@ -121,6 +123,8 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
     "step_artifacts": [],
     "task_proposals": [
         ("pipeline_id", "INTEGER REFERENCES pipelines(id)"),
+        # Posições (0-based) das propostas predecessoras — encadeamento de execução.
+        ("depends_on_json", "TEXT DEFAULT '[]'"),
     ],
 }
 

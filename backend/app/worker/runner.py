@@ -627,6 +627,43 @@ def _sweep_stuck_tasks(session_factory) -> None:
         ):
             if task.id in running:
                 continue
+            # Dependência de execução em estado terminal ruim (failed/cancelled):
+            # a task nunca será reclamada (o claim exige a dependência `done`) —
+            # move para `needs_review` com o motivo em vez de ficar presa em
+            # silêncio. Dependência `needs_review`/`blocked`/`paused` fica
+            # aguardando decisão humana (aí sim pode ser retomada e concluir).
+            if task.depends_on_task_id:
+                dependency = s.get(Task, task.depends_on_task_id)
+                if dependency is not None and dependency.status in (
+                    TASK_FAILED,
+                    TASK_CANCELLED,
+                ):
+                    reason = (
+                        f"dependência #{dependency.id} em '{dependency.status}' "
+                        "não foi concluída — task não será reclamada"
+                    )
+                    result = s.execute(
+                        update(Task)
+                        .where(
+                            Task.id == task.id,
+                            Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+                        )
+                        .values(status=TASK_NEEDS_REVIEW, error=reason)
+                    )
+                    if result.rowcount != 1:
+                        continue
+                    log.warning(
+                        "task %s: %s — movendo para needs_review", task.id, reason
+                    )
+                    anchor = _active_steps(task)
+                    _system_event(
+                        s,
+                        anchor[0] if anchor else None,
+                        "task_dependency_blocked",
+                        {"reason": reason, "dependency_task_id": dependency.id},
+                    )
+                    s.commit()
+                    continue
             steps = _active_steps(task)
             if not steps:
                 continue
@@ -695,6 +732,15 @@ def claim_next(session_factory) -> int | None:
             earlier.position < TaskStep.position,
             earlier.status != STEP_DONE,
         )
+        # Dependência de execução (encadeamento de propostas aceitas): uma task só
+        # é reclamada quando a task da qual depende está `done`. Sem isso, tasks
+        # irmãs do mesmo brainstorm rodariam em paralelo no mesmo repo (branches
+        # paralelas → conflito de merge). NULL = sem dependência.
+        dependency = aliased(Task)
+        dependency_not_done = exists().where(
+            dependency.id == Task.depends_on_task_id,
+            dependency.status != TASK_DONE,
+        )
         step = (
             s.query(TaskStep)
             .join(Task)
@@ -712,6 +758,7 @@ def claim_next(session_factory) -> int | None:
                 Task.mode != TASK_MODE_MANUAL,
                 (TaskStep.execution_mode.is_(None)) | (TaskStep.execution_mode != STEP_MODE_MANUAL),
                 ~earlier_not_done,
+                ~dependency_not_done,
             )
             .order_by(TaskStep.id)
             .first()
@@ -3203,12 +3250,129 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
     _pm_decide(session_factory, settings, task_id, reason)
 
 
+# Mínimo de qualidade da descrição de uma proposta (autoia_tasks.json): entradas
+# vagas são descartadas com evento `task_spawn_rejected` — sem isso, a task filha
+# nasce sem contexto e o dev adivinha o escopo.
+PROPOSAL_MIN_DESCRIPTION_CHARS = 350
+# Seções obrigatórias da descrição (comparação sem acento/maiúsculas, por linha).
+_PROPOSAL_REQUIRED_SECTIONS = (
+    "contexto",
+    "escopo",
+    "criterios de aceite",
+    "fora de escopo",
+)
+
+
+def _entry_title(entry) -> str:
+    return (entry.get("title") or "").strip() if isinstance(entry, dict) else ""
+
+
+def _normalize_proposal_heading(line: str) -> str:
+    """Normaliza uma linha para comparar com as seções obrigatórias: sem `#`/`-`/
+    `*`/`•`, sem acento, minúscula."""
+    import unicodedata
+
+    text = line.strip().lstrip("#*-• ").strip().lower()
+    return "".join(
+        c for c in unicodedata.normalize("NFKD", text) if not unicodedata.combining(c)
+    )
+
+
+def proposal_description_error(description: str) -> str | None:
+    """Motivo pelo qual a descrição de uma proposta é insuficiente (None = ok)."""
+    text = (description or "").strip()
+    if len(text) < PROPOSAL_MIN_DESCRIPTION_CHARS:
+        return (
+            f"descrição curta ({len(text)} caracteres < {PROPOSAL_MIN_DESCRIPTION_CHARS})"
+        )
+    headings = [
+        _normalize_proposal_heading(line) for line in text.splitlines() if line.strip()
+    ]
+    missing = [
+        section
+        for section in _PROPOSAL_REQUIRED_SECTIONS
+        if not any(h.startswith(section) for h in headings)
+    ]
+    if missing:
+        return "faltam seções obrigatórias: " + ", ".join(missing)
+    return None
+
+
+def _parse_depends_on(raw) -> tuple[list[int], list[str]]:
+    """Normaliza `depends_on` (posições 1-based do arquivo) em posições válidas."""
+    if raw in (None, ""):
+        return [], []
+    if not isinstance(raw, list):
+        return [], ["'depends_on' deve ser uma lista de posições (1-based)"]
+    positions: list[int] = []
+    warnings: list[str] = []
+    for value in raw:
+        try:
+            pos = int(value)
+        except (TypeError, ValueError):
+            warnings.append(f"depends_on inválido: {value!r}")
+            continue
+        if pos < 1:
+            warnings.append(f"depends_on inválido: {pos} (use posições 1-based)")
+            continue
+        if pos not in positions:
+            positions.append(pos)
+    return positions, warnings
+
+
+def _resolve_proposal_pipeline(
+    s: Session, repo_id: int, surface: str | None, pipeline_name: str | None
+) -> tuple[int | None, str | None]:
+    """Resolve a pipeline de uma proposta: nome exato > `deep-v2-<surface>`
+    (pipeline do próprio repo tem preferência sobre a global). Retorna (id, aviso)."""
+
+    def find(name: str) -> Pipeline | None:
+        candidates = (
+            s.query(Pipeline)
+            .filter(
+                Pipeline.name == name,
+                (Pipeline.repository_id == repo_id)
+                | (Pipeline.repository_id.is_(None)),
+            )
+            .all()
+        )
+        if not candidates:
+            return None
+        local = [p for p in candidates if p.repository_id == repo_id]
+        return (local or candidates)[0]
+
+    name = (pipeline_name or "").strip()
+    if name:
+        found = find(name)
+        if found is not None:
+            return found.id, None
+        return None, f"pipeline '{name}' não encontrada — usando o padrão do projeto"
+    surface_value = (surface or "").strip().lower()
+    if surface_value:
+        if surface_value not in ("backend", "frontend", "fullstack"):
+            return None, f"surface '{surface}' inválida (use backend/frontend/fullstack)"
+        found = find(f"deep-v2-{surface_value}")
+        if found is not None:
+            return found.id, None
+        return None, (
+            f"pipeline deep-v2-{surface_value} não encontrada — usando o padrão do projeto"
+        )
+    return None, None
+
+
 def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
     """Lê autoia_tasks.json do checkout e grava propostas de tasks filhas.
 
     As propostas ficam `pending` aguardando APROVAÇÃO HUMANA — o worker NUNCA cria
     a task automaticamente (allow_auto_tasks é obsoleto e ignorado). Dedup por
     `task_id + title`: re-execuções da fase não duplicam a proposta.
+
+    Qualidade e encadeamento (contrato do propositor):
+    - descrição curta/sem as seções obrigatórias → entrada DESCARTADA + evento
+      `task_spawn_rejected` (motivo visível na timeline);
+    - `surface`/`pipeline` → a proposta já nasce com a pipeline da task filha;
+    - `depends_on` (posições 1-based do arquivo) → encadeamento de execução,
+      traduzido para as posições das propostas gravadas.
 
     SÓ a fase do PROPOSITOR (role "propose") gera propostas: é ele quem consolida
     as análises das fases anteriores. As demais fases (iniciador/analista/
@@ -3248,7 +3412,7 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
             _system_event(
                 s, step, "task_spawn_blocked",
                 {"reason": "task já tem subtarefas",
-                 "titles": [e.get("title") for e in entries if (e.get("title") or "").strip()][:10]},
+                 "titles": [t for t in (_entry_title(e) for e in entries) if t][:10]},
             )
             s.commit()
             try:
@@ -3256,20 +3420,41 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
             except OSError:
                 pass
             return
-        existing_titles = {
-            p.title for p in s.query(TaskProposal).filter(TaskProposal.task_id == task.id).all()
-        }
+
+        proposals = (
+            s.query(TaskProposal).filter(TaskProposal.task_id == task.id).all()
+        )
+        existing_by_title = {p.title: p for p in proposals}
+        # posição 1-based NO ARQUIVO -> position no banco: as dependências do
+        # arquivo (1-based) são traduzidas para as posições reais das propostas
+        # (o arquivo é reescrito a cada execução da fase e não conhece as posições
+        # acumuladas de execuções anteriores).
+        position_of_index: dict[int, int] = {}
+        next_position = (max(p.position for p in proposals) + 1) if proposals else 0
 
         added = 0
-        for entry in entries:
-            title = (entry.get("title") or "").strip()
+        rejected: list[dict] = []
+        warnings: list[dict] = []
+
+        for index, entry in enumerate(entries, start=1):
+            title = _entry_title(entry)
             if not title:
                 continue
-            if title in existing_titles:
-                continue  # re-execução da fase: não duplica a proposta
+            if title in existing_by_title:
+                # Re-execução da fase: não duplica; preserva a posição existente
+                # para que dependências continuem resolvendo.
+                position_of_index[index] = existing_by_title[title].position
+                continue
 
-            description = entry.get("description", "")
+            description = str(entry.get("description") or "").strip()
+            reason = proposal_description_error(description)
+            if reason:
+                rejected.append({"title": title, "reason": reason})
+                continue
+
             kind = entry.get("kind", "feature")
+            if kind not in ("feature", "bug", "issue", "chore"):
+                kind = "feature"
             target_repo_name = (entry.get("repository") or "").strip()
             target_repo_id: int | None = None
             if target_repo_name:
@@ -3296,24 +3481,69 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
                 # humana); aqui a proposta é sempre gravada para o humano decidir.
                 target_repo_id = target_repo.id
 
-            s.add(
-                TaskProposal(
-                    task_id=task.id,
-                    step_id=step.id,
-                    position=len(task.proposals) + added,
-                    title=title,
-                    description=description,
-                    kind=kind,
-                    target_repository_id=target_repo_id,
-                    status="pending",
-                )
+            pipeline_id, pipeline_warning = _resolve_proposal_pipeline(
+                s, task.repository_id, entry.get("surface"), entry.get("pipeline")
             )
-            existing_titles.add(title)
+            if pipeline_warning:
+                warnings.append({"title": title, "reason": pipeline_warning})
+
+            raw_positions, dep_warnings = _parse_depends_on(entry.get("depends_on"))
+            for warning in dep_warnings:
+                warnings.append({"title": title, "reason": warning})
+            depends_on: list[int] = []
+            for raw_position in raw_positions:
+                if raw_position >= index:
+                    warnings.append({
+                        "title": title,
+                        "reason": (
+                            f"depends_on {raw_position} deve referenciar uma proposta "
+                            "anterior deste arquivo"
+                        ),
+                    })
+                    continue
+                db_position = position_of_index.get(raw_position)
+                if db_position is None:
+                    warnings.append({
+                        "title": title,
+                        "reason": (
+                            f"depends_on {raw_position} não corresponde a uma proposta "
+                            "válida deste arquivo"
+                        ),
+                    })
+                    continue
+                if db_position not in depends_on:
+                    depends_on.append(db_position)
+
+            proposal = TaskProposal(
+                task_id=task.id,
+                step_id=step.id,
+                position=next_position + added,
+                title=title,
+                description=description,
+                kind=kind,
+                target_repository_id=target_repo_id,
+                pipeline_id=pipeline_id,
+                depends_on_json=json.dumps(depends_on),
+                status="pending",
+            )
+            s.add(proposal)
+            position_of_index[index] = proposal.position
+            existing_by_title[title] = proposal
             added += 1
 
         if added > 0:
-            titles = [e.get("title") for e in entries if (e.get("title") or "").strip()]
+            titles = [t for t in (_entry_title(e) for e in entries) if t]
             _system_event(s, step, "task_spawned", {"count": added, "titles": titles[:10]})
+        if rejected:
+            _system_event(
+                s, step, "task_spawn_rejected",
+                {"count": len(rejected), "rejected": rejected[:10]},
+            )
+        if warnings:
+            _system_event(
+                s, step, "task_spawn_warning",
+                {"count": len(warnings), "warnings": warnings[:10]},
+            )
         s.commit()
 
     # Remove o arquivo após processar (as propostas ficam no banco)
@@ -3332,13 +3562,15 @@ def create_child_task(
     kind: str,
     target_repository_id: int | None = None,
     pipeline_id: int | None = None,
+    depends_on_task_id: int | None = None,
 ) -> Task:
     """Cria a task filha a partir de uma proposta aprovada.
 
     Reutilizado pelo _spawn_tasks antigo e pela API de aceitação de propostas:
     copia os steps do pipeline (escolhido na proposta, senão o default do repo
     alvo, senão o da task pai), herda o `executor` da task pai e usa o budget do
-    repo alvo (ou o da task pai).
+    repo alvo (ou o da task pai). `depends_on_task_id` encadeia a execução — o
+    worker só reclama esta task quando a dependência estiver `done`.
     """
     target_repo = (
         s.get(Repository, target_repository_id) if target_repository_id else parent.repository
@@ -3355,6 +3587,7 @@ def create_child_task(
         model=parent.model,
         budget_limit=target_repo.task_budget if target_repo.task_budget is not None else parent.budget_limit,
         parent_task_id=parent.id,
+        depends_on_task_id=depends_on_task_id,
         # Tarefas geradas por spawn herdam o responsável da task pai (se definido).
         responsible_id=parent.responsible_id,
     )

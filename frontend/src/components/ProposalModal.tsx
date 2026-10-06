@@ -17,6 +17,7 @@ export default function ProposalModal({
   repoNames,
   parentRepoName,
   parentDetailPath,
+  dependsOnLabels,
   onClose,
   onChanged,
   onError,
@@ -26,6 +27,7 @@ export default function ProposalModal({
   repoNames?: Record<number, string>;
   parentRepoName?: string;
   parentDetailPath?: string;
+  dependsOnLabels?: string[];
   onClose: () => void;
   onChanged: () => void;
   onError: (message: string) => void;
@@ -101,6 +103,7 @@ export default function ProposalModal({
         <div className="modal-body">
           <div className="proposal-meta">
             <span className="badge">{kind}</span>
+            <span className="badge badge-warn">{proposal.position + 1}º na ordem</span>
             <span className={`ws-proposal-status ${proposal.status === "accepted" ? "ws-ok" : proposal.status === "rejected" ? "ws-err" : ""}`}>
               {statusLabel}
             </span>
@@ -110,6 +113,17 @@ export default function ProposalModal({
             )}
             <span className="muted small">proposta de #{proposal.task_id}</span>
           </div>
+          {proposal.depends_on.length > 0 && (
+            <p className="proposal-deps">
+              ⛓ executa depois de:{" "}
+              {proposal.depends_on
+                .map((dep, i) => dependsOnLabels?.[i] ?? `#${dep + 1}`)
+                .join(", ")}{" "}
+              <span className="muted small">
+                (a cadeia roda uma task por vez, na ordem)
+              </span>
+            </p>
+          )}
 
           {proposal.status === "pending" && editing ? (
             <div className="form-stack">
@@ -133,8 +147,9 @@ export default function ProposalModal({
               <div className="form-field">
                 <label className="form-label">
                   Pipeline da task <HelpTip>
-                  Define as fases da task filha quando aceita. Se não escolher, usa o
-                  pipeline padrão do projeto (ou o da task de origem).
+                  Define as fases da task filha quando aceita. O propositor já sugere
+                  uma pipeline pela superfície da entrega (surface); ajuste se quiser.
+                  Sem escolha, usa o pipeline padrão do projeto (ou o da task de origem).
                 </HelpTip>
                 </label>
                 <select

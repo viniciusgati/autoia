@@ -162,6 +162,23 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   não pertencer ao novo projeto; `null` explícito remove (`project_id: null`
   remove projeto e épico; `epic_id: null` remove apenas o épico) — distinguido de
   campo ausente via `model_fields_set` no `TaskUpdateRequest` (`_apply_task_association`).
+- **Propostas de tasks filhas** (`autoia_tasks.json` → `TaskProposal`, geradas SÓ
+  pela fase do propositor): cada entrada tem descrição rica obrigatória (seções
+  Contexto/Escopo/Critérios de aceite/Fora de escopo; mínimo ~350 caracteres) —
+  entrada vaga é DESCARTADA com evento `task_spawn_rejected` (motivo na timeline);
+  `surface` (`backend|frontend|fullstack`) ou `pipeline` (nome exato) → a proposta
+  **já nasce com a pipeline da filha** (`deep-v2-<surface>` do repo > global;
+  fallback: default do repo → pipeline da mãe, com `task_spawn_warning` se não achar);
+  `depends_on` (posições 1-based do arquivo) → encadeamento traduzido para as posições
+  reais. O aceite (`POST .../proposals/{id}/accept`) resolve dependências para
+  `Task.depends_on_task_id` (predecessora PENDENTE → 400; rejeitada → dispensada) e
+  `POST .../proposals/accept-all` aceita tudo em ordem e já enfileira (`start=true`);
+  o `claim_next` **só reclama a task quando a dependência está `done`** (evita
+  branches paralelas/conflito de merge) e `_sweep_stuck_tasks` move dependentes de
+  dependência `failed`/`cancelled` para `needs_review` (`task_dependency_blocked`).
+  A UI (`RepoProposals`) agrupa por task de origem e mostra ordem (`1º`, `2º`...) +
+  "requer antes" — as colunas são aditivas (`task_proposals.depends_on_json`,
+  `tasks.depends_on_task_id`).
 - **Fases `post_merge`** rodam na branch **default integrada** (`gitops.checkout_default`
   = fetch + `reset --hard origin/<base>`); fases normais rodam na branch `autoia/task-<id>`.
   O **merge+push acontece na última fase pré-merge** (feito pelo worker, nunca pelo robô).

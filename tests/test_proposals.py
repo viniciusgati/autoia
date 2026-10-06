@@ -12,6 +12,7 @@ from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.models import Task, TaskStep
 from app.worker import runner
+from conftest import rich_proposal
 
 
 @pytest.fixture
@@ -53,14 +54,22 @@ def _kimi_spawn(tmp_path, tasks: list[dict]) -> str:
     return str(script)
 
 
-def _prepare(flow, tmp_path, phases: list[str] | None = None) -> dict:
-    """Cria pipeline (po→qa por padrão), task pai com a proposta e executa a fase po.
+def _prepare(
+    flow,
+    tmp_path,
+    phases: list[str] | None = None,
+    tasks: list[dict] | None = None,
+) -> dict:
+    """Cria pipeline (po→qa por padrão), task pai com as propostas e executa a fase po.
 
-    Retorna a task pai e a proposta pendente.
+    `tasks` permite customizar as entradas do autoia_tasks.json (surface, depends_on,
+    etc.); por padrão usa uma única proposta válida ("filha"). Retorna a task pai e
+    as propostas pendentes (na ordem de posição).
     """
     phases = phases or ["propositor", "propositor"]
+    tasks = tasks or [rich_proposal(title="filha", kind="bug")]
     settings = flow["settings"]
-    settings.kimi_bin = _kimi_spawn(tmp_path, [{"title": "filha", "description": "desc", "kind": "bug"}])
+    settings.kimi_bin = _kimi_spawn(tmp_path, tasks)
     settings.task_budget = 100.0
     client = flow["client"]
 
@@ -88,8 +97,13 @@ def _prepare(flow, tmp_path, phases: list[str] | None = None) -> dict:
     runner.execute_step(flow["settings"], flow["session_factory"], step_id)
 
     proposals = client.get(f"/api/tasks/{parent_id}/proposals").json()
-    assert len(proposals) == 1
-    return {"parent_id": parent_id, "proposal": proposals[0]}
+    assert len(proposals) == len(tasks)
+    return {
+        "parent_id": parent_id,
+        "proposal": proposals[0],
+        "proposals": proposals,
+        "tasks": tasks,
+    }
 
 
 def test_accept_cria_task_filha_e_marca_aceita(proposals_flow, tmp_path):
@@ -406,7 +420,7 @@ def test_accept_cross_repo_requer_allow_external_tasks(proposals_flow, tmp_path,
     settings = proposals_flow["settings"]
     settings.kimi_bin = _kimi_spawn(
         tmp_path,
-        [{"title": "doc da feature", "kind": "chore", "repository": "docs"}],
+        [rich_proposal(title="doc da feature", kind="chore", repository="docs")],
     )
     settings.task_budget = 100.0
 
@@ -448,3 +462,153 @@ def test_accept_cross_repo_requer_allow_external_tasks(proposals_flow, tmp_path,
         t for t in resp.json()["children"] if t["parent_task_id"] == parent_id
     )
     assert child["repository_id"] == docs.json()["id"]
+
+
+def _accept_all(flow, parent_id: int) -> dict:
+    resp = flow["client"].post(
+        f"/api/tasks/{parent_id}/proposals/accept-all", json={}
+    )
+    assert resp.status_code == 200, resp.text
+    return resp.json()
+
+
+def _children_by_title(flow, parent_id: int) -> dict[str, dict]:
+    data = flow["client"].get(f"/api/tasks/{parent_id}").json()
+    return {c["title"]: c for c in data["children"] if c["parent_task_id"] == parent_id}
+
+
+def test_aceitar_dependencia_pendente_exige_predecessora(proposals_flow, tmp_path):
+    """Dependência PENDENTE → 400 com instrução; aceitar a predecessora primeiro
+    libera o aceite e a filha nasce encadeada (`depends_on_task_id`)."""
+    tasks = [
+        rich_proposal(title="primeira"),
+        rich_proposal(title="segunda", depends_on=[1]),
+    ]
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"], tasks=tasks)
+    client = proposals_flow["client"]
+    parent_id = prep["parent_id"]
+    first, second = prep["proposals"]
+
+    resp = client.post(f"/api/tasks/{parent_id}/proposals/{second['id']}/accept")
+    assert resp.status_code == 400
+    assert "antes desta" in resp.json()["detail"]
+
+    resp = client.post(f"/api/tasks/{parent_id}/proposals/{first['id']}/accept")
+    assert resp.status_code == 200, resp.text
+    children = _children_by_title(proposals_flow, parent_id)
+    assert children["primeira"]["depends_on_task_id"] is None
+
+    resp = client.post(f"/api/tasks/{parent_id}/proposals/{second['id']}/accept")
+    assert resp.status_code == 200, resp.text
+    children = _children_by_title(proposals_flow, parent_id)
+    assert (
+        children["segunda"]["depends_on_task_id"] == children["primeira"]["id"]
+    )
+    # a proposta expõe a dependência para a UI
+    assert second["depends_on"] == [first["position"]]
+
+
+def test_accept_all_cria_encadeia_e_enfileira(proposals_flow, tmp_path):
+    """Aceitar todas em ordem: cria as filhas encadeadas e já as enfileira
+    (start=true default); a cadeia é sequencial (a 2ª depende da 1ª)."""
+    tasks = [
+        rich_proposal(title="a"),
+        rich_proposal(title="b", depends_on=[1]),
+    ]
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"], tasks=tasks)
+    client = proposals_flow["client"]
+    parent_id = prep["parent_id"]
+
+    out = _accept_all(proposals_flow, parent_id)
+    assert out["accepted"] == 2
+    assert out["started"] is True
+    assert len(out["task_ids"]) == 2
+
+    children = _children_by_title(proposals_flow, parent_id)
+    a, b = children["a"], children["b"]
+    assert a["status"] == "queued"
+    assert b["status"] == "queued"
+    assert b["depends_on_task_id"] == a["id"]
+    assert all(c["branch"] for c in (a, b))
+    assert [st["status"] for st in a["steps"]].count("pending") == 1
+
+    # propostas marcadas como aceitas + link para as tasks
+    props = client.get(f"/api/tasks/{parent_id}/proposals").json()
+    assert {p["status"] for p in props} == {"accepted"}
+    assert {p["accepted_task_id"] for p in props} == set(out["task_ids"])
+
+
+def test_worker_respeita_cadeia_de_dependencia(proposals_flow, tmp_path):
+    """O claim NÃO reclama a task enquanto a dependência não está `done`; com a
+    dependência concluída, a próxima da cadeia é reclamada."""
+    tasks = [
+        rich_proposal(title="a"),
+        rich_proposal(title="b", depends_on=[1]),
+    ]
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"], tasks=tasks)
+    _accept_all(proposals_flow, prep["parent_id"])
+    children = _children_by_title(proposals_flow, prep["parent_id"])
+    task_a, task_b = children["a"], children["b"]
+    sf = proposals_flow["session_factory"]
+
+    step_id = runner.claim_next(sf)
+    assert step_id is not None
+    with sf() as s:
+        assert s.get(TaskStep, step_id).task_id == task_a["id"]
+
+    # a fase da task A está running → nada mais é reclamado ainda
+    assert runner.claim_next(sf) is None
+
+    # conclui a task A (como o worker faria ao fechar a pipeline) → B é reclamável
+    with sf() as s:
+        a = s.get(Task, task_a["id"])
+        a.status = "done"
+        for st in a.steps:
+            st.status = "done"
+        s.commit()
+
+    step_b = runner.claim_next(sf)
+    assert step_b is not None
+    with sf() as s:
+        assert s.get(TaskStep, step_b).task_id == task_b["id"]
+
+
+def test_dependencia_falha_move_dependente_para_needs_review(proposals_flow, tmp_path):
+    """Dependência em estado terminal ruim (failed/cancelled) não deixa a filha
+    presa em silêncio: o sweep move a dependente para `needs_review` com o motivo."""
+    tasks = [
+        rich_proposal(title="a"),
+        rich_proposal(title="b", depends_on=[1]),
+    ]
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"], tasks=tasks)
+    _accept_all(proposals_flow, prep["parent_id"])
+    children = _children_by_title(proposals_flow, prep["parent_id"])
+    sf = proposals_flow["session_factory"]
+
+    with sf() as s:
+        a = s.get(Task, children["a"]["id"])
+        a.status = "failed"
+        a.error = "quebrou"
+        s.commit()
+
+    runner._sweep_stuck_tasks(sf)
+
+    with sf() as s:
+        b = s.get(Task, children["b"]["id"])
+        assert b.status == "needs_review"
+        assert "dependência" in (b.error or "")
+        assert any(
+            e.kind == "task_dependency_blocked"
+            for st in b.steps
+            for e in st.events
+        )
+
+
+def test_accept_all_sem_pendentes_falha(proposals_flow, tmp_path):
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"])
+    client = proposals_flow["client"]
+    parent_id = prep["parent_id"]
+    client.post(f"/api/tasks/{parent_id}/proposals/{prep['proposal']['id']}/reject")
+    resp = client.post(f"/api/tasks/{parent_id}/proposals/accept-all", json={})
+    assert resp.status_code == 400
+    assert "nenhuma proposta pendente" in resp.json()["detail"]

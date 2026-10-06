@@ -15,6 +15,7 @@ export default function ProposalCard({
   repoNames,
   parentRepoName,
   parentDetailPath,
+  dependsOnLabels,
   onChanged,
   onError,
   canAct = true,
@@ -26,6 +27,8 @@ export default function ProposalCard({
   parentRepoName?: string;
   /** Caminho base do detalhe da task pai (ex.: `/1/tasks`). */
   parentDetailPath?: string;
+  /** Títulos das propostas das quais esta depende (mesma task pai); fallback `#N`. */
+  dependsOnLabels?: string[];
   onChanged: () => void;
   onError: (message: string) => void;
   /** Permissão de atuação (responsável/admin) — desabilita aceitar/rejeitar. */
@@ -34,6 +37,10 @@ export default function ProposalCard({
   const [busy, setBusy] = useState(false);
   const [open, setOpen] = useState(false);
   const actTitle = canAct ? undefined : MSG_SEM_PERMISSAO;
+  const order = proposal.position + 1;
+  const depLabels = proposal.depends_on.map(
+    (dep, i) => dependsOnLabels?.[i] ?? `#${dep + 1}`,
+  );
 
   const run = async (action: () => Promise<unknown>) => {
     setBusy(true);
@@ -62,6 +69,9 @@ export default function ProposalCard({
       <div className="proposal-card">
         <div className="proposal-head">
           <span className="proposal-icon">🧩</span>
+          <span className="proposal-order" title="Posição sugerida de execução">
+            {order}º
+          </span>
           <span className="proposal-title">{proposal.title}</span>
           <span className="badge badge-warn">
             {proposal.status === "accepted"
@@ -83,6 +93,11 @@ export default function ProposalCard({
             proposta de #{proposal.task_id}
           </span>
         </div>
+        {proposal.depends_on.length > 0 && (
+          <div className="proposal-deps" title="Executa depois destas (a cadeia roda em ordem)">
+            ⛓ requer antes: {depLabels.join(", ")}
+          </div>
+        )}
         {proposal.description && (
           <p className="proposal-desc">
             {proposal.description.length > 240
@@ -140,6 +155,7 @@ export default function ProposalCard({
           repoNames={repoNames}
           parentRepoName={parentProject}
           parentDetailPath={parentDetailPath}
+          dependsOnLabels={dependsOnLabels}
           onClose={() => setOpen(false)}
           onChanged={() => {
             setOpen(false);

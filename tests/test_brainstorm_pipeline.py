@@ -17,6 +17,7 @@ from app.db import make_engine, make_session_factory
 from app.main import create_app
 from app.models import Task, TaskProposal
 from app.worker import runner
+from conftest import rich_proposal
 
 HARMLESS = [{"role": "assistant", "content": "relatório ok"}]
 
@@ -88,8 +89,8 @@ def test_brainstorm_pipeline_genera_propostas_e_merge(settings, bare_repo, tmp_p
     settings.kimi_bin = _kimi_brainstorm(
         tmp_path,
         [
-            {"title": "proposta 1", "description": "desc 1", "kind": "feature"},
-            {"title": "proposta 2", "description": "desc 2", "kind": "bug"},
+            rich_proposal(title="proposta 1", kind="feature"),
+            rich_proposal(title="proposta 2", kind="bug"),
         ],
     )
     settings.task_budget = 100.0
@@ -195,8 +196,8 @@ def test_propostas_aparecem_no_dashboard(settings, bare_repo, tmp_path):
     settings.kimi_bin = _kimi_brainstorm(
         tmp_path,
         [
-            {"title": "a", "description": "d a", "kind": "feature"},
-            {"title": "b", "description": "d b", "kind": "chore"},
+            rich_proposal(title="a", kind="feature"),
+            rich_proposal(title="b", kind="chore"),
         ],
     )
     settings.task_budget = 100.0

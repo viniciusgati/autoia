@@ -54,6 +54,8 @@ from ..models import (
     User,
 )
 from ..schemas import (
+    AcceptAllProposalsOut,
+    AcceptAllProposalsRequest,
     ApproveStepRequest,
     BlockedContinueRequest,
     BouncebackRequest,
@@ -90,6 +92,7 @@ from ..worker.runner import (
     _pm_decide,
     _system_event,
     _task_workspace,
+    _active_steps,
     create_child_task,
 )
 from ..worker.summarizer import summarize_task
@@ -151,6 +154,7 @@ def _task_list_item(task: Task) -> TaskListItem:
         created_at=task.created_at,
         updated_at=task.updated_at,
         parent_task_id=task.parent_task_id,
+        depends_on_task_id=task.depends_on_task_id,
         responsible_id=task.responsible_id,
         responsible=task.responsible,
         project_id=task.project_id,
@@ -460,6 +464,49 @@ def _get_proposal_or_404(task: Task, proposal_id: int) -> TaskProposal:
     return proposal
 
 
+def _resolve_proposal_dependencies(
+    task: Task, proposal: TaskProposal
+) -> tuple[int | None, list[str]]:
+    """Resolve `depends_on` da proposta na task da dependência (encadeamento).
+
+    - dependência PENDENTE → 400 (aceite/rejeite a predecessora antes desta);
+    - dependência ACEITA → usa a task filha dela (a última posição vence: a
+      cadeia é sequencial);
+    - dependência REJEITADA/ausente → dispensada com aviso (o humano decidiu não
+      fazer a predecessora).
+    """
+    dependency_task_id: int | None = None
+    warnings: list[str] = []
+    for position in proposal.depends_on:
+        sibling = next((p for p in task.proposals if p.position == position), None)
+        if sibling is None or sibling.id == proposal.id:
+            warnings.append(f"dependência de posição {position} não encontrada")
+            continue
+        if sibling.status == "pending":
+            raise HTTPException(
+                400,
+                f"a proposta {sibling.position + 1}º ('{sibling.title}') precisa ser "
+                "aceita ou rejeitada antes desta",
+            )
+        if sibling.status == "accepted" and sibling.accepted_task_id:
+            dependency_task_id = sibling.accepted_task_id
+    return dependency_task_id, warnings
+
+
+def _apply_task_start(task: Task, settings) -> None:
+    """Inicia uma task em `created`: branch + primeira fase pendente. Em modo
+    manual (ou primeira fase manual), abre o chat em vez de enfileirar."""
+    task.branch = f"{settings.branch_prefix}/task-{task.id}"
+    first = min(_active_steps(task), key=lambda st: st.position)
+    if task.mode == TASK_MODE_MANUAL or _effective_step_mode(first, task) == STEP_MODE_MANUAL:
+        task.status = TASK_OPEN
+        task.chat_status = CHAT_STATUS_IDLE
+        task.pending_action = None
+    else:
+        task.status = TASK_QUEUED
+        first.status = STEP_PENDING
+
+
 @router.get("/{task_id}/proposals", response_model=list[TaskProposalOut])
 def list_proposals(task_id: int, session: Session = Depends(get_session)):
     task = _get_task_or_404(session, task_id)
@@ -491,6 +538,8 @@ def accept_proposal(
                 f"repositório '{target_repo.name}' não aceita tasks externas",
             )
 
+    depends_on_task_id, dep_warnings = _resolve_proposal_dependencies(task, proposal)
+
     child = create_child_task(
         session,
         task,
@@ -499,15 +548,95 @@ def accept_proposal(
         kind=proposal.kind,
         target_repository_id=proposal.target_repository_id,
         pipeline_id=proposal.pipeline_id,
+        depends_on_task_id=depends_on_task_id,
     )
     proposal.status = "accepted"
     proposal.accepted_task_id = child.id
     _system_event(
         session, _anchor_step(task), "proposal_accepted",
-        {"proposal_id": proposal.id, "title": proposal.title, "child_task_id": child.id},
+        {
+            "proposal_id": proposal.id,
+            "title": proposal.title,
+            "child_task_id": child.id,
+            "depends_on_task_id": depends_on_task_id,
+            "warnings": dep_warnings,
+        },
     )
     session.commit()
     return _get_task_or_404(session, task_id)
+
+
+@router.post("/{task_id}/proposals/accept-all", response_model=AcceptAllProposalsOut)
+def accept_all_proposals(
+    task_id: int,
+    data: AcceptAllProposalsRequest,
+    session: Session = Depends(get_session),
+    settings=Depends(get_settings),
+    user: User | None = Depends(require_auth),
+):
+    """Aceita TODAS as propostas pendentes, em ordem de posição, encadeando as
+    dependências (`depends_on`): cria as tasks filhas e, por padrão, já enfileira
+    cada uma — o worker executa uma por vez respeitando a cadeia (evita branches
+    paralelas no mesmo repo e conflito de merge).
+
+    Propostas rejeitadas são ignoradas; dependência rejeitada é dispensada. A
+    validação cross-repo de TODAS acontece antes de criar qualquer task (operação
+    não fica pela metade com erro de `allow_external_tasks`)."""
+    task = _get_task_or_404(session, task_id)
+    _ensure_can_act(session, task, user)
+    pending = sorted(
+        (p for p in task.proposals if p.status == "pending"),
+        key=lambda p: p.position,
+    )
+    if not pending:
+        raise HTTPException(400, "nenhuma proposta pendente para aceitar")
+
+    for proposal in pending:
+        if proposal.target_repository_id is not None:
+            target_repo = session.get(Repository, proposal.target_repository_id)
+            if target_repo is None:
+                raise HTTPException(
+                    404, f"repositório alvo da proposta '{proposal.title}' não encontrado"
+                )
+            if not target_repo.allow_external_tasks:
+                raise HTTPException(
+                    400,
+                    f"repositório '{target_repo.name}' não aceita tasks externas",
+                )
+
+    created_ids: list[int] = []
+    for proposal in pending:
+        depends_on_task_id, dep_warnings = _resolve_proposal_dependencies(task, proposal)
+        child = create_child_task(
+            session,
+            task,
+            title=proposal.title,
+            description=proposal.description,
+            kind=proposal.kind,
+            target_repository_id=proposal.target_repository_id,
+            pipeline_id=proposal.pipeline_id,
+            depends_on_task_id=depends_on_task_id,
+        )
+        proposal.status = "accepted"
+        proposal.accepted_task_id = child.id
+        created_ids.append(child.id)
+        _system_event(
+            session, _anchor_step(task), "proposal_accepted",
+            {
+                "proposal_id": proposal.id,
+                "title": proposal.title,
+                "child_task_id": child.id,
+                "depends_on_task_id": depends_on_task_id,
+                "warnings": dep_warnings,
+                "accept_all": True,
+            },
+        )
+        if data.start:
+            _apply_task_start(child, settings)
+    session.commit()
+    return AcceptAllProposalsOut(
+        accepted=len(created_ids), task_ids=created_ids, started=data.start
+    )
 
 
 @router.post("/{task_id}/proposals/{proposal_id}/reject", response_model=TaskOut)
@@ -587,16 +716,7 @@ def start_task(
     _ensure_can_act(session, task, user)
     if task.status != TASK_CREATED:
         raise HTTPException(400, f"tarefa não está em 'created' (status atual: {task.status})")
-    task.branch = f"{settings.branch_prefix}/task-{task.id}"
-    first = min(_active_steps(task), key=lambda st: st.position)
-    # Modo manual (ou primeira fase manual): abre o chat em vez de enfileirar.
-    if task.mode == TASK_MODE_MANUAL or _effective_step_mode(first, task) == STEP_MODE_MANUAL:
-        task.status = TASK_OPEN
-        task.chat_status = CHAT_STATUS_IDLE
-        task.pending_action = None
-    else:
-        task.status = TASK_QUEUED
-        first.status = STEP_PENDING
+    _apply_task_start(task, settings)
     session.commit()
     return _get_task_or_404(session, task_id)
 

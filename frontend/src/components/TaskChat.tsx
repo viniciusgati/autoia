@@ -96,7 +96,11 @@ function TaskIntro({
   onError: (message: string) => void;
   canAct?: boolean;
 }) {
-  const pending = (turn.proposals ?? []).filter((p) => p.status === "pending");
+  const allProposals = turn.proposals ?? [];
+  const pending = allProposals.filter((p) => p.status === "pending");
+  const titlesByPosition = new Map(
+    allProposals.map((p) => [p.position, `#${p.position + 1} ${p.title}`]),
+  );
   return (
     <div className="chat-msg">
       <span className="chat-avatar chat-avatar-worker">📋</span>
@@ -128,6 +132,9 @@ function TaskIntro({
                 proposal={p}
                 repoNames={repoNames}
                 parentRepoName={parentRepoName}
+                dependsOnLabels={p.depends_on.map(
+                  (dep) => titlesByPosition.get(dep) ?? `#${dep + 1}`,
+                )}
                 onChanged={onProposalsChanged}
                 onError={onError}
                 canAct={canAct}

@@ -428,9 +428,26 @@ class TaskProposalOut(ApiModel):
     target_repository_id: int | None
     # Pipeline que a task filha usará se aceita (NULL = default do repo/pai).
     pipeline_id: int | None = None
+    # Posições (0-based, iguais a `position`) das propostas que precisam ser
+    # concluídas antes desta (encadeamento de execução).
+    depends_on: list[int] = []
     status: str
     created_at: datetime
     accepted_task_id: int | None = None
+
+
+class AcceptAllProposalsRequest(ApiModel):
+    """Aceite em lote: cria as tasks filhas pendentes em ordem de posição,
+    encadeando as dependências. `start=True` já enfileira a cadeia (o worker
+    executa uma por vez, respeitando `depends_on`)."""
+
+    start: bool = True
+
+
+class AcceptAllProposalsOut(ApiModel):
+    accepted: int
+    task_ids: list[int] = []
+    started: bool = True
 
 
 class TaskProposalUpdate(ApiModel):
@@ -498,6 +515,7 @@ class TaskListItem(ApiModel):
     created_at: datetime
     updated_at: datetime
     parent_task_id: int | None = None
+    depends_on_task_id: int | None = None
     responsible_id: int | None = None
     responsible: UserOut | None = None
     project_id: int | None = None
@@ -538,6 +556,7 @@ class TaskOut(ApiModel):
     created_at: datetime
     updated_at: datetime
     parent_task_id: int | None = None
+    depends_on_task_id: int | None = None
     responsible_id: int | None = None
     responsible: UserOut | None = None
     project_id: int | None = None

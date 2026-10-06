@@ -191,6 +191,8 @@ export interface TaskProposal {
   repository_id: number | null;
   target_repository_id: number | null;
   pipeline_id: number | null;
+  /** Posições (0-based) das propostas que precisam ser concluídas antes desta. */
+  depends_on: number[];
   status: "pending" | "accepted" | "rejected";
   created_at: string;
   accepted_task_id: number | null;
@@ -275,6 +277,8 @@ export interface Task {
   subtasks: SubTask[];
   proposals: TaskProposal[];
   parent_task_id: number | null;
+  /** Task que precisa estar `done` antes de esta ser reclamada (null = sem dependência). */
+  depends_on_task_id: number | null;
   children: Task[];
 }
 
@@ -314,6 +318,8 @@ export interface TaskListItem {
   created_at: string;
   updated_at: string;
   parent_task_id: number | null;
+  /** Task que precisa estar `done` antes de esta ser reclamada (null = sem dependência). */
+  depends_on_task_id: number | null;
   responsible_id: number | null;
   responsible: User | null;
   project_id: number | null;

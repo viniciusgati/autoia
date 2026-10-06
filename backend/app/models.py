@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text, UniqueConstraint
@@ -354,6 +355,12 @@ class Task(Base):
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(default=utcnow, onupdate=utcnow)
     parent_task_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("tasks.id"), nullable=True)
+    # Dependência de execução: esta task só é reclamada pelo worker quando a task
+    # apontada está `done` (nasce do encadeamento de propostas aceitas em ordem —
+    # evita branches paralelas no mesmo repo e conflito de merge).
+    depends_on_task_id: Mapped[int | None] = mapped_column(
+        Integer, ForeignKey("tasks.id"), nullable=True
+    )
     # Responsável explícito pela tarefa (default = criador). NULL em tasks
     # pré-existentes até reatribuição: "sem responsável = qualquer autenticado atua".
     responsible_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("users.id"), nullable=True)
@@ -377,8 +384,12 @@ class Task(Base):
 
     repository: Mapped[Repository] = relationship(back_populates="tasks")
     pipeline: Mapped[Pipeline] = relationship()
-    parent: Mapped["Task | None"] = relationship(remote_side="Task.id", back_populates="children")
-    children: Mapped[list["Task"]] = relationship(back_populates="parent")
+    parent: Mapped["Task | None"] = relationship(
+        remote_side="Task.id", back_populates="children", foreign_keys=[parent_task_id]
+    )
+    children: Mapped[list["Task"]] = relationship(
+        back_populates="parent", foreign_keys=[parent_task_id]
+    )
     responsible: Mapped["User | None"] = relationship(foreign_keys=[responsible_id])
     project: Mapped["Project | None"] = relationship(back_populates="tasks")
     epic: Mapped["Epic | None"] = relationship(back_populates="tasks")
@@ -520,8 +531,11 @@ class TaskProposal(Base):
 
     O worker NUNCA cria a task automaticamente: grava a proposta (dedup por
     `task_id + title`) e o humano decide aceitar/rejeitar via API. `pipeline_id`
-    é opcional: quando definido (escolhido na UI antes de aceitar), a task filha
-    usa esse pipeline em vez do default do repo/pai."""
+    é opcional: quando definido (informado pelo propositor via `surface`/`pipeline`
+    ou escolhido na UI antes de aceitar), a task filha usa esse pipeline em vez do
+    default do repo/pai. `depends_on_json` guarda as posições (0-based, como
+    `position`) das propostas que precisam ser concluídas antes desta — o aceite
+    resolve para `Task.depends_on_task_id` e o worker executa na ordem."""
 
     __tablename__ = "task_proposals"
 
@@ -539,6 +553,9 @@ class TaskProposal(Base):
     pipeline_id: Mapped[int | None] = mapped_column(
         Integer, ForeignKey("pipelines.id"), nullable=True
     )
+    # Posições (0-based, iguais a `position`) das propostas predecessoras.
+    # Armazenado como JSON text (coluna aditiva) — exposto como lista na API.
+    depends_on_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     accepted_task_id: Mapped[int | None] = mapped_column(
@@ -546,6 +563,23 @@ class TaskProposal(Base):
     )
 
     task: Mapped[Task] = relationship(back_populates="proposals", foreign_keys=[task_id])
+
+    @property
+    def depends_on(self) -> list[int]:
+        """Posições das propostas predecessoras (lista vazia se inválida)."""
+        try:
+            values = json.loads(self.depends_on_json or "[]")
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(values, list):
+            return []
+        result: list[int] = []
+        for value in values:
+            try:
+                result.append(int(value))
+            except (TypeError, ValueError):
+                continue
+        return result
 
     @property
     def repository_id(self) -> int | None:

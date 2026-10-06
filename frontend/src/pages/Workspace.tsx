@@ -215,8 +215,9 @@ function availablePositions(task: Task): { position: number; label: string }[] {
   }));
 }
 
-function ProposalRow({ proposal, onChanged, onError, canAct }: {
+function ProposalRow({ proposal, dependsOnLabels, onChanged, onError, canAct }: {
   proposal: TaskProposal;
+  dependsOnLabels?: string[];
   onChanged: () => void;
   onError: (msg: string) => void;
   canAct: boolean;
@@ -234,9 +235,20 @@ function ProposalRow({ proposal, onChanged, onError, canAct }: {
       setBusy(false);
     }
   };
+  const depLabels = proposal.depends_on.map(
+    (dep, i) => dependsOnLabels?.[i] ?? `#${dep + 1}`,
+  );
   return (
     <div className="ws-proposal">
-      <div className="ws-proposal-title">{proposal.title}</div>
+      <div className="ws-proposal-title">
+        <span className="proposal-order" title="Posição sugerida de execução">
+          {proposal.position + 1}º
+        </span>{" "}
+        {proposal.title}
+      </div>
+      {proposal.depends_on.length > 0 && (
+        <div className="proposal-deps">⛓ requer antes: {depLabels.join(", ")}</div>
+      )}
       {proposal.description && <div className="ws-proposal-desc">{proposal.description}</div>}
       {proposal.status === "pending" ? (
         <div className="ws-proposal-actions">
@@ -515,7 +527,18 @@ function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile, su
           <h4 className="ws-section-title">Tarefas propostas</h4>
           <div className="ws-proposals">
             {occ.proposals.map((p) => (
-              <ProposalRow key={p.id} proposal={p} onChanged={onChanged} onError={onError} canAct={canAct} />
+              <ProposalRow
+                key={p.id}
+                proposal={p}
+                dependsOnLabels={p.depends_on.map(
+                  (dep) =>
+                    occ.proposals.find((x) => x.position === dep)?.title ??
+                    `#${dep + 1}`,
+                )}
+                onChanged={onChanged}
+                onError={onError}
+                canAct={canAct}
+              />
             ))}
           </div>
         </section>

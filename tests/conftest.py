@@ -48,6 +48,29 @@ VERDICT_RULES = {
 }
 
 
+def rich_proposal(title: str = "tarefa proposta", **overrides) -> dict:
+    """Entrada VÁLIDA de `autoia_tasks.json`: descrição com as seções obrigatórias
+    (Contexto/Escopo/Critérios de aceite/Fora de escopo) e tamanho acima do mínimo
+    exigido pelo worker. Sobrescreva qualquer campo com kwargs."""
+    description = (
+        f"### Contexto\n"
+        f"A entrega '{title}' existe porque o produto precisa evoluir com qualidade "
+        f"e o comportamento atual não cobre esse fluxo; as análises das fases "
+        f"anteriores mostraram evidência concreta dessa necessidade no checkout.\n\n"
+        f"### Escopo\n"
+        f"- Implementar o fluxo principal de '{title}' no backend e na interface.\n"
+        f"- Cobrir os casos de erro, estados vazios e carregamento.\n\n"
+        f"### Critérios de aceite\n"
+        f"- [ ] O fluxo funciona de ponta a ponta e é verificável por teste.\n"
+        f"- [ ] Os estados de erro são explícitos para o usuário.\n\n"
+        f"### Fora de escopo\n"
+        f"- Refatorações amplas não relacionadas e mudanças de infraestrutura."
+    )
+    entry = {"title": title, "description": description, "kind": "feature"}
+    entry.update(overrides)
+    return entry
+
+
 @pytest.fixture
 def settings(tmp_path) -> Settings:
     return Settings(

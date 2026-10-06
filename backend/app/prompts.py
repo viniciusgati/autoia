@@ -59,21 +59,49 @@ subtarefas já dividem o trabalho na mesma branch, e propostas virariam tasks co
 branches paralelas (risco de conflito de merge). Se houver subtarefas, o sistema IGNORA
 este arquivo. Escolha UMA das formas de divisão por task.
 
-Formato do arquivo (JSON array):
+### Formato do arquivo (JSON array)
 ```json
 [
   {
     "title": "Título curto e descritivo",
-    "description": "Descrição detalhada do que precisa ser feito",
+    "description": "### Contexto\\n<problema/oportunidade, por que a tarefa existe>\\n### Escopo\\n<o que entra, áreas/arquivos prováveis>\\n### Critérios de aceite\\n- [ ] <verificação concreta>\\n### Fora de escopo\\n<o que NÃO entra>",
     "kind": "feature",
+    "surface": "fullstack",
+    "depends_on": [],
+    "repository": "nome-do-repo"
+  },
+  {
+    "title": "Segunda entrega",
+    "description": "### Contexto\\n...\\n### Escopo\\n...\\n### Critérios de aceite\\n- [ ] ...\\n### Fora de escopo\\n...",
+    "kind": "bug",
+    "surface": "backend",
+    "depends_on": [1],
     "repository": "nome-do-repo"
   }
 ]
 ```
 
-- `title` (obrigatório): nome da tarefa, claro e acionável
-- `description` (opcional): detalhes, contexto, critérios de aceite
-- `kind` (opcional, default "feature"): "feature", "bug", "issue" ou "chore"
+- `title` (obrigatório): nome da tarefa, claro e acionável.
+- `description` (obrigatório e DETALHADO): markdown com as seções `### Contexto`
+  (por que a tarefa existe — problema/oportunidade e evidência encontrada nas
+  análises), `### Escopo` (o que entra — comportamentos e áreas/arquivos prováveis),
+  `### Critérios de aceite` (checklist verificável do que prova a entrega) e
+  `### Fora de escopo` (o que NÃO entra, para evitar que o executor expanda o
+  trabalho). Acrescente `### Dependências` quando houver. Descrições CURTAS são
+  DESCARTADAS pelo sistema (mínimo ~350 caracteres, com as 4 seções); escreva para
+  um desenvolvedor que NÃO participou do brainstorm — contexto suficiente para
+  implementar sem adivinhar.
+- `kind` (opcional, default "feature"): "feature", "bug", "issue" ou "chore".
+- `surface` (opcional, recomendado): superfície da entrega — "backend", "frontend"
+  ou "fullstack". O sistema usa para escolher a pipeline (`deep-v2-<surface>`) e a
+  proposta já nasce com ela; sem `surface`, vale o padrão do projeto.
+- `pipeline` (opcional): nome EXATO de uma pipeline, quando o projeto tiver um fluxo
+  próprio (ex.: ADVPL). Tem prioridade sobre `surface`.
+- `depends_on` (opcional): posições 1-based NESTE ARQUIVO das propostas que precisam
+  ser concluídas ANTES desta. O sistema cria a cadeia: as tasks filhas rodam uma por
+  vez, na ordem. Encadeie, por padrão, tarefas do MESMO projeto (evita branches
+  paralelas e conflito de merge); deixe sem dependência apenas quando forem
+  realmente independentes (arquivos/áreas disjuntos).
 - `repository` (opcional): nome de outro repositório cadastrado no autoia. Use APENAS
   se o projeto estiver na seção "Repositórios onde este projeto pode criar tarefas"
   do contexto — propostas para outros repositórios são RECUSADAS. Se omitido, a tarefa
@@ -724,6 +752,10 @@ cada uma na interface. Escreva com EXATAMENTE estas seções:
 
 ### Propostas criadas
 - <título> — <kind> — <resumo do porquê e o que entrega>
+
+### Ordem de execução
+- <para cada proposta: pipeline (`surface`/`pipeline`), dependências (`depends_on`) e por
+  que essa ordem — o sistema executa as tasks filhas em sequência respeitando as deps>
 
 ### Critérios de decisão
 - <para cada proposta: o que valida a escolha e qual o impacto esperado>

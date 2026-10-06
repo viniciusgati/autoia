@@ -354,6 +354,11 @@ export const api = {
   listProposals: (taskId: number) => request<TaskProposal[]>(`/api/tasks/${taskId}/proposals`),
   acceptProposal: (taskId: number, proposalId: number) =>
     request<Task>(`/api/tasks/${taskId}/proposals/${proposalId}/accept`, { method: "POST" }),
+  acceptAllProposals: (taskId: number, start = true) =>
+    request<{ accepted: number; task_ids: number[]; started: boolean }>(
+      `/api/tasks/${taskId}/proposals/accept-all`,
+      { method: "POST", body: JSON.stringify({ start }) },
+    ),
   rejectProposal: (taskId: number, proposalId: number) =>
     request<Task>(`/api/tasks/${taskId}/proposals/${proposalId}/reject`, { method: "POST" }),
   updateProposal: (taskId: number, proposalId: number, data: { title?: string; description?: string; kind?: string; pipeline_id?: number | null }) =>
