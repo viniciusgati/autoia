@@ -5,14 +5,10 @@ medição do armazenamento e limpeza de arquivos órfãos. Restrito a admin glob
 
 from __future__ import annotations
 
-import json
-import shutil
-import subprocess
-import time
-
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
+from .. import model_catalog
 from ..config import Settings
 from ..models import OpenCodeAccount, Repository, User
 from ..opencode_accounts import (
@@ -36,120 +32,28 @@ from .deps import get_session, get_settings, require_admin
 
 router = APIRouter(prefix="/api/system", tags=["system"])
 
-# Cache curto do catálogo de modelos do codex (o `codex debug models` remoto
-# pode consultar a rede — não vale repetir a cada abertura do dropdown).
-_CODEX_MODELS_CACHE: dict = {"ts": 0.0, "models": [], "source": "config"}
-_CODEX_MODELS_TTL_S = 60.0
-
-# Cache curto do catálogo de modelos do opencode (`opencode models`).
-_OPENCODE_MODELS_CACHE: dict = {"ts": 0.0, "models": [], "source": "config"}
-_OPENCODE_MODELS_TTL_S = 60.0
-
-
-def _codex_models_from_cli(codex_bin: str) -> list[str]:
-    """Lê o catálogo do codex (`codex debug models`) e devolve os slugs visíveis.
-
-    Tenta primeiro o catálogo remoto (o que a conta pode usar); se falhar
-    (sem rede/auth), usa o `--bundled`. Qualquer erro → lista vazia (a UI cai
-    na lista configurável por env).
-    """
-    attempts = [
-        [codex_bin, "debug", "models"],
-        [codex_bin, "debug", "models", "--bundled"],
-    ]
-    for cmd in attempts:
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=15,
-                start_new_session=True,
-            )
-            if proc.returncode != 0:
-                continue
-            catalog = json.loads(proc.stdout)
-            slugs = []
-            for model in catalog.get("models", []):
-                if (model.get("visibility") or "list") != "list":
-                    continue
-                slug = (model.get("slug") or "").strip()
-                if slug:
-                    slugs.append(slug)
-            if slugs:
-                return slugs
-        except (OSError, subprocess.TimeoutExpired, ValueError):
-            continue
-    return []
-
 
 @router.get("/codex/models", response_model=CodexModelsOut)
 def codex_models(settings: Settings = Depends(get_settings)):
     """Modelos disponíveis para o executor codex (dropdown de seleção).
 
-    Fonte primária: `codex debug models` (catálogo real do CLI, cache curto);
-    fallback (sem binário/erro): lista fixa de `AUTOIA_CODEX_MODELS`.
+    Fonte ÚNICA: `codex debug models` (cache curto). Sem fallback de lista fixa
+    — CLI fora → `models=[]` e `source="erro"` (a UI mostra o estado e tenta de
+    novo) em vez de modelos default que não correspondem ao catálogo real.
     """
-    now = time.monotonic()
-    cached = _CODEX_MODELS_CACHE
-    if now - cached["ts"] > _CODEX_MODELS_TTL_S:
-        models = []
-        source = "config"
-        if shutil.which(settings.codex_bin):
-            cli_models = _codex_models_from_cli(settings.codex_bin)
-            if cli_models:
-                models, source = cli_models, "cli"
-        if not models:
-            models = list(settings.codex_models)
-        cached.update({"ts": now, "models": models, "source": source})
-    return CodexModelsOut(models=list(cached["models"]), source=cached["source"])
-
-
-def _opencode_models_from_cli(opencode_bin: str) -> list[str]:
-    """Lê o catálogo do opencode (`opencode models`) e devolve os slugs visíveis.
-
-    O `opencode models` imprime um slug por linha (sem JSON). Qualquer erro →
-    lista vazia (a UI cai na lista configurável por env).
-    """
-    try:
-        proc = subprocess.run(
-            [opencode_bin, "models"],
-            capture_output=True,
-            text=True,
-            timeout=15,
-            start_new_session=True,
-        )
-        if proc.returncode != 0:
-            return []
-        return [
-            line.strip()
-            for line in proc.stdout.splitlines()
-            if line.strip()
-        ]
-    except (OSError, subprocess.TimeoutExpired, ValueError):
-        return []
+    models, source = model_catalog.codex_models(settings.codex_bin)
+    return CodexModelsOut(models=models, source=source)
 
 
 @router.get("/opencode/models", response_model=OpenCodeModelsOut)
 def opencode_models(settings: Settings = Depends(get_settings)):
     """Modelos disponíveis para o executor opencode (dropdown de seleção).
 
-    Fonte primária: `opencode models` (catálogo real do CLI, um slug por linha,
-    cache curto); fallback (sem binário/erro): lista fixa de `AUTOIA_OPENCODE_MODELS`.
+    Fonte ÚNICA: `opencode models` (um slug por linha, cache curto). Sem
+    fallback de lista fixa — CLI fora → `models=[]` e `source="erro"`.
     """
-    now = time.monotonic()
-    cached = _OPENCODE_MODELS_CACHE
-    if now - cached["ts"] > _OPENCODE_MODELS_TTL_S:
-        models = []
-        source = "config"
-        if shutil.which(settings.opencode_bin):
-            cli_models = _opencode_models_from_cli(settings.opencode_bin)
-            if cli_models:
-                models, source = cli_models, "cli"
-        if not models:
-            models = list(settings.opencode_models)
-        cached.update({"ts": now, "models": models, "source": source})
-    return OpenCodeModelsOut(models=list(cached["models"]), source=cached["source"])
+    models, source = model_catalog.opencode_models(settings.opencode_bin)
+    return OpenCodeModelsOut(models=models, source=source)
 
 
 @router.get("/storage", response_model=StorageReport)

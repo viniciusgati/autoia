@@ -293,6 +293,10 @@ falha por timeout e o veredicto NÃO é aproveitado (nem o parcial). Por isso:
   ou servidor externo quando o critério não exigir isso explicitamente.
 - Suba emulador/browser/ambiente externo SOMENTE se um critério exigir de forma
   explícita — e mantenha o roteiro mínimo necessário para o critério.
+- Se a missão do seu robô declarar emulador/dispositivo FORA DE ESCOPO (pipeline sem
+  emulador), essa diretriz PREVALECE sobre a sugestão acima: não inicie emulador, não
+  rode teste conectado/instrumentado e valide por JVM/Robolectric/build e revisão de
+  código/diff.
 - Não re-verifique o que já foi validado nas fases anteriores; foque nos critérios
   desta fase/subtarefa.
 - Escreva o `autoia_verdict.txt` assim que tiver evidência suficiente. Deixe
@@ -303,6 +307,10 @@ falha por timeout e o veredicto NÃO é aproveitado (nem o parcial). Por isso:
   foi pulado — sugerindo uma tarefa separada para a verificação lenta, se relevante.
 
 ### Testes visuais (smoke test com screenshots)
+Se a missão do seu robô declarar emulador/dispositivo FORA DE ESCOPO (pipeline sem
+emulador), PULE esta seção inteira: não abra emulador/navegador nem gere screenshots —
+a ausência de device não é falha.
+
 Se o projeto tiver interface visual (web, desktop, mobile), faça um smoke test visual:
 - Inicie o projeto e use as ferramentas de navegador (kimi-webbridge) para abrir as
   telas principais e verificar visualmente o funcionamento.
@@ -370,6 +378,9 @@ Esta fase é a AVALIAÇÃO FINAL da tarefa, ANTES da integração (merge).
   lixo (arquivos temporários, debug, credenciais) e sem dívidas não justificadas.
 - NÃO altere código nem arquivos do projeto: você AVALIA e REPORTA. Correções voltam
   automaticamente (bounce-back) com o seu relatório.
+- Se a missão do seu robô declarar emulador/dispositivo FORA DE ESCOPO (pipeline sem
+  emulador), NÃO exija nem tente prova em device: valide por revisão do código/diff e
+  pelas evidências JVM/build do handoff; registre no SUMMARY o que ficou fora do escopo.
 - Se a fase de verificação anterior terminou INCONCLUSIVA (veredicto ausente por falha
   de infraestrutura — emulador/navegador/teste que não rodou), VOCÊ é o robô que decide
   o veredicto final: valide os critérios por REVISÃO DO CÓDIGO E DO DIFF (não dependa da

@@ -24,10 +24,11 @@ import types
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import exists, func, update
+from sqlalchemy import exists, func, or_, update
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, aliased
 
-from .. import budget, guardrails, opencode_accounts, prompts, verdicts
+from .. import budget, guardrails, model_catalog, opencode_accounts, prompts, verdicts
 from ..config import Settings
 from ..db import Base, make_engine, make_session_factory, migrate_schema, utcnow
 from ..models import (
@@ -109,7 +110,6 @@ class EffectiveSettings:
     db_rule: str
     kimi_bin: str
     opencode_bin: str
-    opencode_model: str
     codex_bin: str
     codex_model: str
     log_dir: str
@@ -133,6 +133,9 @@ class EffectiveSettings:
     # Nome da conta opencode-go em uso nesta execução (None = host). Alimenta a
     # rotação automática de conta quando a conta esgota (`provider_limit`).
     opencode_account: str | None = None
+    # Build automático da imagem do sandbox quando ela faltar (receita em docker/).
+    sandbox_build_image: bool = True
+    sandbox_build_timeout: int = 2400
 
 
 # Padrão do watchdog "sem progresso" para perfis de toolchain Android: builds
@@ -254,7 +257,6 @@ def _effective(
         db_rule=repo.db_rule or settings.db_rule,
         kimi_bin=settings.kimi_bin,
         opencode_bin=settings.opencode_bin,
-        opencode_model=settings.opencode_model,
         codex_bin=settings.codex_bin,
         codex_model=settings.codex_model,
         log_dir=settings.log_dir,
@@ -269,6 +271,8 @@ def _effective(
         llm_max_concurrent=settings.llm_max_concurrent,
         llm_bg_timeout=settings.llm_bg_timeout,
         sandbox=_sandbox_config(settings, repo),
+        sandbox_build_image=settings.sandbox_build_image,
+        sandbox_build_timeout=settings.sandbox_build_timeout,
     )
     if session is not None:
         eff.opencode_account, eff.opencode_account_dir = (
@@ -539,21 +543,21 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
     peak_prev = False
     last_sweep = 0.0
     while True:
-        # Janela de pico: não reclamar novas fases (o trabalho em andamento
-        # termina; nada novo começa). Evita custo dobrado no provedor.
+        # Janela de pico: pausa apenas os modelos que têm tarifa de pico. Modelos
+        # isentos (ex.: `opencode-go/...`) continuam normalmente — o provedor
+        # deles não cobra a janela dobrada. O trabalho em andamento sempre termina.
         peak = settings.in_peak_hours()
         if peak and not peak_prev:
+            exempt = ", ".join(settings.peak_exempt_model_prefixes) or "nenhum"
             log.info(
-                "janela de pico ativa — pausando novas execuções (janelas UTC: %s)",
+                "janela de pico ativa — pausando modelos com tarifa de pico; "
+                "isentos: %s (janelas UTC: %s)",
+                exempt,
                 settings.peak_hours_windows,
             )
         elif not peak and peak_prev:
-            log.info("janela de pico encerrada — retomando novas execuções")
+            log.info("janela de pico encerrada — retomando novos modelos")
         peak_prev = peak
-        if peak:
-            _touch_heartbeat(hb_path)
-            time.sleep(60)
-            continue
         _touch_heartbeat(hb_path)
         # Varredura periódica (throttled): tasks 'em andamento' sem fase
         # reclamável são movidas para needs_review (decisão humana) — sem isso,
@@ -565,14 +569,22 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
                 log.exception("erro na varredura de tasks travadas")
             last_sweep = time.monotonic()
         try:
-            step_id = claim_next(session_factory)
+            if peak:
+                claimed = claim_next_with_token(
+                    session_factory,
+                    peak_exempt_only=True,
+                    peak_exempt_prefixes=settings.peak_exempt_model_prefixes,
+                )
+            else:
+                claimed = claim_next_with_token(session_factory)
         except Exception:
             log.exception("erro no claim de step")
             time.sleep(2)
             continue
-        if step_id is None:
-            time.sleep(2)
+        if claimed is None:
+            time.sleep(60 if peak else 2)
             continue
+        step_id, claimed_at = claimed
         log.info("executando step %s", step_id)
         # Heartbeat contínuo durante a fase (e o PM): o loop bloqueia no subprocess.
         import threading
@@ -586,20 +598,35 @@ def worker_loop(settings: Settings, session_factory, workspace_dir: str) -> None
             name="heartbeat",
         )
         hb_thread.start()
+        failure: str | None = None
         try:
-            trigger = execute_step(settings, session_factory, step_id)
+            trigger = execute_step(settings, session_factory, step_id, claimed_at)
             if trigger:
                 _maybe_pm(session_factory, settings, trigger["task_id"], trigger["reason"])
             # Resumo automático (se o repo tiver auto_summary) a cada fase decidida.
             _maybe_auto_summary(settings, session_factory, step_id)
             # Resumo "O que foi entregue" por fase (LLM de resumo dedicada).
             _maybe_step_summary(settings, session_factory, step_id)
-        except Exception:
+        except Exception as exc:
+            # A exceção NUNCA pode escapar do loop: ela matava o processo worker
+            # inteiro (`finally: os._exit(0)` em main.py) e o step ficava
+            # `running` para sempre — a task virava starvation (só o restart
+            # recupera). O motivo vai para o registro da fase.
             log.exception("erro executando step %s", step_id)
-            _fail_step_hard(session_factory, step_id)
+            failure = f"erro interno do worker: {exc}"
         finally:
             stop.set()
             hb_thread.join(timeout=1)
+            # Rede de proteção FINAL: se a fase ainda está `running` (caminho de
+            # falha que morreu com `database is locked`, exceção não tratada,
+            # decisão esquecida), ela é fechada aqui. Uma fase já decidida
+            # (done/failed) não é tocada — o `_fail_step_hard` só age sobre
+            # `running`. O TOKEN (`expected_started_at` = `started_at` do claim)
+            # impede que o `finally` de uma execução ANTIGA derrube a execução
+            # NOVA que já reclamou a fase (task-264).
+            _fail_step_hard(
+                session_factory, step_id, reason=failure, expected_started_at=claimed_at
+            )
 
 
 def _sweep_stuck_tasks(session_factory) -> None:
@@ -701,9 +728,75 @@ def _sweep_stuck_tasks(session_factory) -> None:
             _system_event(s, frontier, "task_stuck_needs_review", {"reason": reason})
             s.commit()
 
+        # Revival de dependentes: quem foi parado por dependência `failed`/
+        # `cancelled` fica em `needs_review` com o motivo em `error`; quando a
+        # dependência volta a andar (instrução humana, PM retry) ou CONCLUI, o
+        # dependente volta para a fila SOZINHO. Sem isso, ele só destravava com
+        # uma instrução manual ("pode seguir") mesmo DEPOIS de a dependência
+        # concluir (task-252 ficou presa assim). O `claim_next` continua exigindo
+        # a dependência `done` — voltar para `queued` não fura a ordem da cadeia.
+        for task in (
+            s.query(Task)
+            .filter(
+                Task.status == TASK_NEEDS_REVIEW,
+                Task.depends_on_task_id.isnot(None),
+                Task.error.like("dependência #%"),
+            )
+            .all()
+        ):
+            dependency = s.get(Task, task.depends_on_task_id)
+            if dependency is not None and dependency.status in (
+                TASK_FAILED,
+                TASK_CANCELLED,
+            ):
+                continue  # segue bloqueada de verdade — aguarda decisão humana
+            previous = task.error
+            task.status = TASK_QUEUED
+            task.error = None
+            anchor = _active_steps(task)
+            _system_event(
+                s,
+                anchor[0] if anchor else None,
+                "task_dependency_resumed",
+                {
+                    "reason": "dependência voltou a andar ou concluiu — task re-enfileirada",
+                    "previous_reason": previous,
+                    "dependency_task_id": task.depends_on_task_id,
+                },
+            )
+            log.info(
+                "task %s: dependência #%s não está mais travada — re-enfileirando",
+                task.id,
+                task.depends_on_task_id,
+            )
+            s.commit()
+
 
 def claim_next(session_factory) -> int | None:
+    """Reivindica o próximo step pendente (só o id; ver `claim_next_with_token`)."""
+    claimed = claim_next_with_token(session_factory)
+    return claimed[0] if claimed else None
+
+
+def claim_next_with_token(
+    session_factory,
+    *,
+    peak_exempt_only: bool = False,
+    peak_exempt_prefixes: tuple[str, ...] = ("opencode-go",),
+) -> tuple[int, datetime] | None:
     """Reivindica o próximo step pendente de uma task ativa (claim atômico).
+
+    Devolve `(step_id, started_at)`: o `started_at` gravado no claim é o TOKEN
+    da execução — a rede de proteção `_fail_step_hard` só fecha a fase se ela
+    ainda for ESTA execução. Sem o token, o `finally` de uma execução antiga
+    (ex.: PM lento por limite do provedor seguido de "tenta novamente") derrubava
+    a execução NOVA que já tinha reclamado a fase (task-264: a fase morreu com
+    "erro interno do worker" e a história recém-gerada foi descartada).
+
+    `peak_exempt_only=True` (usado durante a janela de pico) restringe o claim a
+    tasks cujo modelo efetivo começa com um prefixo isento de pico (default
+    `opencode-go`). O modelo efetivo segue a precedência real da execução:
+    `Task.model` > `Robot.model` > `Repository.default_model`; vazio é ignorado.
 
     Steps com `pause_before` (gate de aprovação humana configurado no pipeline)
     NUNCA são reclamados: a task é marcada como `waiting_approval` e o step fica
@@ -741,25 +834,44 @@ def claim_next(session_factory) -> int | None:
             dependency.id == Task.depends_on_task_id,
             dependency.status != TASK_DONE,
         )
-        step = (
+        conditions = [
+            TaskStep.status == STEP_PENDING,
+            TaskStep.archived.is_(False),
+            # Fases com `retry_at` no futuro (limite do provedor) não são
+            # reclamadas até o horário — retomada automática sem golpe.
+            (TaskStep.retry_at.is_(None)) | (TaskStep.retry_at <= utcnow()),
+            Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
+            TaskStep.task_id.not_in(running_task_ids),
+            # Modo human-in-the-loop: o auto-worker não reclama fases de tasks
+            # em modo manual, nem fases marcadas como manuais (o chat-worker
+            # dirige via dispatcher).
+            Task.mode != TASK_MODE_MANUAL,
+            (TaskStep.execution_mode.is_(None)) | (TaskStep.execution_mode != STEP_MODE_MANUAL),
+            ~earlier_not_done,
+            ~dependency_not_done,
+        ]
+        query = (
             s.query(TaskStep)
             .join(Task)
-            .filter(
-                TaskStep.status == STEP_PENDING,
-                TaskStep.archived.is_(False),
-                # Fases com `retry_at` no futuro (limite do provedor) não são
-                # reclamadas até o horário — retomada automática sem golpe.
-                (TaskStep.retry_at.is_(None)) | (TaskStep.retry_at <= utcnow()),
-                Task.status.in_([TASK_QUEUED, TASK_IN_PROGRESS]),
-                TaskStep.task_id.not_in(running_task_ids),
-                # Modo human-in-the-loop: o auto-worker não reclama fases de tasks
-                # em modo manual, nem fases marcadas como manuais (o chat-worker
-                # dirige via dispatcher).
-                Task.mode != TASK_MODE_MANUAL,
-                (TaskStep.execution_mode.is_(None)) | (TaskStep.execution_mode != STEP_MODE_MANUAL),
-                ~earlier_not_done,
-                ~dependency_not_done,
+            .outerjoin(Robot, Robot.id == TaskStep.robot_id)
+            .outerjoin(Repository, Repository.id == Task.repository_id)
+        )
+        if peak_exempt_only:
+            prefixes = [
+                p.strip().lower() for p in peak_exempt_prefixes if p and p.strip()
+            ]
+            if not prefixes:
+                return None
+            effective_model = func.coalesce(
+                func.nullif(Task.model, ""),
+                func.nullif(Robot.model, ""),
+                Repository.default_model,
             )
+            conditions.append(
+                or_(*[effective_model.like(f"{prefix}%") for prefix in prefixes])
+            )
+        step = (
+            query.filter(*conditions)
             .order_by(TaskStep.id)
             .first()
         )
@@ -777,6 +889,7 @@ def claim_next(session_factory) -> int | None:
             )
             s.commit()
             return None
+        claimed_at = utcnow()
         result = s.execute(
             update(TaskStep)
             .where(
@@ -792,7 +905,7 @@ def claim_next(session_factory) -> int | None:
             )
             .values(
                 status=STEP_RUNNING,
-                started_at=utcnow(),
+                started_at=claimed_at,
                 # Snapshot do responsável da task no momento do claim.
                 responsible_id=step.task.responsible_id,
             )
@@ -801,7 +914,7 @@ def claim_next(session_factory) -> int | None:
             return None
         step.task.status = TASK_IN_PROGRESS
         s.commit()
-        return step.id
+        return step.id, claimed_at
 
 
 def _system_event(s: Session, step: TaskStep | None, kind: str, payload: dict) -> None:
@@ -1199,6 +1312,7 @@ def _run_executor(
     skills_dir: str | None = None,
     require_device: bool = False,
     skip_device_bootstrap: bool = False,
+    slot_abort_check=None,
 ):
     """Executa a fase com o executor da task: `kimi` (kimi-code), `opencode` ou
     `codex` (OpenAI Codex CLI).
@@ -1206,6 +1320,12 @@ def _run_executor(
     `repo_id` identifica o projeto no registro de subprocessos ativos e alimenta o
     watchdog de parada cooperativa (`stop_file`): se a API excluir o projeto
     enquanto o robô roda, o processo é morto.
+
+    `slot_abort_check` (opcional, callable `() -> str | None`) é consultado
+    enquanto a execução espera um slot livre (LLM/emulador): devolver um motivo
+    aborta a espera SEM iniciar o executor — pause/instrução/exclusão do usuário
+    passam a valer mesmo antes de o subprocesso existir. Construído por
+    `exec_common.make_step_abort_check(session_factory, step_id)` para fases.
 
     O sandbox vem de `eff.sandbox`: com modo ligado, o comando roda dentro de um
     contêiner (mesma árvore do checkout). No modo `full`, garante o proxy de egress
@@ -1260,7 +1380,25 @@ def _run_executor(
                     sandbox_mod.add_proxy_hosts([host])
             except gitops.GitError:
                 pass
-        if not (sandbox_mod.docker_available() and sandbox_mod.docker_image_available(sandbox.image)):
+        sandbox_ready = sandbox_mod.docker_available() and sandbox_mod.docker_image_available(
+            sandbox.image
+        )
+        if not sandbox_ready and sandbox.fail_closed:
+            # Imagem sumiu do Docker local (limpeza de disco, prune, troca de
+            # máquina): tenta RECONSTRUIR a partir da receita versionada em
+            # `docker/` antes de declarar a fase `infra_blocked` — com lock por
+            # imagem, os outros workers esperam em vez de duplicar o build.
+            sandbox_mod.ensure_image(
+                sandbox.image,
+                log_dir=eff.log_dir,
+                lock_dir=eff.workspace_dir,
+                timeout_s=eff.sandbox_build_timeout,
+                enabled=eff.sandbox_build_image,
+            )
+            sandbox_ready = sandbox_mod.docker_available() and (
+                sandbox_mod.docker_image_available(sandbox.image)
+            )
+        if not sandbox_ready:
             if sandbox.fail_closed:
                 # Fail-closed: sem sandbox não há execução (meta: falha do sandbox
                 # → falha da execução, nunca dano).
@@ -1348,14 +1486,42 @@ def _run_executor(
     # mesmo tempo, entre TODOS os processos (workers forkados + chamado/chat).
     # Depois o slot LLM (teto global de executores simultâneos — protege o
     # provedor contra 429). Ordem fixa device → llm em todos os caminhos.
-    device_slot = exec_common.acquire_device_slot(
-        sandbox, eff.workspace_dir, eff.android_max_concurrent
-    )
-    llm_slot = exec_common.acquire_llm_slot(eff.workspace_dir, eff.llm_max_concurrent)
-    # `skip_device_bootstrap` marca as gerações LLM pura (missão/resumo/PM/
-    # dispatcher): teto de timeout curto para não segurar o slot por horas.
-    run_timeout = _effective_run_timeout(eff, llm_pure=skip_device_bootstrap)
+    #
+    # A espera é VISÍVEL (`slot_wait`/`slot_ready` na timeline) e interrompível
+    # (`slot_abort_check`): a fase parecia "travada" quando ficava minutos
+    # "rodando" atrás de um slot sem nenhum sinal, e o pause/instrução do usuário
+    # só valia quando o slot finalmente liberava (task-250).
+    def _slot_wait_start(kind: str, limit: int) -> None:
+        log.info("aguardando slot de %s (limite %s) para a execução", kind, limit)
+        if on_event is not None:
+            on_event("slot_wait", {"slot": kind, "limit": limit}, 0.0)
+
+    def _slot_wait_end(kind: str, waited_s: float) -> None:
+        log.info("slot de %s liberado após %.1fs — iniciando a execução", kind, waited_s)
+        if on_event is not None:
+            on_event("slot_ready", {"slot": kind, "waited_ms": round(waited_s * 1000)}, 0.0)
+
+    device_slot = None
+    llm_slot = None
     try:
+        device_slot = exec_common.acquire_device_slot(
+            sandbox,
+            eff.workspace_dir,
+            eff.android_max_concurrent,
+            should_abort=slot_abort_check,
+            on_wait_start=_slot_wait_start,
+            on_wait_end=_slot_wait_end,
+        )
+        llm_slot = exec_common.acquire_llm_slot(
+            eff.workspace_dir,
+            eff.llm_max_concurrent,
+            should_abort=slot_abort_check,
+            on_wait_start=_slot_wait_start,
+            on_wait_end=_slot_wait_end,
+        )
+        # `skip_device_bootstrap` marca as gerações LLM pura (missão/resumo/PM/
+        # dispatcher): teto de timeout curto para não segurar o slot por horas.
+        run_timeout = _effective_run_timeout(eff, llm_pure=skip_device_bootstrap)
         if executor == "opencode":
             outcome = opencode_exec.run_opencode(
                 prompt,
@@ -1367,7 +1533,9 @@ def _run_executor(
                 risky_patterns=eff.risky_patterns,
                 checkout_path=cwd,
                 whitelisted_hosts=eff.whitelisted_hosts,
-                model=model or eff.opencode_model,
+                # Sem modelo escolhido, o fallback vem do catálogo do CLI
+                # (`opencode models`) — nunca de um default fixo de config.
+                model=model_catalog.resolve_opencode_model(eff.opencode_bin, model),
                 no_progress_timeout=eff.no_progress_timeout,
                 max_repeated_searches=eff.max_repeated_searches,
                 resume_session_id=resume_session_id,
@@ -1437,6 +1605,15 @@ def _run_executor(
         if sandbox_scan and not outcome.sandbox_scan:
             outcome.sandbox_scan = sandbox_scan
         return outcome
+    except exec_common.SlotWaitAborted as exc:
+        # A espera foi interrompida por pause/instrução/exclusão: a fase NÃO
+        # inicia o executor. O `_decide` vê o step fora de `running` (a ação do
+        # usuário manda) e não decide por ela.
+        outcome = exec_common.ExecOutcome()
+        outcome.aborted = True
+        outcome.abort_reason = exc.reason
+        outcome.sandbox_mode = sandbox.mode
+        return outcome
     finally:
         exec_common.release_slot(llm_slot)
         exec_common.release_slot(device_slot)
@@ -1446,12 +1623,23 @@ def _run_executor(
             log.warning("não foi possível liberar push no checkout %s", cwd, exc_info=True)
 
 
-def execute_step(settings: Settings, session_factory, step_id: int) -> dict | None:
-    """Executa o step. Retorna um gatilho de PM ({task_id, reason}) quando aplicável."""
+def execute_step(
+    settings: Settings,
+    session_factory,
+    step_id: int,
+    claimed_started_at: datetime | None = None,
+) -> dict | None:
+    """Executa o step. Retorna um gatilho de PM ({task_id, reason}) quando aplicável.
+
+    `claimed_started_at` (token do claim, opcional): os caminhos de ERRO interno
+    (`_fail_step_hard` de clone/branch) só fecham a fase se ela ainda for a MESMA
+    execução — uma execução superseded pelo usuário não derruba a nova.
+    """
     with session_factory() as s:
         step = s.get(TaskStep, step_id)
         if step is None:
             return None
+        exec_token = claimed_started_at if claimed_started_at is not None else step.started_at
         task = step.task
         repo = task.repository
         base = repo.default_branch
@@ -1473,12 +1661,11 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         # Fonte do clone: URL do repo ou caminho local cadastrado
         source = repo.url or repo.local_path or ""
         if not source:
-            step.status = STEP_FAILED
-            step.error = "repositório sem URL ou caminho local"
-            task.status = TASK_FAILED
-            task.error = step.error
-            _finish(step)
-            s.commit()
+            _fail_step_hard(
+                session_factory, step.id,
+                reason="repositório sem URL ou caminho local",
+                expected_started_at=exec_token,
+            )
             _maybe_release_workspace(eff, session_factory, task.id, checkout)
             return None
 
@@ -1488,12 +1675,14 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             try:
                 gitops.clone(source, checkout)
             except gitops.GitError as exc:
-                step.status = STEP_FAILED
-                step.error = f"clone falhou: {exc}"
-                task.status = TASK_FAILED
-                task.error = step.error
-                _finish(step)
-                s.commit()
+                # O caminho de ERRO grava COM retry (`_fail_step_hard`): um
+                # `database is locked` aqui já derrubou o registro da falha e
+                # deixou a fase `running` para sempre (tasks 233/234).
+                _fail_step_hard(
+                    session_factory, step.id,
+                    reason=f"clone falhou: {exc}",
+                    expected_started_at=exec_token,
+                )
                 _maybe_release_workspace(eff, session_factory, task.id, checkout)
                 return None
 
@@ -1532,12 +1721,13 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
             else:
                 gitops.ensure_task_branch(checkout, branch, base)
         except gitops.GitError as exc:
-            step.status = STEP_FAILED
-            step.error = f"git: {exc}"
-            task.status = TASK_FAILED
-            task.error = step.error
-            _finish(step)
-            s.commit()
+            # Caminho de ERRO com retry (mesmo motivo do clone): o lock do SQLite
+            # não pode deixar a fase `running` por não conseguir gravar a falha.
+            _fail_step_hard(
+                session_factory, step.id,
+                reason=f"git: {exc}",
+                expected_started_at=exec_token,
+            )
             _maybe_release_workspace(eff, session_factory, task.id, checkout)
             return None
 
@@ -1688,6 +1878,10 @@ def execute_step(settings: Settings, session_factory, step_id: int) -> dict | No
         task_id=task.id,
         skills_dir=skills_dir,
         require_device=False,
+        # Espera de slot reage à ação do usuário: pause/instrução valem mesmo
+        # antes de o executor subir (a task-250 ficou "rodando" ~14 min atrás de
+        # um slot, ignorando a instrução enviada pela UI).
+        slot_abort_check=exec_common.make_step_abort_check(session_factory, step_id),
     )
 
     with session_factory() as s:
@@ -2033,7 +2227,13 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                 step.started_at = None
                 step.finished_at = None
                 s.commit()
-                return {"task_id": task.id, "reason": reason}
+                # Limite do provedor é transitório e a fase já foi re-enfileirada
+                # (rotação de conta ou `retry_at`): NÃO dispara o PM. O PM usa o
+                # mesmo executor/conta e, durante o limite, também termina sem
+                # veredicto; o "escalar" colocava a task em `needs_review` e o
+                # claim deixava de reclamar o step com `retry_at` vencido — a
+                # retomada automática nunca acontecia (task-307/task-178).
+                return None
             if reason.startswith("infra_blocked:"):
                 _system_event(
                     s,
@@ -2458,7 +2658,9 @@ def _decide_subtask_implement(
                         su.status = "pending"
                         su.started_at = None
                 s.commit()
-                return {"task_id": task.id, "reason": abort_reason}
+                # Mesmo motivo do `_decide`: limite do provedor não é decisão de
+                # PM — a fase já está re-enfileirada para retomar sozinha.
+                return None
             if abort_reason.startswith("infra_blocked:"):
                 _system_event(s, step, "infra_blocked", {"reason": abort_reason})
                 task.status = TASK_NEEDS_REVIEW
@@ -2766,7 +2968,9 @@ def _decide_subtask_verify(
             step.started_at = None
             step.finished_at = None
             s.commit()
-            return {"task_id": task.id, "reason": result}
+            # Limite do provedor na verificação também não chama o PM: a fase
+            # aguarda `retry_at` (ou já rotacionou de conta) e retoma sozinha.
+            return None
         if result.startswith("infra_blocked:"):
             _system_event(s, step, "infra_blocked", {"reason": result})
             task.status = TASK_NEEDS_REVIEW
@@ -2846,8 +3050,20 @@ def _pm_context(s: Session, task: Task) -> str:
     return "\n".join(lines)
 
 
-def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) -> None:
-    """Roda o PM e aplica a decisão (retry / continuar / escalar). Sempre bound por pm_decisions."""
+def _pm_decide(
+    session_factory,
+    settings: Settings,
+    task_id: int,
+    trigger: str,
+    since_event_id: int | None = None,
+) -> None:
+    """Roda o PM e aplica a decisão (retry / continuar / escalar). Sempre bound por pm_decisions.
+
+    `since_event_id`: âncora do PM automático (`_maybe_pm`). Se o usuário intervir
+    depois dela durante a decisão, a decisão é descartada (evento
+    `pm_decision_discarded`) — o estado que a motivou já não existe. O PM manual
+    (API) não passa âncora e aplica sempre.
+    """
     with session_factory() as s:
         task = s.get(Task, task_id)
         if task is None:
@@ -2955,6 +3171,26 @@ def _pm_decide(session_factory, settings: Settings, task_id: int, trigger: str) 
         if task is None:
             return
         anchor = _active_steps(task)[-1]
+
+        # Decisão automática DESCARTADA se o usuário agiu durante o PM: a
+        # intervenção (instrução/"tentar novamente") reabre a fase e o estado que
+        # motivou a decisão não existe mais — aplicar "escalar"/"retry" por cima
+        # deixava a task travada em `needs_review` mesmo com a execução nova
+        # concluindo (task-264).
+        if since_event_id is not None and _user_intervened_since(s, task_id, since_event_id):
+            _system_event(
+                s, anchor, "pm_decision_discarded",
+                {
+                    "trigger": trigger,
+                    "decision": decision,
+                    "reason": (
+                        "intervenção do usuário durante a decisão do PM — "
+                        "decisão automática descartada (a ação humana manda)"
+                    ),
+                },
+            )
+            s.commit()
+            return
 
         # Cadeia de reabertura do retry: da PRIMEIRA fase ativa não-concluída até
         # o alvo. Reabrir SÓ o alvo quando uma fase anterior está
@@ -3246,8 +3482,36 @@ def _maybe_pm(session_factory, settings: Settings, task_id: int, reason: str) ->
             )
             s.commit()
             return
+        # Âncora da decisão: id do último evento da task ANTES do PM rodar. Se o
+        # usuário intervir durante a decisão (instrução/"tentar novamente"), ela é
+        # DESCARTADA na aplicação — o humano assumiu o comando (task-264: o PM da
+        # falha antiga aplicou "escalar" em cima da execução nova). `or 0`: task
+        # sem eventos ainda (nenhum id) tem a âncora no início da numeração.
+        since_event_id = (
+            s.query(func.max(RunEvent.id))
+            .join(TaskStep, TaskStep.id == RunEvent.step_id)
+            .filter(TaskStep.task_id == task_id)
+            .scalar()
+        ) or 0
     log.info("PM decidindo para a task %s (%s)", task_id, reason)
-    _pm_decide(session_factory, settings, task_id, reason)
+    _pm_decide(
+        session_factory, settings, task_id, reason, since_event_id=since_event_id
+    )
+
+
+def _user_intervened_since(s: Session, task_id: int, since_event_id: int) -> bool:
+    """True se o usuário agiu na task (instrução/"continuar") depois do evento-âncora."""
+    return (
+        s.query(RunEvent.id)
+        .join(TaskStep, TaskStep.id == RunEvent.step_id)
+        .filter(
+            TaskStep.task_id == task_id,
+            RunEvent.id > since_event_id,
+            RunEvent.kind.in_(("user_intervention", "execution_resumed")),
+        )
+        .first()
+        is not None
+    )
 
 
 # Mínimo de qualidade da descrição de uma proposta (autoia_tasks.json): entradas
@@ -3613,14 +3877,103 @@ def create_child_task(
     return child
 
 
-def _fail_step_hard(session_factory, step_id: int) -> None:
-    with session_factory() as s:
+# ── Gravação de estado NUNCA pode morrer por lock transitório ────────────────
+# Um `commit()` repetido na MESMA sessão não resolve `database is locked`: um
+# flush que falhou descarta o estado pendente (o objeto some de `session.new` —
+# comprovado) e o retry grava silenciosamente nada. Por isso o retry re-executa
+# a unidade inteira numa sessão NOVA; as funções usadas aqui re-aplicam os
+# campos antes de commitar, então a re-execução é segura e idempotente.
+_LOCK_RETRY_ATTEMPTS = 4
+_LOCK_RETRY_BASE_S = 1.0
+
+
+def _is_locked_error(exc: Exception | None) -> bool:
+    return isinstance(exc, OperationalError) and "locked" in str(exc).lower()
+
+
+def _persist_with_retry(session_factory, work, *, what: str) -> bool:
+    """Roda `work(session)` + commit re-tentando em `database is locked`.
+
+    Retorna True quando gravou. False = a gravação CRÍTICA não aconteceu (o
+    chamador é avisado para registrar no log — nunca lança daqui: quem chama é
+    o caminho de recuperação e não pode morrer junto com o problema).
+    """
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        error: Exception | None = None
+        s = session_factory()
+        try:
+            work(s)
+            s.commit()
+            return True
+        except Exception as exc:  # classificado logo abaixo (locked vs. real)
+            error = exc
+        finally:
+            s.close()
+        if not _is_locked_error(error):
+            log.error("falha gravando %s: %s", what, error, exc_info=error)
+            return False
+        delay = _LOCK_RETRY_BASE_S * (2**attempt)
+        log.warning(
+            "SQLite ocupado ao gravar %s (tentativa %d/%d) — re-tentando em %.0fs",
+            what,
+            attempt + 1,
+            _LOCK_RETRY_ATTEMPTS,
+            delay,
+        )
+        time.sleep(delay)
+    log.error(
+        "NÃO foi possível gravar %s após %d tentativas (SQLite ocupado)",
+        what,
+        _LOCK_RETRY_ATTEMPTS,
+    )
+    return False
+
+
+def _fail_step_hard(
+    session_factory,
+    step_id: int,
+    reason: str | None = None,
+    *,
+    expected_started_at: datetime | None = None,
+) -> bool:
+    """Rede de proteção FINAL: a fase NUNCA sai do worker ainda `running`.
+
+    Um step `running` órfão congela a task para sempre (`claim_next` pula
+    qualquer task com fase `running`) e só um restart do worker o recupera — foi
+    o que travou as tasks 233/234 quando o registro da falha morreu com
+    `database is locked` e a exceção escapou do loop.
+
+    Só age se a fase AINDA está `running` (uma fase já decidida — done/failed —
+    jamais é sobrescrita) e re-tenta o SQLite em vez de lançar.
+
+    `expected_started_at` (token do claim, opcional): só age se a fase ainda for
+    ESTA execução. O `finally` de uma execução ANTIGA (ex.: PM lento por limite
+    do provedor enquanto o usuário clica "tenta novamente") não pode derrubar a
+    execução NOVA que já reclamou a fase (task-264: a fase era marcada `failed`/
+    "erro interno do worker" por baixo do robô que estava trabalhando).
+    """
+
+    def work(s: Session) -> None:
         step = s.get(TaskStep, step_id)
-        if step is None:
+        if step is None or step.status != STEP_RUNNING:
             return
+        if expected_started_at is not None and step.started_at != expected_started_at:
+            log.warning(
+                "rede de proteção da fase %s não age: execução superseded "
+                "(started_at atual %s != token %s)",
+                step_id, step.started_at, expected_started_at,
+            )
+            return
+        detail = (reason or "erro interno do worker").strip()[:1000]
         step.status = STEP_FAILED
-        step.error = "erro interno do worker"
-        step.task.status = TASK_FAILED
-        step.task.error = step.error
-        step.finished_at = utcnow()
-        s.commit()
+        step.error = detail
+        _finish(step)
+        _system_event(s, step, "step_forced_failed", {"reason": detail})
+        task = step.task
+        if task.status in (TASK_QUEUED, TASK_IN_PROGRESS):
+            task.status = TASK_FAILED
+            task.error = detail
+
+    return _persist_with_retry(
+        session_factory, work, what=f"fase {step_id} (forced_failed)"
+    )

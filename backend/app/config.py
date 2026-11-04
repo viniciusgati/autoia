@@ -156,35 +156,14 @@ class Settings:
     kimi_bin: str = field(default_factory=lambda: _env("AUTOIA_KIMI_BIN", "kimi"))
     opencode_bin: str = field(default_factory=lambda: _env("AUTOIA_OPENCODE_BIN", "opencode"))
     codex_bin: str = field(default_factory=lambda: _env("AUTOIA_CODEX_BIN", "codex"))
-    # Modelo default do executor opencode (usado quando o robô não define `Robot.model`).
-    opencode_model: str = field(
-        default_factory=lambda: _env("AUTOIA_OPENCODE_MODEL", "opencode-go/deepseek-v4-flash")
-    )
-    # Modelos oferecidos no seletor de modelo do frontend quando o `opencode
-    # models` não responde (sem binário/erro). CSV na env AUTOIA_OPENCODE_MODELS.
-    opencode_models: list[str] = field(
-        default_factory=lambda: _list(
-            "AUTOIA_OPENCODE_MODELS",
-            [
-                "opencode-go/deepseek-v4-flash",
-                "opencode-go/deepseek-v4.1-flash",
-                "opencode-go/deepseek-v4-pro",
-                "opencode-go/deepseek-v4-flash-vision-exp",
-            ],
-        )
-    )
-    # Modelo default do executor codex (OpenAI Codex CLI); usado quando nem a task/
-    # chamado nem o `Robot.model` definem modelo. Vazio = o codex usa o `model` do
-    # `~/.codex/config.toml` dele (nenhum `--model` é passado).
+    # Catálogos de modelo NÃO têm mais lista fixa de fallback (`AUTOIA_OPENCODE_MODEL`,
+    # `AUTOIA_OPENCODE_MODELS`, `AUTOIA_CODEX_MODELS`): o dropdown e o fallback de
+    # execução vêm SEMPRE do CLI (`opencode models` / `codex debug models`) — ver
+    # `model_catalog.py`. O default antigo não funcionava bem e escondia CLI fora.
+    # Modelo do executor codex quando nem a task/chamado nem o `Robot.model`
+    # definem modelo. Vazio = o codex usa o `model` do `~/.codex/config.toml`
+    # dele (nenhum `--model` é passado).
     codex_model: str = field(default_factory=lambda: _env("AUTOIA_CODEX_MODEL", ""))
-    # Modelos oferecidos no seletor de modelo do frontend quando o `codex debug
-    # models` não responde (sem binário/erro). CSV na env AUTOIA_CODEX_MODELS.
-    codex_models: list[str] = field(
-        default_factory=lambda: _list(
-            "AUTOIA_CODEX_MODELS",
-            ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"],
-        )
-    )
     run_timeout: int = field(default_factory=lambda: _int("AUTOIA_RUN_TIMEOUT", 1800))
     max_identical_calls: int = field(default_factory=lambda: _int("AUTOIA_MAX_IDENTICAL_CALLS", 6))
     max_attempts: int = field(default_factory=lambda: _int("AUTOIA_MAX_ATTEMPTS", 3))
@@ -344,6 +323,17 @@ class Settings:
     sandbox_fail_closed: bool = field(
         default_factory=lambda: _env("AUTOIA_SANDBOX_FAIL_CLOSED", "0") == "1"
     )
+    # Reconstrói a imagem do sandbox quando ela faltar e o repo versionar a
+    # receita em `docker/` (uma limpeza de disco apaga as imagens locais e todas
+    # as tasks do perfil morriam em `infra_blocked: imagem indisponível`).
+    # 0 = comportamento antigo: bloqueia a fase (fail-closed) sem tentar build.
+    sandbox_build_image: bool = field(
+        default_factory=lambda: _env("AUTOIA_SANDBOX_BUILD_IMAGE", "1") == "1"
+    )
+    # Timeout do build automático da imagem (s) — a toolchain Android baixa GB.
+    sandbox_build_timeout: int = field(
+        default_factory=lambda: _int("AUTOIA_SANDBOX_BUILD_TIMEOUT", 2400)
+    )
     # Máximo de execuções CONCORRENTES que sobem um emulador Android dentro do
     # sandbox (perfil com `bootstrap_extra` do emulador). O `--workers` limita fases
     # em geral; este limite protege o host contra N qemu simultâneos (~4 GB / 1 core
@@ -381,6 +371,24 @@ class Settings:
     peak_hours_weekdays_only: bool = field(
         default_factory=lambda: _env("AUTOIA_PEAK_HOURS_WEEKDAYS_ONLY", "1") == "1"
     )
+    # Modelos que NÃO têm tarifa de pico (prefixo do slug, case-insensitive).
+    # O opencode-go é cobrado por uso e não tem a janela de preço dobrado do
+    # DeepSeek direto; tarefas usando esses modelos podem continuar durante a
+    # janela de pico. Default cobre `opencode-go/...`.
+    peak_exempt_model_prefixes: tuple[str, ...] = field(
+        default_factory=lambda: tuple(
+            p.strip().lower()
+            for p in _env("AUTOIA_PEAK_EXEMPT_MODELS", "opencode-go").split(",")
+            if p.strip()
+        )
+    )
+
+    def model_is_peak_exempt(self, model: str | None) -> bool:
+        """True quando o modelo não sofre tarifa de pico (ex.: opencode-go/...)."""
+        value = (model or "").strip().lower()
+        return bool(value) and any(
+            value.startswith(prefix) for prefix in self.peak_exempt_model_prefixes
+        )
 
     def in_peak_hours(self, now: datetime | None = None) -> bool:
         """True se `now` (default: UTC atual, naive) estiver dentro da janela de pico."""

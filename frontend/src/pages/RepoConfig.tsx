@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router-dom";
 import { api } from "../api";
 import { useAuth } from "../auth";
 import HelpTip from "../components/HelpTip";
+import ModelSelect from "../components/ModelSelect";
 import ProjectSkills from "../components/ProjectSkills";
 import type { OpenCodeAccount, Pipeline, Repository, RepositoryMember } from "../types";
 
@@ -20,6 +21,8 @@ const SETTINGS_FIELDS = [
   "allow_external_tasks",
   "auto_summary",
   "default_pipeline_id",
+  "default_executor",
+  "default_model",
   "sandbox",
   "sandbox_profile",
   "sandbox_image",
@@ -89,6 +92,8 @@ export default function RepoConfig() {
         allow_external_tasks: repo.allow_external_tasks,
         auto_summary: repo.auto_summary,
         default_pipeline_id: repo.default_pipeline_id,
+        default_executor: repo.default_executor,
+        default_model: repo.default_model,
         sandbox: repo.sandbox,
         sandbox_profile: repo.sandbox_profile,
         sandbox_image: repo.sandbox_image,
@@ -170,6 +175,31 @@ export default function RepoConfig() {
                     </option>
                   ))}
                 </select>
+              </div>
+              <div className="form-inline">
+                <div className="form-field" style={{ flex: 1, minWidth: 140 }}>
+                  <label className="form-label">Executor padrão <HelpTip>Executor pré-selecionado ao criar uma nova tarefa neste projeto. Vazio = kimi code.</HelpTip></label>
+                  <select
+                    value={repo.default_executor ?? ""}
+                    disabled={!canManage}
+                    onChange={(e) => updateRepo({ ...repo, default_executor: e.target.value || null, default_model: null })}
+                  >
+                    <option value="">kimi code (padrão)</option>
+                    <option value="opencode">opencode</option>
+                    <option value="codex">codex</option>
+                  </select>
+                </div>
+                {(repo.default_executor === "opencode" || repo.default_executor === "codex") && (
+                  <div className="form-field" style={{ flex: 2, minWidth: 200 }}>
+                    <label className="form-label">Modelo padrão <HelpTip>Modelo pré-selecionado nas novas tarefas que usam o executor padrão do projeto. Trocar o executor na criação da tarefa limpa o modelo.</HelpTip></label>
+                    <ModelSelect
+                      value={repo.default_model ?? ""}
+                      onChange={(value) => updateRepo({ ...repo, default_model: value || null })}
+                      disabled={!canManage}
+                      source={repo.default_executor}
+                    />
+                  </div>
+                )}
               </div>
               <div className="form-inline">
                 <label className="post-merge-label">
@@ -409,8 +439,10 @@ export default function RepoConfig() {
               <div className="form-field">
                 <label className="form-label">Perfil de toolchain <HelpTip>
                   Perfil administrado que injeta a toolchain correta antes da execução.
-                  Para Android Compose use android-compose-37 após construir a imagem
-                  correspondente. Vazio usa o perfil global.
+                  Para Android use android-compose-37 (toolchain de build SEM emulador;
+                  combina com o pipeline android-noemu) após construir a imagem
+                  correspondente. O perfil android-emulator-35 sobe um emulador dentro
+                  do sandbox e pode causar timeout. Vazio usa o perfil global.
                 </HelpTip></label>
                 <select
                   value={repo.sandbox_profile ?? ""}
@@ -418,7 +450,7 @@ export default function RepoConfig() {
                   onChange={(e) => updateRepo({ ...repo, sandbox_profile: e.target.value || null })}
                 >
                   <option value="">— global (genérico) —</option>
-                  <option value="android-compose-37">android-compose-37 — Kotlin/Compose, SDK 37</option>
+                  <option value="android-compose-37">android-compose-37 — Kotlin/Compose, SDK 37 (sem emulador)</option>
                 </select>
               </div>
               <div className="form-field">

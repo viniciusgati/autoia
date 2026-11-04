@@ -134,6 +134,7 @@ export default function RepoDashboard() {
             <div><span className="task-head-label">Max tentativas</span><span>{repo.max_attempts ?? "global"}</span></div>
             <div><span className="task-head-label">Max decisões PM</span><span>{repo.max_pm_decisions ?? "global"}</span></div>
             <div><span className="task-head-label">Pipeline padrão</span><span>{pipelines.find((pipeline) => pipeline.id === repo.default_pipeline_id)?.name ?? (repo.default_pipeline_id != null ? `#${repo.default_pipeline_id}` : "—")}</span></div>
+            <div><span className="task-head-label">Executor padrão</span><span>{repo.default_executor ?? "kimi"}{repo.default_model ? ` · ${repo.default_model}` : ""}</span></div>
             <div><span className="task-head-label">Resumo automático</span><span>{repo.auto_summary ? "sim" : "não"}</span></div>
             <div><span className="task-head-label">Tasks externas</span><span>{repo.allow_external_tasks ? "permitidas" : "não"}</span></div>
           </div>

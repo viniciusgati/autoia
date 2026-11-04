@@ -33,8 +33,19 @@ def test_seed_roles_and_pipeline(settings):
         assert roles["developer-advpl"] == "implement"
         # dispatcher (human-in-the-loop): roteia a intenção do usuário
         assert roles["dispatcher"] == "dispatcher"
+        # pipeline Android sem emulador: papéis completos do fluxo
+        for name, role in (
+            ("android-noemu-po", "refine"),
+            ("android-noemu-qa", "review"),
+            ("android-noemu-dev", "implement"),
+            ("android-noemu-validador", "verify"),
+            ("android-noemu-avaliador", "assess"),
+            ("android-noemu-merger", "merge"),
+            ("android-noemu-deploy-tester", "verify"),
+        ):
+            assert roles[name] == role
 
-        assert s.query(Pipeline).count() == 11
+        assert s.query(Pipeline).count() == 12
 
         # com deploy: avaliador pré-merge + deploy-tester pós-merge (7 fases)
         deploy = (
@@ -89,6 +100,25 @@ def test_seed_roles_and_pipeline(settings):
         assert order == ["po", "qa", "developer-advpl", "tester", "avaliador", "merger"]
         assert all(not st.post_merge for st in advpl.steps)
 
+        # Android SEM emulador: fluxo próprio, sem tester/browser-tester e com
+        # deploy-tester pós-merge (que também valida só JVM/build).
+        android = (
+            s.query(Pipeline)
+            .filter(Pipeline.name == "android-noemu")
+            .one()
+        )
+        assert android.repository_id is None
+        order = [st.robot.name for st in sorted(android.steps, key=lambda x: x.position)]
+        assert order == [
+            "android-noemu-po", "android-noemu-qa", "android-noemu-dev",
+            "android-noemu-validador", "android-noemu-avaliador",
+            "android-noemu-merger", "android-noemu-deploy-tester",
+        ]
+        post = [st.post_merge for st in sorted(android.steps, key=lambda x: x.position)]
+        assert post == [False, False, False, False, False, False, True]
+        assert "tester" not in order
+        assert "browser-tester" not in order
+
     # Pipelines deep-v2 (por superfície): validador (role verify) no lugar do tester,
     # QA rigoroso (qa) por padrão; variantes -lean usam qa-lean.
     with session_factory() as s:
@@ -137,8 +167,8 @@ def test_seed_roles_and_pipeline(settings):
     # seed é idempotente
     create_app(settings)
     with session_factory() as s:
-        assert s.query(Robot).count() == 17
-        assert s.query(Pipeline).count() == 11
+        assert s.query(Robot).count() == 24
+        assert s.query(Pipeline).count() == 12
 
 
 def test_migrate_schema_creates_auth_tables_and_new_columns(settings):

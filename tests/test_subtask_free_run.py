@@ -260,3 +260,96 @@ class TestSubtasksDoneBookkeeping:
         assert "TODAS as subtarefas" in SUB_TASK_DONE_TOOL
         assert "NUNCA sobrescreva" in SUB_TASK_DONE_TOOL
         assert "PRESERVE os índices" in SUB_TASK_DONE_TOOL
+
+    def test_bookkeeping_inclui_apenas_subtarefas_verificadas(
+        self, flow, bare_repo, tmp_path
+    ):
+        """Uma subtarefa apenas `implemented` (ainda não verificada) NÃO pode
+        entrar em `autoia_subtasks_done.json`: o dev usaria o arquivo como prova
+        de "já está pronta" e re-declararia sem código (task-279)."""
+        from app.worker.subtask import _normalize_and_commit_subtasks_done
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+        with session_factory() as s:
+            from app.models import SUB_DONE, SUB_IMPLEMENTED, SubTask
+            s.add(SubTask(task_id=task_id, position=0, title="Sub 1", status=SUB_DONE))
+            s.add(SubTask(task_id=task_id, position=1, title="Sub 2", status=SUB_DONE))
+            s.add(SubTask(task_id=task_id, position=2, title="Sub 3", status=SUB_IMPLEMENTED))
+            s.commit()
+
+        checkout = tmp_path / "checkout"
+        subprocess.run(["git", "clone", "-q", bare_repo, str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.email", "t@test"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Test"], check=True)
+        (checkout / "autoia_subtasks_done.json").write_text("[1, 2, 3]\n")
+        subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "commit", "-q", "-m", "stale"], check=True)
+
+        _normalize_and_commit_subtasks_done(session_factory, task_id, str(checkout))
+
+        assert (checkout / "autoia_subtasks_done.json").read_text() == "[1, 2]\n"
+
+    def test_implement_repara_bookkeeping_antes_de_montar_o_prompt(
+        self, flow, bare_repo, tmp_path
+    ):
+        """A fase implement normaliza o arquivo ANTES do dev ler o estado: um
+        `[1,2,3]` com a subtarefa 3 apenas `implemented` vira `[1,2]` antes da
+        primeira execução, sem esperar o fim da fase."""
+        from app.models import SUB_DONE, SUB_IMPLEMENTED, SubTask, Task
+        from app.worker.subtask import run_implement_subtasks
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+        with session_factory() as s:
+            s.add(SubTask(task_id=task_id, position=0, title="Sub 1", status=SUB_DONE))
+            s.add(SubTask(task_id=task_id, position=1, title="Sub 2", status=SUB_DONE))
+            s.add(SubTask(task_id=task_id, position=2, title="Sub 3", status=SUB_IMPLEMENTED))
+            task = s.get(Task, task_id)
+            step = next(st for st in task.steps if st.position == 2)
+            s.commit()
+
+        checkout = tmp_path / "checkout"
+        subprocess.run(["git", "clone", "-q", bare_repo, str(checkout)], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.email", "t@test"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Test"], check=True)
+        (checkout / "autoia_subtasks_done.json").write_text("[1, 2, 3]\n")
+        subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+        subprocess.run(["git", "-C", str(checkout), "commit", "-q", "-m", "stale"], check=True)
+
+        abort, free = run_implement_subtasks(
+            flow["settings"], session_factory, step, task_id, str(checkout),
+            "main", "autoia/task-1", "node/npm", str(tmp_path / "step.log"),
+        )
+
+        assert abort is None
+        assert free is None
+        assert (checkout / "autoia_subtasks_done.json").read_text() == "[1, 2]\n"
+
+
+def test_done_declaration_ignora_commit_so_de_bookkeeping(bare_repo, tmp_path):
+    """Um commit que só toca `autoia_subtasks_done.json` não pode ser confundido
+    com correção de código pela guarda `subtask_done_rejected`."""
+    from app.worker.subtask import _done_declaration_has_changes
+
+    checkout = tmp_path / "checkout"
+    subprocess.run(["git", "clone", "-q", bare_repo, str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.email", "t@test"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "config", "user.name", "Test"], check=True)
+
+    (checkout / "code.py").write_text("x = 1\n")
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "-q", "-m", "code"], check=True)
+    head_before = subprocess.run(
+        ["git", "-C", str(checkout), "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=True,
+    ).stdout.strip()
+
+    (checkout / "autoia_subtasks_done.json").write_text("[1]\n")
+    subprocess.run(["git", "-C", str(checkout), "add", "-A"], check=True)
+    subprocess.run(["git", "-C", str(checkout), "commit", "-q", "-m", "bookkeeping"], check=True)
+
+    assert _done_declaration_has_changes(str(checkout), head_before) is False
+
+    (checkout / "code.py").write_text("x = 2\n")
+    assert _done_declaration_has_changes(str(checkout), head_before) is True

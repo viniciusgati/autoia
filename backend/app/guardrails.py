@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import tempfile
 from dataclasses import dataclass
 
@@ -147,7 +148,24 @@ _SEARCH_COMMANDS = {"find", "grep", "rg", "ag", "locate", "findstr", "tree", "wh
 # Ferramentas de busca do agente (opencode/kimi) que entram no detector.
 _SEARCH_TOOLS = {"read", "glob", "grep"}
 
-_QUOTED_TOKEN_RE = re.compile(r"""['"]([^'"]{2,})['"]""", re.IGNORECASE)
+# Opções de `find` que carregam o alvo procurado. `-name`/`-iname` vêm antes de
+# `-path` de propósito: `find / -path /proc -prune -o -name "x"` procura `x`,
+# não `/proc` (o antigo "último token citado" acertava isso por acidente).
+_FIND_TARGET_FLAGS = (
+    "-name", "-iname", "-regex", "-iregex",
+    "-lname", "-ilname", "-path", "-ipath", "-wholename", "-iwholename",
+)
+
+# Opções de grep/rg/ag que consomem o PRÓXIMO token como valor (não é o termo
+# buscado). Sem essa lista, `grep --include "*.js" "termo"` fingerprintaria o
+# glob e dois termos diferentes colidiriam.
+_GREP_VALUE_OPTIONS = {
+    "-e", "--regexp", "-f", "--file", "-m", "--max-count",
+    "-A", "--after-context", "-B", "--before-context", "-C", "--context",
+    "--include", "--exclude", "--exclude-dir", "--include-dir",
+    "-g", "--glob", "-t", "--type", "-T", "--type-not",
+    "--color", "--colour", "--label", "--binary-files", "--devices",
+}
 
 
 # Padrões de rede cujo bloqueio pode ser afrouxado por `whitelisted_hosts`
@@ -260,6 +278,176 @@ def _path_target(path: str) -> str:
     return "/".join(parts[-3:]).lower()[:120]
 
 
+def _read_range_suffix(arguments: dict) -> str:
+    """Identifica o TRECHO lido, para não tratar offsets diferentes como loop.
+
+    Ler `main.js` de ~7 mil linhas em 6 blocos distintos é exploração legítima;
+    repetir o MESMO bloco é que é sinal de loop. Sem offset/limit explícitos o
+    fingerprint permanece igual ao anterior (leitura do arquivo inteiro).
+    """
+    start = arguments.get("offset", arguments.get("start_line", arguments.get("start")))
+    end = arguments.get("limit", arguments.get("end_line", arguments.get("end")))
+    if start is None and end is None:
+        return ""
+
+    def _norm(value) -> str:
+        if value is None:
+            return ""
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return str(value)[:20]
+
+    return f":{_norm(start) if start is not None else '0'}:{_norm(end)}"
+
+
+def _shell_segments(command: str) -> list[list[str]]:
+    """Divide um comando shell em segmentos de tokens, respeitando aspas.
+
+    Operadores (`;`, `&&`, `||`, `|`) separam segmentos. O `shlex` evita que um
+    `|`/`;` DENTRO de uma aspa quebre o padrão de busca. É o que impede
+    `grep ...; echo "EXIT:$?"` de fingerprintar o `$?` do echo.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|")
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        tokens = command.split()
+
+    segments: list[list[str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token and not token.strip(";&|"):
+            if current:
+                segments.append(current)
+                current = []
+            continue
+        current.append(token)
+    if current:
+        segments.append(current)
+    return segments
+
+
+def _find_target(tokens: list[str]) -> str | None:
+    args = tokens[1:]
+    for flag in _FIND_TARGET_FLAGS:
+        for index, token in enumerate(args[:-1]):
+            if token == flag:
+                return args[index + 1]
+    return None
+
+
+def _grep_target(tokens: list[str]) -> str | None:
+    args = tokens[1:]
+    # Forma explícita (`grep -e "termo"`) sempre vence.
+    for index, token in enumerate(args):
+        if token in ("-e", "--regexp") and index + 1 < len(args):
+            return args[index + 1]
+        if token.startswith("--regexp="):
+            return token.split("=", 1)[1]
+
+    skip_next = False
+    for token in args:
+        if skip_next:
+            skip_next = False
+            continue
+        if token in _GREP_VALUE_OPTIONS:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        return token
+    return None
+
+
+def _grep_scope(tokens: list[str]) -> list[str]:
+    """Arquivos/diretórios pesquisados por um `grep`/`rg`/`ag` de shell.
+
+    O termo buscado NÃO é escopo. Ignora opções e os valores que elas consomem
+    (`-e`, `--include`, `-A`, ...). Sem o escopo, todo `grep "perfil"` colapsa
+    em `grep:perfil` e procurar o mesmo termo em arquivos DIFERENTES vira
+    "busca repetida" (falso positivo da task-324).
+    """
+    args = tokens[1:]
+    scope: list[str] = []
+    positional: list[str] = []
+    term_from_option = False
+    skip_next = False
+    for index, token in enumerate(args):
+        if skip_next:
+            skip_next = False
+            continue
+        if token in ("-e", "--regexp"):
+            term_from_option = True
+            skip_next = True
+            continue
+        if token.startswith("--regexp="):
+            term_from_option = True
+            continue
+        if token in _GREP_VALUE_OPTIONS:
+            skip_next = True
+            continue
+        if token.startswith("-"):
+            continue
+        positional.append(token)
+    if term_from_option:
+        scope = positional
+    elif positional:
+        # O primeiro posicional é o termo; os demais são os arquivos/dirs.
+        scope = positional[1:]
+    return scope
+
+
+def _bash_search_target(tokens: list[str], verb: str) -> str | None:
+    if verb == "find":
+        target = _find_target(tokens)
+    elif verb in ("grep", "rg", "ag", "findstr"):
+        target = _grep_target(tokens)
+    else:
+        target = next((t for t in tokens[1:] if not t.startswith("-")), None)
+    if not target:
+        return None
+    target = target.strip().rstrip("/\\")
+    if not target:
+        return None
+    if verb in ("find", "locate", "tree", "which", "type"):
+        target = os.path.basename(target)
+    return target.lower()[:120]
+
+
+def _bash_search_fingerprint(command: str) -> str | None:
+    """Intenção da busca de um comando shell, por segmento.
+
+    `grep "a" f; echo "EXIT:$?"` -> `grep:a` (não `grep:exit:$?`). Um comando
+    com múltiplas buscas conta pela PRIMEIRA; o watchdog de chamadas idênticas
+    cobre repetições literais do comando inteiro.
+    """
+    for tokens in _shell_segments(command):
+        if not tokens:
+            continue
+        verb = tokens[0].lower().split("/")[-1]
+        if verb == "git" and len(tokens) > 1 and tokens[1] == "grep":
+            tokens = ["grep", *tokens[2:]]
+            verb = "grep"
+        if verb not in _SEARCH_COMMANDS:
+            continue
+        target = _bash_search_target(tokens, verb)
+        if not target:
+            return verb
+        # grep/rg/ag: o ESCOPO (arquivo/diretório) diferencia procurar o mesmo
+        # termo em fontes diferentes (exploração legítima) de repetir a MESMA
+        # busca (loop). `find` mantém só o nome procurado: o alvo é o arquivo.
+        if verb in ("grep", "rg", "ag", "findstr"):
+            scope = _grep_scope(tokens)
+            if scope:
+                normalized = "|".join(_path_target(p) for p in scope[:4])
+                return f"{verb}:{target}:{normalized}"
+        return f"{verb}:{target}"
+    return None
+
+
 def _search_fingerprint(tool: str, arguments) -> str | None:
     """Fingerprint da INTENÇÃO de busca de uma tool call, para o detector de loop.
 
@@ -285,11 +473,17 @@ def _search_fingerprint(tool: str, arguments) -> str | None:
             term = arguments.get("pattern") or arguments.get("query")
             if not isinstance(term, str) or not term.strip():
                 return None
-            return f"{tool}:{term.strip()[:120].lower()}"
+            fingerprint = f"{tool}:{term.strip()[:120].lower()}"
+            # O mesmo termo em diretórios diferentes não é loop (task 143).
+            path = arguments.get("path") or arguments.get("include")
+            if isinstance(path, str) and path.strip():
+                fingerprint += f":{_path_target(path)}"
+            return fingerprint
         path = arguments.get("path") or arguments.get("filePath") or arguments.get("pattern")
         if not isinstance(path, str) or not path.strip():
             return None
-        return f"{tool}:{_path_target(path)}"
+        suffix = _read_range_suffix(arguments) if tool == "read" else ""
+        return f"{tool}:{_path_target(path)}{suffix}"
 
     if tool in ("bash", "shell"):
         if isinstance(arguments, str):
@@ -300,18 +494,7 @@ def _search_fingerprint(tool: str, arguments) -> str | None:
         command = (arguments or {}).get("command") if isinstance(arguments, dict) else None
         if not isinstance(command, str) or not command.strip():
             return None
-        tokens = command.lstrip().split()
-        verb = tokens[0].lower().split("/")[-1]
-        if verb not in _SEARCH_COMMANDS:
-            return None
-        quoted = _QUOTED_TOKEN_RE.findall(command)
-        if quoted:
-            return f"{verb}:{quoted[-1].strip().lower()[:120]}"
-        for token in reversed(tokens[1:]):
-            cleaned = token.strip("'\"").rstrip("/\\")
-            if cleaned and not cleaned.startswith("-") and cleaned not in ("|", "&&", ";", "||"):
-                return f"{verb}:{os.path.basename(cleaned).lower()[:120]}"
-        return verb
+        return _bash_search_fingerprint(command)
     return None
 
 

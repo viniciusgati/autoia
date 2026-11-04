@@ -19,6 +19,10 @@ export interface Repository {
   allow_auto_tasks: boolean;
   allow_external_tasks: boolean;
   default_pipeline_id: number | null;
+  /** Executor pré-selecionado nas novas tarefas do projeto (null = kimi). */
+  default_executor: string | null;
+  /** Modelo pré-selecionado quando o executor da tarefa é o default do projeto. */
+  default_model: string | null;
   auto_summary: boolean;
   /** Modo de sandbox de execução do projeto: null (herda global) | "off" | "fs" | "full". */
   sandbox: string | null;

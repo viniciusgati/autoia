@@ -62,6 +62,7 @@ backend/app/            # pacote `app`
   guardrails.py         # GuardrailViolation + análise (sem enforcement; ver watchdogs)
   budget.py             # custo por interação + limite
   timeline.py           # derivação DETERMINÍSTICA da timeline de execução (sem LLM)
+  model_catalog.py      # catálogos de modelo SEMPRE do CLI (opencode models / codex debug models)
   storage.py            # configuração geral: medição (scan_storage) + limpeza de órfãos (clean_storage)
   api/                  # routers REST (repositories, robots, pipelines, tasks, steps, dashboard, chamados, system)
   worker/
@@ -122,7 +123,7 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
 
 - **Task** = lista ordenada de **TaskSteps** (fases). Cada fase tem um **Robot** com um
   `role`: `refine` (po), `review` (qa), `implement` (developer), `verify` (tester),
-  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 17 robôs e **11 pipelines**:
+  `assess` (avaliador), `merge` (merger), `pm`. O seed cria 24 robôs e **12 pipelines**:
   `po-qa-dev-tester-avaliador-deploytest` (po, qa, developer, tester, avaliador, merger
   + deploy-tester pós-merge), `po-qa-dev-tester-avaliador-merge` (sem fase pós-merge,
   para projetos sem deploy), `po-qa-dev-tester-avaliador-deploytest-browser` (com
@@ -139,6 +140,18 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   missão de "provar que a entrega funciona" separada do `avaliador`/`assess`, que
   vira a avaliação final de qualidade/escopo). `deploy-tester`/`browser-tester`
   pós-merge nas deep-v2 de frontend/fullstack; backend só com `deploy-tester`.
+- **Pipeline `android-noemu` (Android SEM emulador)** — para projetos Android cuja
+  verificação não pode depender de emulador/dispositivo (boot/qemu = timeout e
+  `infra_blocked`). Fases: `android-noemu-po` → `android-noemu-qa` →
+  `android-noemu-dev` → `android-noemu-validador` → `android-noemu-avaliador` →
+  `android-noemu-merger` → `android-noemu-deploy-tester` (pós-merge). Todos os robôs
+  carregam `ANDROID_NOEMU_POLICY` (`main.py`): proíbem `connectedAndroidTest`/
+  `connectedCheck`/`adb`/emulador/system image, exigem testes em `src/test`
+  (JVM/Robolectric), `./gradlew test`, `assembleDebug`/`compileDebugKotlin` e revisão
+  de código; ausência de device NÃO é FAIL (vai para `NÃO VERIFICADO:`). O contrato
+  genérico de verify/assess cede à diretriz quando a missão declara device fora de
+  escopo. Use o perfil de toolchain **`android-compose-37`** no repositório — o perfil
+  `android-emulator-35` sobe o emulador no bootstrap e deve ficar fora deste fluxo.
 - **Fluxo ADVPL (Protheus/TOTVS)** — regras específicas do desenvolvedor ADVPL
   (`developer-advpl`, role `implement`; detecção por `gitops.is_advpl_robot`, nome
   contendo "advpl"):
@@ -174,8 +187,11 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `Task.depends_on_task_id` (predecessora PENDENTE → 400; rejeitada → dispensada) e
   `POST .../proposals/accept-all` aceita tudo em ordem e já enfileira (`start=true`);
   o `claim_next` **só reclama a task quando a dependência está `done`** (evita
-  branches paralelas/conflito de merge) e `_sweep_stuck_tasks` move dependentes de
-  dependência `failed`/`cancelled` para `needs_review` (`task_dependency_blocked`).
+  branches paralelas/conflito de merge); `_sweep_stuck_tasks` move dependentes de
+  dependência `failed`/`cancelled` para `needs_review` (`task_dependency_blocked`) e
+  os **re-enfileira sozinho** (`task_dependency_resumed`) quando a dependência volta
+  a andar (instrução humana/PM retry) ou conclui — sem isso o dependente ficava preso
+  em `needs_review` para sempre e só destravava com "pode seguir" manual (task-252).
   A UI (`RepoProposals`) agrupa por task de origem e mostra ordem (`1º`, `2º`...) +
   "requer antes" — as colunas são aditivas (`task_proposals.depends_on_json`,
   `tasks.depends_on_task_id`).
@@ -258,7 +274,12 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   ferramenta (`SUB_TASK_DONE_TOOL`) deixa explícito o conteúdo cumulativo.
 - **PM** (`pm`): decide `retry <pos>` / `continuar` (top-up de orçamento) / `escalar`
   (default seguro). Limite por task: `AUTOIA_MAX_PM_DECISIONS` (default 2). Decisão
-  inválida/ausente → **escalar**.
+  inválida/ausente → **escalar**. A decisão AUTOMÁTICA (`_maybe_pm`) captura o último
+  `RunEvent` da task antes de rodar e é **descartada** se o usuário interveio durante
+  o PM (instrução/"tentar novamente" → evento `pm_decision_discarded`): o estado que
+  a motivou não existe mais e aplicar "escalar" por cima travava a task em
+  `needs_review` mesmo com a execução nova concluindo (task-264). O PM manual
+  (botão/API, sem âncora) aplica sempre.
 - **Executor por task**: `Task.executor` (`kimi` \| `opencode` \| `codex`, default
   `kimi`) define o CLI que roda cada fase e o PM (escolhido na criação da tarefa;
   tasks filhas herdam). `kimi_exec` estima custo por interação; `opencode_exec`
@@ -269,11 +290,16 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   compartilham `exec_common.ExecOutcome`; `_run_executor` no runner faz o dispatch.
 - **Modelo por task/chamado**: `Task.model`/`Chamado.model` (colunas aditivas,
   editáveis em runtime como o executor) escolhem o modelo do executor. Precedência:
-  **task > `Robot.model` > default do executor** (codex: `AUTOIA_CODEX_MODEL`,
-  vazio = o `model` do `~/.codex/config.toml`). O modelo da task vale também para
-  PM, resumos/missões e subtarefas. O seletor de modelo do frontend popula de
-  `GET /api/system/codex/models` (`codex debug models`; fallback
-  `AUTOIA_CODEX_MODELS`).
+  **task > `Robot.model` > catálogo do CLI** (`model_catalog.resolve_opencode_model`:
+  primeiro slug do `opencode models`; CLI fora → execução sem `-m`). O modelo da
+  task vale também para PM, resumos/missões e subtarefas. **Sem lista fixa de
+  fallback** (as envs `AUTOIA_OPENCODE_MODEL`/`AUTOIA_OPENCODE_MODELS`/
+  `AUTOIA_CODEX_MODELS` foram removidas): o seletor de modelo do frontend é um
+  **combobox com busca** que popula de `GET /api/system/{codex,opencode}/models`
+  (fonte `cli`; CLI fora → `source="erro"` + lista vazia, com "tentar de novo" —
+  o erro não é cacheado). Para opencode a escolha é **obrigatória** (o default
+  dele não funciona bem): os formulários bloqueiam submit sem modelo e o codex
+  mantém a opção "padrão do codex" (`AUTOIA_CODEX_MODEL`/config.toml).
 - **Orçamento**: custo por interação (`AUTOIA_COST_PER_INTERACTION`, kimi) ou custo real
   (opencode); estourou → `needs_review`. `RunEvent.cost` acumula em `Task.cost_spent`.
 - **Janela de pico** (`Settings.in_peak_hours`, env `AUTOIA_PEAK_HOURS_WINDOWS`
@@ -322,16 +348,36 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `AUTOIA_ANDROID_MAX_CONCURRENT`, default 2): execuções cujo sandbox sobe um emulador
   (`bootstrap_extra`) seguram um slot de `flock` em `workspaces/.device-slots/` durante o
   dispatch — semáforo entre TODOS os processos (workers forkados + chamado/chat), não um
-  `threading.Semaphore`. A espera é segura porque o heartbeat e o processamento de
-  `.stop-*` rodam na thread iniciada antes de `execute_step`/no worker de chamado/chat.
+  `threading.Semaphore`. A espera é segura (heartbeat e `.stop-*` rodam em outra
+  thread), **visível** (`slot_wait`/`slot_ready` na timeline/log) e **interrompível**:
+  `make_step_abort_check` aborta a espera quando pause/instrução/rewind devolvem a fase
+  para `pending` ou a task é cancelada — o executor nem inicia (task-250 ficou ~14 min
+  "rodando" atrás de um slot ignorando a instrução da UI; o `.stop-task-*` é um pulso
+  removido pelo heartbeat em até 5s e não serve para a espera, onde não há subprocesso).
   `0` desliga os slots; perfis sem emulador (LLM pura, genérico) nunca bloqueiam.
+- **Imagens do sandbox: receita VERSIONADA + rebuild automático** (`docker/<perfil>/Dockerfile`
+  → `toolchains.build_context_dir` → `sandbox.ensure_image`): as imagens vivem **só** no
+  Docker local — uma limpeza de disco apagou a `autoia-android-emu:2026-09` (cujo Dockerfile
+  nunca tinha sido commitado) e TODAS as tasks do perfil `android-emulator-35` morriam em
+  `infra_blocked: ... imagem indisponível (fail-closed)` sem como se recuperar. Agora são
+  dois gatilhos: (1) **na subida do worker** `main._preflight_sandbox_images` (thread daemon,
+  após o fork) confere as imagens dos repositórios configurados e reconstrói as faltantes;
+  (2) **no fail-closed**, antes de bloquear a fase, `runner`/`subtask` chamam o mesmo
+  `ensure_image`. Lock `flock` por imagem (workers concorrentes esperam em vez de duplicar o
+  build), log em `data/logs/docker_build_<tag>.log`, desliga com
+  `AUTOIA_SANDBOX_BUILD_IMAGE=0` e limite em `AUTOIA_SANDBOX_BUILD_TIMEOUT` (2400 s);
+  `AUTOIA_SANDBOX_DOCKER_DIR` muda a pasta de receitas. Imagem **sem** receita no repo →
+  fluxo antigo (bloqueia). Perfis permitidos: `docker/android-emulator-35` (emulador
+  self-contained) e `docker/android-compose-37`.
 - **Teto global de execuções LLM** (`exec_common.acquire_llm_slot`, env
   `AUTOIA_LLM_MAX_CONCURRENT`, default 2): TODO dispatch de executor (fases **e**
   missões/resumos/PM/dispatcher) segura um slot de `workspaces/.llm-slots/` — limita
   chamadas simultâneas ao provedor. Medido: 27 chamadas/min (normal 2–5) dispararam
   `429 Rate limit exceeded` em cascata e o retry imediato do opencode amplificou o
   pico (18 chamadas ↔ 17 erros no mesmo minuto). Ordem de aquisição é sempre
-  **device → llm** (consistente em todos os caminhos, sem ciclo). `0` = sem teto.
+  **device → llm** (consistente em todos os caminhos, sem ciclo). A espera é
+  **visível** (`slot_wait`/`slot_ready`) e **interrompível** nas fases de task
+  (`slot_abort_check` — ver semáforo de emuladores). `0` = sem teto.
   As gerações LLM pura usam ainda `AUTOIA_LLM_BG_TIMEOUT` (default 300 s, via
   `runner._effective_run_timeout`) — sem o teto, uma missão/resumo travado segura
   o slot por `run_timeout` (5400 s no repo 4) e empurra fases de verdade na fila.
@@ -456,6 +502,34 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `data/workspaces/worker.lock`) — um segundo `autoia-worker` se recusa a iniciar
   (dois workers disputando tasks causam fases rodando em paralelo). Além disso, o
   `claim_next` nunca reclama outra fase de uma task que já tem step `running`.
+- **Fase NUNCA sai do worker `running`** (`runner._fail_step_hard` no `finally` do
+  `worker_loop`): um `running` órfão congela a task para sempre (o `claim_next` pula
+  a task inteira) e só o restart o recupera. A exceção também não pode escapar do
+  loop — ela matava o processo filho (`finally: os._exit(0)` em `main.py`) e já
+  deixou 2 de 3 workers mortos em silêncio (regressão das tasks 233/234, 07/10: clone
+  falhou, o registro da falha morreu com `database is locked`, o `_fail_step_hard`
+  morreu junto e a exceção saiu do loop). O motivo da exceção vai para
+  `TaskStep.error` + evento `step_forced_failed`; fase já decidida (done/failed) não
+  é sobrescrita. A rede é **amarrada ao token da execução** (`claim_next_with_token`
+  devolve o `started_at` do claim; `_fail_step_hard(expected_started_at=...)`): o
+  `finally` de uma execução ANTIGA (ex.: PM lento por limite do provedor enquanto o
+  usuário clica "tenta novamente") não derruba a execução NOVA que já reclamou a
+  fase (task-264). Os caminhos de ERRO do `execute_step` (clone/branch git) também
+  gravam por esse caminho. **Gravação crítica com retry** (`runner._persist_with_retry`,
+  4 tentativas com backoff): um `commit()` repetido na MESMA sessão NÃO serve — o
+  flush que falhou descarta o estado pendente (objeto some de `session.new`) e o
+  retry grava silenciosamente nada; por isso a unidade é **re-executada numa sessão
+  NOVA** (as funções re-aplicam os campos). False = não gravou (nunca lança: quem
+  chama é o caminho de recuperação).
+- **Pai supervisor dos workers** (`main._supervise_worker_children`): filho que sai
+  sozinho é logado e **substituído** (e reapado — antes viravam zumbi para sempre e
+  a fila andava com menos capacidade, parecendo "starvation sem worker livre");
+  morte rápida repetida aumenta a espera (anti fork bomb).
+- **Observabilidade do lock do SQLite** (`db.install_sqlite_lock_probe`, limiar
+  `AUTOIA_SQLITE_LOCK_WARN_SECONDS`, default 2 s): warning para a **vítima**
+  (`SQLite: escrita levou Xs (espera pelo lock)`) e para o **candidato a holder**
+  (`SQLite: transação de escrita durou Xs antes do commit/rollback)`) — é assim que
+  se acha quem segurou o lock numa tempestade de `database is locked`.
 - **Robustez contra hang do executor**: além do timeout total (`run_timeout`), há o
   watchdog de **sem progresso** (`AUTOIA_NO_PROGRESS_TIMEOUT`, default 300 s; 0 =
   desligado): se o kimi/opencode ficar N s sem emitir NENHUMA saída no stdout
@@ -502,6 +576,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   e opcionalmente escreve `autoia_verdict.txt` via regras (`VERDICT_RULES`:
   `ready_pass`, `fail`, `needs_work`, `pm_*`). Para criar arquivos no checkout, use
   `write_file=...`.
+- O `opencode models` também é bloqueado pela suíte: o conftest tem uma guarda
+  **autouse** que deixa `model_catalog.opencode_models_from_cli` vazio (e zera o
+  cache); teste que precisa do catálogo faz `monkeypatch` do mesmo alvo (depois
+  do guard) — ver `tests/test_model_catalog.py`.
 - Git real é permitido em `tmp_path` (fixture `bare_repo` — repo bare com commit inicial).
 - `flow` fixture: app + session_factory + repo + task iniciada. `settings` fixture tem
   `max_pm_decisions=0` por padrão (PM desligado; ative nos testes de PM).

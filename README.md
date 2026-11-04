@@ -149,9 +149,12 @@ acompanhar no **Resumo** (mobile) ou no **TaskDetail** (timeline com polling a c
 | `AUTOIA_OPENCODE_BIN` | `opencode` | binário do opencode |
 | `AUTOIA_CODEX_BIN` | `codex` | binário do codex (OpenAI Codex CLI) |
 | `AUTOIA_CODEX_MODEL` | *(vazio)* | modelo default do codex (vazio = `~/.codex/config.toml`) |
-| `AUTOIA_CODEX_MODELS` | `gpt-5.6-luna,…` | modelos do seletor quando o `codex debug models` falha (lista JSON) |
 | `AUTOIA_RUN_TIMEOUT` | `1800` | timeout por fase (s) |
 | `AUTOIA_MAX_IDENTICAL_CALLS` | `3` | loop de calls idênticas → kill |
+| `AUTOIA_SQLITE_LOCK_WARN_SECONDS` | `2` | avisa no log escrita/transação de escrita do SQLite acima disso (0 = desliga) |
+| `AUTOIA_SANDBOX_BUILD_IMAGE` | `1` | reconstrói imagem do sandbox quando falta (receita em `docker/`); `0` = só bloqueia |
+| `AUTOIA_SANDBOX_BUILD_TIMEOUT` | `2400` | timeout do build automático da imagem (s) |
+| `AUTOIA_SANDBOX_DOCKER_DIR` | *(auto)* | pasta com as receitas de imagem (`docker/`) |
 | `AUTOIA_MAX_ATTEMPTS` | `3` | limite de retries por fase |
 | `AUTOIA_TASK_BUDGET` | `10.0` | orçamento padrão por tarefa (US$) |
 | `AUTOIA_PM_BUDGET_TOPUP` | `5.0` | aumento de orçamento quando o PM decide `continuar` |

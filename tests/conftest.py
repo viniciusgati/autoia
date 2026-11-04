@@ -205,3 +205,21 @@ def _git_identity_env(monkeypatch):
     monkeypatch.setenv("GIT_COMMITTER_NAME", "autoia")
     monkeypatch.setenv("GIT_COMMITTER_EMAIL", "autoia@local")
 
+
+@pytest.fixture(autouse=True)
+def _nunca_opencode_real_nos_testes(monkeypatch):
+    """NUNCA spawnar `opencode models` de verdade na suíte.
+
+    `model_catalog.resolve_opencode_model` consulta a CLI quando uma execução
+    opencode não tem modelo escolhido; com o `opencode` no PATH do host o teste
+    spawnaria a CLI real (proibido — ver AGENTS.md). O catálogo fica vazio e a
+    execução segue sem `-m`. Testes que PRECISAM do catálogo fazem `monkeypatch`
+    de novo do mesmo alvo: o patch do teste vem depois e substitui este.
+    """
+    from app import model_catalog
+
+    model_catalog.reset_cache()
+    monkeypatch.setattr(model_catalog, "opencode_models_from_cli", lambda _bin: [])
+    yield
+    model_catalog.reset_cache()
+

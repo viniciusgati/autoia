@@ -82,6 +82,11 @@ export default function Chamados() {
       setFormError("Informe o título do chamado.");
       return;
     }
+    // opencode sem modelo escolhido: o default não serve — escolher na lista.
+    if (form.executor === "opencode" && !form.model.trim()) {
+      setFormError("Escolha um modelo do opencode no campo Modelo.");
+      return;
+    }
     try {
       await api.createChamado({
         repository_id: repoId,
@@ -176,7 +181,8 @@ export default function Chamados() {
                     setForm((f) => ({
                       ...f,
                       executor: e.target.value,
-                      model: e.target.value === "codex" ? f.model : "",
+                      // Modelo é do executor: trocar limpa a escolha.
+                      model: "",
                     }))
                   }
                 >

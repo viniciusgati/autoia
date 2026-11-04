@@ -48,6 +48,29 @@ export default function RepoTasks() {
   // Poll leve (lista): atualiza a cada 15s; página é mais formulário + grid.
   usePolling(load, 15000, [repoId]);
 
+  // Defaults do projeto (pipeline/executor/modelo padrão) pré-selecionados no
+  // formulário. Roda uma vez por projeto — o polling da lista não mexe no form.
+  useEffect(() => {
+    let active = true;
+    api
+      .listRepositories()
+      .then((repos) => {
+        if (!active) return;
+        const repo = repos.find((r) => r.id === repoId);
+        if (!repo) return;
+        if (repo.default_pipeline_id != null) {
+          setPipelineId(String(repo.default_pipeline_id));
+        }
+        const defaultExecutor = repo.default_executor ?? "kimi";
+        setExecutor(defaultExecutor);
+        setModel(defaultExecutor === "kimi" ? "" : (repo.default_model ?? ""));
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [repoId]);
+
   // Projetos do repositório (para a associação da nova tarefa).
   useEffect(() => {
     let active = true;
@@ -114,6 +137,11 @@ export default function RepoTasks() {
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setFormError("");
+    // opencode sem modelo escolhido: o default não serve — escolher na lista.
+    if (executor === "opencode" && !model.trim()) {
+      setFormError("Escolha um modelo do opencode no campo Modelo.");
+      return;
+    }
     setCreating(true);
     try {
       const created = await api.createTask({
@@ -169,9 +197,9 @@ export default function RepoTasks() {
             <select
               value={executor}
               onChange={(e) => {
-                const value = e.target.value;
-                setExecutor(value);
-                if (value !== "codex") setModel("");
+                // Modelo é do executor: trocar de executor limpa a escolha.
+                setExecutor(e.target.value);
+                setModel("");
               }}
             >
               <option value="kimi">kimi code</option>

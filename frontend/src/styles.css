@@ -709,6 +709,100 @@ select option {
   color: var(--text);
 }
 
+/* ── Combobox de modelo (busca no catálogo do CLI) ── */
+
+.model-combo {
+  position: relative;
+}
+
+.model-combo input {
+  width: 100%;
+  min-width: 150px;
+  cursor: text;
+}
+
+/* Cabeçalho do Workspace (`.ws-executor`): mesmo caixa dos selects vizinhos. */
+.ws-executor .model-combo input {
+  font-size: 12.5px;
+  padding: 2px 6px;
+  border: 1px solid var(--surface-border-hover);
+  border-radius: 4px;
+  background: var(--surface);
+  color: var(--text);
+  max-width: 210px;
+}
+
+.ws-executor .model-combo input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.model-combo-missing input::placeholder {
+  color: var(--warn);
+}
+
+.model-combo-menu {
+  /* Renderizado em PORTAL no <body> com `position: fixed` (coordenadas
+     calculadas no componente, ancoradas no input): dentro dos cards/headers o
+     menu ficava preso ao stacking context + overflow dos ancestrais
+     (`backdrop-filter`) — aparecia por baixo do layout e era cortado.
+     z-index alto fica acima da topbar (50), notificações (100), painel (101)
+     e barras sticky; modais (10000) continuam por cima, como deve ser. */
+  position: fixed;
+  z-index: 1000;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  background: rgba(14, 16, 21, 0.98);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--surface-border-hover);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-md);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.model-combo-item {
+  padding: 7px 10px;
+  font-size: 12.5px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-combo-item:hover,
+.model-combo-item.model-combo-active {
+  background: var(--accent-subtle);
+  color: var(--text);
+}
+
+.model-combo-item.model-combo-selected {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.model-combo-note {
+  padding: 8px 10px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.model-combo-retry {
+  padding: 7px 10px;
+  font-size: 12px;
+  border-radius: 6px;
+  color: var(--accent);
+  cursor: pointer;
+}
+
+.model-combo-retry:hover {
+  background: var(--accent-subtle);
+}
+
 /* ═══════════════════════════════════════════
    Forms
    ═══════════════════════════════════════════ */

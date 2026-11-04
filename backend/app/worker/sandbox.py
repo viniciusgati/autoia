@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import select
 import shutil
 import socket
@@ -37,6 +38,8 @@ from dataclasses import dataclass, field
 from http.client import HTTPConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
+
+from . import toolchains
 
 log = logging.getLogger("autoia.worker.sandbox")
 
@@ -253,6 +256,130 @@ def docker_image_available(image: str) -> bool:
         return result.returncode == 0
     except (OSError, subprocess.TimeoutExpired):
         return False
+
+
+def ensure_image(
+    image: str,
+    *,
+    log_dir: str,
+    lock_dir: str,
+    timeout_s: int = 2400,
+    enabled: bool = True,
+) -> bool:
+    """Garante a imagem do sandbox local; se faltar e houver receita, CONSTRÓI.
+
+    Motivo: as imagens do autoia vivem só no Docker local — uma limpeza de disco
+    (`docker system prune`, exclusão manual) apaga e TODAS as tasks do perfil
+    passam a morrer em `infra_blocked: ... imagem indisponível (fail-closed)`.
+    Com a receita versionada em `docker/`, o sistema sabe refazer a imagem.
+
+    * lock por imagem (`flock`): com N workers forkados, só UM constrói; os
+      demais esperam a imagem aparecer (poll) em vez de duplicar o build;
+    * log do build em `<log_dir>/docker_build_<tag>.log`;
+    * `enabled=False` (env `AUTOIA_SANDBOX_BUILD_IMAGE=0`) → volta ao
+      comportamento antigo: quem chama decide bloquear.
+
+    True = imagem pronta (já existia ou foi construída agora).
+    """
+    log = logging.getLogger("autoia.sandbox")
+    if not image or docker_image_available(image):
+        return True
+    if not enabled:
+        return False
+    context = toolchains.build_context_dir(image)
+    if context is None:
+        log.warning(
+            "imagem %s ausente e SEM receita versionada em docker/ — "
+            "build automático indisponível (a fase vai a infra_blocked)",
+            image,
+        )
+        return False
+    if not docker_available():
+        return False
+
+    safe = re.sub(r"[^A-Za-z0-9_.-]", "_", image)
+    try:
+        os.makedirs(lock_dir, exist_ok=True)
+        os.makedirs(log_dir, exist_ok=True)
+    except OSError:
+        return False
+    lock_path = os.path.join(lock_dir, f".image-build-{safe}.lock")
+    try:
+        handle = open(lock_path, "a+", encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        try:
+            import fcntl
+
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            # Outro worker está construindo esta mesma imagem: espera ele terminar.
+            handle.close()
+            log.info("build da imagem %s em andamento em outro processo — aguardando", image)
+            return _wait_for_image(image, timeout_s)
+        # Re-chega depois do lock: o processo anterior pode ter acabado de concluir.
+        if docker_image_available(image):
+            return True
+        log_path = os.path.join(log_dir, f"docker_build_{safe}.log")
+        cmd = [resolve_docker_bin(), "build", "-t", image, str(context)]
+        log.warning(
+            "imagem %s ausente — construindo de %s (%s; log em %s)",
+            image,
+            context,
+            " ".join(cmd),
+            log_path,
+        )
+        try:
+            with open(log_path, "w", encoding="utf-8") as fh:
+                fh.write(f"# {' '.join(cmd)}\n")
+                fh.flush()
+                # start_new_session: o build vira grupo próprio — matar o CLI no
+                # timeout não deixa processo filho orfão (o daemon cancela o build).
+                proc = subprocess.run(
+                    cmd,
+                    stdout=fh,
+                    stderr=subprocess.STDOUT,
+                    timeout=timeout_s,
+                    start_new_session=True,
+                )
+        except subprocess.TimeoutExpired:
+            log.error(
+                "build da imagem %s excedeu %ss — ver %s", image, timeout_s, log_path
+            )
+            return False
+        except OSError as exc:
+            log.error("não foi possível executar o build da imagem %s: %s", image, exc)
+            return False
+        if proc.returncode == 0 and docker_image_available(image):
+            log.info("imagem %s construída com sucesso", image)
+            return True
+        log.error(
+            "build da imagem %s falhou (exit=%s) — ver %s", image, proc.returncode, log_path
+        )
+        return False
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
+def _wait_for_image(image: str, timeout_s: int, poll_s: float | None = None) -> bool:
+    """Espera outro processo concluir o build da imagem (poll barato).
+
+    O intervalo acompanha o timeout pedido: janela curta = poll curto (teste e
+    "o build do outro quase acabou"), janela longa = 5 s (build de toolchain
+    Android dura minutos; não fica spamando `docker image inspect`).
+    """
+    if poll_s is None:
+        poll_s = min(5.0, max(0.2, timeout_s / 4))
+    deadline = time.monotonic() + max(1, timeout_s)
+    while time.monotonic() < deadline:
+        if docker_image_available(image):
+            return True
+        time.sleep(poll_s)
+    return docker_image_available(image)
 
 
 def cleanup_container(cidfile: str | None) -> None:

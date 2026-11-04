@@ -573,6 +573,70 @@ def test_worker_respeita_cadeia_de_dependencia(proposals_flow, tmp_path):
         assert s.get(TaskStep, step_b).task_id == task_b["id"]
 
 
+def test_dependencia_retomada_reenfileira_dependente(proposals_flow, tmp_path):
+    """Quando a dependência volta a andar (retomada por humano/PM) ou conclui, o
+    dependente parado em `needs_review` volta sozinho para a fila — sem instrução
+    manual ("pode seguir"). Enquanto ela segue failed, o dependente continua parado
+    e o claim continua respeitando a ordem da cadeia."""
+    tasks = [
+        rich_proposal(title="a"),
+        rich_proposal(title="b", depends_on=[1]),
+    ]
+    prep = _prepare(proposals_flow, tmp_path, phases=["propositor"], tasks=tasks)
+    _accept_all(proposals_flow, prep["parent_id"])
+    children = _children_by_title(proposals_flow, prep["parent_id"])
+    sf = proposals_flow["session_factory"]
+    a_id, b_id = children["a"]["id"], children["b"]["id"]
+
+    # A falha da dependência + sweep pará o dependente (comportamento existente).
+    with sf() as s:
+        a = s.get(Task, a_id)
+        a.status = "failed"
+        s.commit()
+    runner._sweep_stuck_tasks(sf)
+    with sf() as s:
+        assert s.get(Task, b_id).status == "needs_review"
+
+    # Ainda failed → o sweep NÃO re-enfileira.
+    runner._sweep_stuck_tasks(sf)
+    with sf() as s:
+        assert s.get(Task, b_id).status == "needs_review"
+
+    # Dependência retomada (instrução humana/PM) → dependente volta para a fila.
+    with sf() as s:
+        s.get(Task, a_id).status = "in_progress"
+        s.commit()
+    runner._sweep_stuck_tasks(sf)
+    with sf() as s:
+        b = s.get(Task, b_id)
+        assert b.status == "queued"
+        assert b.error is None
+        assert any(
+            e.kind == "task_dependency_resumed"
+            for st in b.steps
+            for e in st.events
+        )
+
+    # Mesmo `queued`, o dependente NÃO é reclamado antes da dependência concluir:
+    # o que é reclamado agora pertence à própria dependência (retomada).
+    step_a = runner.claim_next(sf)
+    assert step_a is not None
+    with sf() as s:
+        assert s.get(TaskStep, step_a).task_id == a_id
+
+    # Dependência concluída → o dependente é reclamado.
+    with sf() as s:
+        a = s.get(Task, a_id)
+        a.status = "done"
+        for st in a.steps:
+            st.status = "done"
+        s.commit()
+    step = runner.claim_next(sf)
+    assert step is not None
+    with sf() as s:
+        assert s.get(TaskStep, step).task_id == b_id
+
+
 def test_dependencia_falha_move_dependente_para_needs_review(proposals_flow, tmp_path):
     """Dependência em estado terminal ruim (failed/cancelled) não deixa a filha
     presa em silêncio: o sweep move a dependente para `needs_review` com o motivo."""

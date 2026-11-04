@@ -67,7 +67,7 @@ def _codex_catalog_fake(tmp_path, models: list[dict]) -> str:
     return str(script)
 
 
-def _make_client(tmp_path, codex_bin: str, codex_models: list[str]):
+def _make_client(tmp_path, codex_bin: str):
     from app.config import Settings
     from app.main import create_app
 
@@ -77,7 +77,6 @@ def _make_client(tmp_path, codex_bin: str, codex_models: list[str]):
         log_dir=str(tmp_path / "logs"),
         skills_dir=str(tmp_path / "skills"),
         codex_bin=codex_bin,
-        codex_models=codex_models,
         auth_enabled=False,
     )
     app = create_app(settings)
@@ -86,23 +85,28 @@ def _make_client(tmp_path, codex_bin: str, codex_models: list[str]):
 
 @pytest.fixture(autouse=True)
 def _reset_models_cache():
-    import app.api.system as system_mod
+    from app import model_catalog
 
     def reset():
-        system_mod._CODEX_MODELS_CACHE.update({"ts": 0.0, "models": [], "source": "config"})
+        model_catalog.reset_cache()
 
     reset()
     yield
     reset()
 
 
-def test_codex_models_endpoint_falls_back_to_config(tmp_path):
-    client = _make_client(tmp_path, codex_bin="/bin/nonexistent-codex", codex_models=["m-a", "m-b"])
+def test_codex_models_endpoint_sem_fallback_de_config(tmp_path):
+    """CLI do codex inexistente → lista VAZIA com `source="erro"`.
+
+    Não existe mais a lista fixa por env (`AUTOIA_CODEX_MODELS`): um catálogo
+    default esconde que o CLI está fora e oferece modelo que não existe.
+    """
+    client = _make_client(tmp_path, codex_bin="/bin/nonexistent-codex")
     resp = client.get("/api/system/codex/models")
     assert resp.status_code == 200
     body = resp.json()
-    assert body["models"] == ["m-a", "m-b"]
-    assert body["source"] == "config"
+    assert body["models"] == []
+    assert body["source"] == "erro"
 
 
 def test_codex_models_endpoint_reads_cli_catalog(tmp_path):
@@ -113,7 +117,7 @@ def test_codex_models_endpoint_reads_cli_catalog(tmp_path):
             {"slug": "codex-auto-review", "visibility": "hide", "priority": 9},
         ],
     )
-    client = _make_client(tmp_path, codex_bin=catalog, codex_models=["m-a"])
+    client = _make_client(tmp_path, codex_bin=catalog)
     resp = client.get("/api/system/codex/models")
     assert resp.status_code == 200
     body = resp.json()

@@ -154,6 +154,24 @@ def test_rotaciona_para_proxima_conta_e_depois_aguarda(settings, bare_repo, tmp_
     assert _run_claim(flow) is None
 
 
+def test_provider_limit_nao_dispara_pm(settings, bare_repo, tmp_path):
+    """Limite do provedor re-enfileira a fase, mas NÃO retorna gatilho de PM.
+
+    O PM usa o mesmo executor/conta e, durante o limite, também termina sem
+    veredicto; o "escalar" colocava a task em `needs_review` e o `claim` deixava
+    de reclamar o step com `retry_at` vencido (task-307/task-178)."""
+    xdg_log = tmp_path / "xdg.txt"
+    flow = _flow(settings, bare_repo, _quota_fake(tmp_path, xdg_log), extra_accounts=["conta-b"])
+
+    ret = runner.execute_step(
+        flow["settings"], flow["session_factory"], _run_claim(flow)
+    )
+    assert ret is None
+    st = _step(flow["session_factory"], flow["task"]["id"])
+    assert st.status == STEP_PENDING
+    assert st.opencode_account == "conta-b"
+
+
 def test_roda_todas_as_contas_do_roster(settings, bare_repo, tmp_path):
     """Cadeia completa (default + contas restantes do roster em ordem alfabética):
     cada provider_limit avança uma conta até esgotar."""
@@ -262,7 +280,7 @@ def test_kimi_nao_rotaciona_conta_opencode(settings, bare_repo):
             max_attempts=3, max_pm_decisions=0, run_timeout=30, task_budget=1.0,
             cost_per_interaction=0.01, pm_budget_topup=5.0, risky_patterns=[],
             whitelisted_hosts=[], db_rule="", kimi_bin="kimi", opencode_bin="",
-            opencode_model=None, codex_bin="", codex_model=None, log_dir="",
+            codex_bin="", codex_model=None, log_dir="",
             branch_prefix="autoia", workspace_dir="", max_identical_calls=3,
             no_progress_timeout=300, max_repeated_searches=5, verify_retries=2,
             keep_workspaces=True, sandbox=None,

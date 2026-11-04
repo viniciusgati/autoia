@@ -9,11 +9,22 @@ infraestrutura não é confundida com defeito no código do projeto.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 
 PROFILE_GENERIC = "generic"
 PROFILE_ANDROID_COMPOSE_37 = "android-compose-37"
 PROFILE_ANDROID_EMULATOR_35 = "android-emulator-35"
+
+# Imagens cuja RECEITA fica versionada no repo (`docker/<contexto>/Dockerfile`).
+# É o que permite ao sistema reconstruir a imagem quando ela some do Docker
+# (limpeza de disco, `docker system prune`, troca de máquina) — sem receita
+# versionada, a única saída é bloquear a fase em `infra_blocked`.
+_IMAGE_BUILD_CONTEXTS = {
+    "autoia-android-emu": "android-emulator-35",
+    "autoia-android-compose": "android-compose-37",
+}
 
 # System image embutida na imagem do perfil do emulador (bake no build).
 _EMULATOR_SYSTEM_IMAGE = "system-images;android-35;google_apis;x86_64"
@@ -203,6 +214,43 @@ def get_profile(
             bootstrap_extra=_EMULATOR_BOOTSTRAP,
         )
     return ToolchainProfile(name=PROFILE_GENERIC)
+
+
+def recipes_dir() -> Path | None:
+    """Diretório `docker/` com as receitas de imagem versionadas.
+
+    `AUTOIA_SANDBOX_DOCKER_DIR` sobrepõe; senão, sobe a partir deste arquivo
+    até achar um `docker/` (instalação editable acha o do repo; um wheel não
+    tem → build automático indisponível, comportamento antigo).
+    """
+    override = (os.environ.get("AUTOIA_SANDBOX_DOCKER_DIR") or "").strip()
+    if override:
+        path = Path(override).expanduser()
+        return path if path.is_dir() else None
+    for parent in Path(__file__).resolve().parents:
+        candidate = parent / "docker"
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def build_context_dir(image: str) -> Path | None:
+    """Contexto de build da imagem quando o repo versiona a receita.
+
+    `None` = imagem desconhecida ou sem `Dockerfile` no contexto → o chamador
+    NÃO constrói e o fluxo segue como antes (`infra_blocked` com fail-closed).
+    """
+    if not image or not image.strip():
+        return None
+    name = image.split(":", 1)[0].strip().lower()
+    context = _IMAGE_BUILD_CONTEXTS.get(name)
+    if context is None:
+        return None
+    base = recipes_dir()
+    if base is None:
+        return None
+    path = base / context
+    return path if (path / "Dockerfile").is_file() else None
 
 
 def preflight_script(profile: ToolchainProfile, *, require_device: bool = False) -> str | None:

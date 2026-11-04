@@ -470,6 +470,39 @@ def test_instruction_rewind_reabre_cadeia_com_anterior_failed(flow, fake_kimi):
         assert dev.status == "pending"
 
 
+def test_instruction_rewind_renova_orcamento_de_fases_anteriores(flow, fake_kimi):
+    """Intervenção humana renova o attempt da task INTEIRA: uma fase anterior
+    `done` no teto ainda pode receber o bounce-back seguinte (task-305)."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))  # fase 0 ok
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        t.status = "needs_review"
+        po = next(st for st in t.steps if st.position == 0)
+        po.attempt = settings.max_attempts  # orçamento esgotado
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.status = "failed"
+        qa.error = "história ambígua"
+        s.commit()
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/instruction",
+        json={"instruction": "corrija a história", "position": 1},
+    )
+    assert resp.status_code == 200, resp.text
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        po = next(st for st in t.steps if st.position == 0)
+        assert po.attempt == 1  # ação humana = novo orçamento
+        assert po.status == "done"  # não re-executa agora
+
+
 def test_instruction_rewind_forbidden_future(flow, fake_kimi):
     """Não é possível continuar de uma fase futura (além do que já foi executado)."""
     settings = flow["settings"]

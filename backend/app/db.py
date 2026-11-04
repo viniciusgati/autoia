@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from datetime import datetime, timezone
 
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+
+log = logging.getLogger("autoia.db")
 
 
 def utcnow() -> datetime:
@@ -15,6 +20,68 @@ def utcnow() -> datetime:
 
 class Base(DeclarativeBase):
     pass
+
+
+def _is_write_statement(statement: str) -> bool:
+    return statement.lstrip()[:6].upper() in {"INSERT", "UPDATE", "DELETE"}
+
+
+def install_sqlite_lock_probe(engine, warn_seconds: float) -> None:
+    """Instrumentação de lock do SQLite: acha quem ESPEROU e quem SEGURA.
+
+    Tempestade de `database is locked` (ex.: ~90 s em 07/10) derruba o caminho de
+    gravação da própria falha e deixa fase `running` órfã. Sem instrumentação não
+    dá para saber quem segurou o lock — este probe registra os dois lados com o
+    mesmo limiar (`AUTOIA_SQLITE_LOCK_WARN_SECONDS`, default 2 s):
+
+    * **escrita demorou** → a vítima esperou pelo lock: mostra a janela da
+      tempestade e a duração da espera;
+    * **transação de escrita durou** → candidato a *holder*: abriu a transação
+      (primeira escrita) e só commitou/rollback muito depois.
+    """
+    if warn_seconds <= 0:
+        return
+
+    @event.listens_for(engine, "before_cursor_execute")
+    def _stmt_start(conn, cursor, statement, parameters, context, executemany):
+        conn.info["autoia_stmt_t0"] = time.monotonic()
+        conn.info["autoia_stmt"] = statement.strip()[:200]
+
+    @event.listens_for(engine, "after_cursor_execute")
+    def _stmt_end(conn, cursor, statement, parameters, context, executemany):
+        t0 = conn.info.pop("autoia_stmt_t0", None)
+        if t0 is None or not _is_write_statement(statement):
+            return
+        elapsed = time.monotonic() - t0
+        conn.info.setdefault("autoia_txn_t0", t0)
+        if elapsed >= warn_seconds:
+            log.warning(
+                "SQLite: escrita levou %.1fs (espera pelo lock): %s",
+                elapsed,
+                conn.info.get("autoia_stmt", statement[:200]),
+            )
+
+    def _close_write_txn(conn, how: str) -> None:
+        t0 = conn.info.pop("autoia_txn_t0", None)
+        conn.info.pop("autoia_stmt", None)
+        if t0 is None:
+            return
+        duration = time.monotonic() - t0
+        if duration >= warn_seconds:
+            log.warning(
+                "SQLite: transação de escrita durou %.1fs antes do %s "
+                "(candidato a holder do lock)",
+                duration,
+                how,
+            )
+
+    @event.listens_for(engine, "commit")
+    def _txn_commit(conn):
+        _close_write_txn(conn, "commit")
+
+    @event.listens_for(engine, "rollback")
+    def _txn_rollback(conn):
+        _close_write_txn(conn, "rollback")
 
 
 def make_engine(database_url: str):
@@ -30,6 +97,12 @@ def make_engine(database_url: str):
             cursor.execute("PRAGMA journal_mode=WAL")
             cursor.execute("PRAGMA busy_timeout=30000")
             cursor.close()
+
+        try:
+            warn = float(os.environ.get("AUTOIA_SQLITE_LOCK_WARN_SECONDS", "2") or 0)
+        except ValueError:
+            warn = 2.0
+        install_sqlite_lock_probe(engine, warn)
 
         return engine
     return create_engine(database_url)
@@ -53,6 +126,9 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("allow_auto_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("allow_external_tasks", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("default_pipeline_id", "INTEGER REFERENCES pipelines(id)"),
+        # Executor/modelo padrão das novas tarefas do projeto.
+        ("default_executor", "VARCHAR(20)"),
+        ("default_model", "VARCHAR(200)"),
         ("auto_summary", "BOOLEAN DEFAULT 0 NOT NULL"),
         ("sandbox", "VARCHAR(10)"),
         ("sandbox_profile", "VARCHAR(80)"),

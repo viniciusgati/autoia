@@ -225,7 +225,8 @@ export const api = {
   getTask: (id: number, signal?: AbortSignal) => request<Task>(`/api/tasks/${id}`, { signal }),
   createTask: (data: {
     repository_id: number;
-    pipeline_id: number;
+    /** Ausente/null = pipeline padrão do projeto. */
+    pipeline_id?: number | null;
     title: string;
     description: string;
     kind: string;
@@ -482,11 +483,11 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ targets }),
     }),
-  // Modelos disponíveis para o executor codex (dropdown; fonte: `codex debug
-  // models`, com fallback na lista configurável do backend).
+  // Modelos disponíveis para o executor codex (combobox com busca; fonte
+  // ÚNICA: `codex debug models`, sem lista fixa de fallback).
   codexModels: () => request<{ models: string[]; source: string }>("/api/system/codex/models"),
-  // Modelos disponíveis para o executor opencode (dropdown; fonte: `opencode
-  // models`, com fallback na lista configurável do backend).
+  // Modelos disponíveis para o executor opencode (combobox com busca; fonte
+  // ÚNICA: `opencode models`, sem lista fixa de fallback).
   openCodeModels: () => request<{ models: string[]; source: string }>("/api/system/opencode/models"),
   // ── Contas opencode-go (roster global de credenciais) ────────────────────
   listOpenCodeAccounts: (signal?: AbortSignal) =>
@@ -507,32 +508,33 @@ export const api = {
     request<void>(`/api/system/opencode-accounts/${id}`, { method: "DELETE" }),
 };
 
-// Cache curto em memória da lista de modelos do codex (vários seletores na UI).
+// Catálogos de modelo em memória (vários seletores na UI). Só cacheia quando
+// veio do CLI: erro NÃO fica guardado, para a próxima abertura tentar de novo
+// (nada de entregar lista vazia/default para sempre porque o CLI falhou uma vez).
 let _codexModelsCache: string[] | null = null;
 
-/** Lista de modelos do codex com cache em memória; vazio em erro/indisponível. */
+/** Lista de modelos do codex (`codex debug models`); erro → []. */
 export async function getCodexModels(): Promise<string[]> {
   if (_codexModelsCache !== null) return _codexModelsCache;
   try {
     const data = await api.codexModels();
-    _codexModelsCache = data.models;
+    if (data.models.length > 0) _codexModelsCache = data.models;
+    return data.models;
   } catch {
-    _codexModelsCache = [];
+    return [];
   }
-  return _codexModelsCache;
 }
 
-// Cache curto em memória da lista de modelos do opencode (vários seletores).
 let _openCodeModelsCache: string[] | null = null;
 
-/** Lista de modelos do opencode com cache em memória; vazio em erro/indisponível. */
+/** Lista de modelos do opencode (`opencode models`); erro → []. */
 export async function getOpenCodeModels(): Promise<string[]> {
   if (_openCodeModelsCache !== null) return _openCodeModelsCache;
   try {
     const data = await api.openCodeModels();
-    _openCodeModelsCache = data.models;
+    if (data.models.length > 0) _openCodeModelsCache = data.models;
+    return data.models;
   } catch {
-    _openCodeModelsCache = [];
+    return [];
   }
-  return _openCodeModelsCache;
 }

@@ -238,6 +238,43 @@ def _apply_task_association(session: Session, task: Task, data: TaskUpdateReques
             task.project_id = epic.project_id
 
 
+def _apply_task_dependency(session: Session, task: Task, dependency_id: int | None) -> None:
+    """Aplica a dependência de execução de um PATCH (editável em qualquer status).
+
+    `None` explícito remove. Rejeita auto-dependência e ciclo (a cadeia é
+    percorrida a partir da nova predecessora). A dependência é um metadado de
+    ORDEM DE EXECUÇÃO: não entra no handoff/prompt e não muda a história.
+    """
+    previous = task.depends_on_task_id
+    if dependency_id is None:
+        task.depends_on_task_id = None
+    else:
+        if dependency_id == task.id:
+            raise HTTPException(400, "uma task não pode depender de si mesma")
+        dependency = session.get(Task, dependency_id)
+        if dependency is None:
+            raise HTTPException(404, "task de dependência não encontrada")
+        seen = {task.id}
+        cursor = dependency
+        while cursor is not None:
+            if cursor.id in seen:
+                raise HTTPException(400, "dependência cíclica entre tasks")
+            seen.add(cursor.id)
+            cursor = (
+                session.get(Task, cursor.depends_on_task_id)
+                if cursor.depends_on_task_id
+                else None
+            )
+        task.depends_on_task_id = dependency_id
+    if previous != task.depends_on_task_id:
+        _system_event(
+            session,
+            _anchor_step(task),
+            "dependency_changed",
+            {"from": previous, "to": task.depends_on_task_id},
+        )
+
+
 def _upsert_repo_member(session: Session, repo_id: int, user_id: int, role: str = "member") -> RepositoryUser:
     """Upsert idempotente de `repository_users(repo, user, role)` — não duplica.
 
@@ -286,14 +323,25 @@ def create_task(
     settings=Depends(get_settings),
     user: User | None = Depends(require_auth),
 ):
-    get_repository_or_404(session, data.repository_id)
-    pipeline = session.get(Pipeline, data.pipeline_id)
+    repo = get_repository_or_404(session, data.repository_id)
+    pipeline_id = data.pipeline_id if data.pipeline_id is not None else repo.default_pipeline_id
+    if pipeline_id is None:
+        raise HTTPException(400, "pipeline não informado e o projeto não tem pipeline padrão")
+    pipeline = session.get(Pipeline, pipeline_id)
     if pipeline is None:
         raise HTTPException(404, "pipeline não encontrado")
     if pipeline.repository_id not in (None, data.repository_id):
         raise HTTPException(400, "pipeline não pertence a este projeto")
     if not pipeline.steps:
         raise HTTPException(400, "pipeline sem fases")
+
+    # Executor/modelo: default do projeto quando não informados. O modelo padrão
+    # só acompanha o executor padrão do projeto — se o usuário escolheu outro
+    # executor, o modelo dele é uma decisão explícita (ou fica vazio).
+    executor = data.executor or repo.default_executor or "kimi"
+    model = (data.model or "").strip() or None
+    if model is None and repo.default_model and executor == repo.default_executor:
+        model = repo.default_model
 
     # Associação organizacional Projeto > Épico (0..1, opcional — metadados).
     # Regras espelhadas no fluxo de chamados: o épico prevalece e deriva o projeto.
@@ -315,8 +363,8 @@ def create_task(
         title=data.title,
         description=data.description,
         kind=data.kind,
-        executor=data.executor,
-        model=(data.model or "").strip() or None,
+        executor=executor,
+        model=model,
         budget_limit=data.budget_limit if data.budget_limit is not None else settings.task_budget,
         # Default = criador; com auth OFF (user=None) fica NULL até reatribuição.
         responsible_id=user.id if user else None,
@@ -942,6 +990,7 @@ def review_task(
         raise HTTPException(400, f"tarefa não está aguardando revisão (status: {task.status})")
 
     if data.action == "approve":
+        _renew_attempt_budget(task)
         task.budget_limit = (task.budget_limit or 0.0) + data.extra_budget
         task.status = TASK_IN_PROGRESS
         task.error = None
@@ -1002,7 +1051,10 @@ def bounceback_task(
     # Salva nota como feedback da task
     if data.note:
         task.feedback = data.note
-    # Reseta o step alvo (ação humana = novo orçamento de tentativas)
+    # Ação humana = novo orçamento para a task inteira (inclusive fases
+    # anteriores, que podem ser alvo de um bounce-back posterior).
+    _renew_attempt_budget(task)
+    # Reseta o step alvo
     target.attempt = 1
     target.status = STEP_PENDING
     target.error = None
@@ -1082,7 +1134,11 @@ def retry_step(
 
     if data and data.note:
         task.feedback = data.note
-    step.attempt = 1  # ação humana = novo orçamento de tentativas
+    # Ação humana = novo orçamento para a task inteira (não só para a fase
+    # reaberta): uma falha posterior pode devolver o trabalho a uma fase
+    # anterior que estava no teto de tentativas.
+    _renew_attempt_budget(task)
+    step.attempt = 1
     step.status = STEP_PENDING
     step.error = None
     step.summary = None
@@ -1212,6 +1268,14 @@ def update_task(
         _apply_task_association(session, task, data)
         session.commit()
         return _get_task_or_404(session, task_id)
+    # Dependência de execução (ordem da cadeia): metadado editável em qualquer
+    # status — não altera a história. `null` explícito remove.
+    if "depends_on_task_id" in data.model_fields_set:
+        task = _get_task_or_404(session, task_id)
+        _ensure_can_act(session, task, user)
+        _apply_task_dependency(session, task, data.depends_on_task_id)
+        session.commit()
+        return _get_task_or_404(session, task_id)
     task = _get_task_or_404(session, task_id)
     _ensure_can_act(session, task, user)
     if task.status not in ("created", TASK_WAITING_APPROVAL):
@@ -1286,6 +1350,12 @@ def pm_decide(
         raise HTTPException(
             400, f"PM só decide em tarefas travadas (status atual: {task.status})"
         )
+
+    # PM manual é ação humana: renova o orçamento antes de decidir. Sem isso,
+    # um `retry` do PM para uma fase no teto era recusado ("retry
+    # inválido/limitado") mesmo o humano tendo pedido a decisão.
+    _renew_attempt_budget(task)
+    session.commit()
 
     def _pm_thread() -> None:
         try:
@@ -1381,7 +1451,8 @@ def continue_blocked(
     task.block_options = []
 
     # Reabre a fase exata onde o desenvolvimento parou, preservando o histórico.
-    # Ação humana = novo orçamento de tentativas.
+    # Ação humana = novo orçamento de tentativas para a task inteira.
+    _renew_attempt_budget(task)
     step.status = STEP_PENDING
     step.attempt = 1
     step.error = None
@@ -1418,6 +1489,21 @@ def continue_blocked(
 # ---------- Workspace (tela de trabalho) e interação por instrução ----------
 
 
+def _renew_attempt_budget(task: Task) -> None:
+    """Ação humana = orçamento NOVO para a task inteira.
+
+    Reseta o contador `attempt` de TODAS as fases ativas (o histórico de
+    execuções continua intacto em RunEvent). Resetar só a fase reaberta deixava
+    as fases ANTERIORES com o orçamento esgotado: se uma falha posterior fizesse
+    bounce-back para elas, o retry era recusado (`attempt == max_attempts`) e a
+    task travava em `needs_review`. Foi exatamente o que aconteceu na task-305:
+    a instrução no developer reabriu o QA, mas o PO continuou 3/3 e o PM não
+    conseguiu reabri-lo ("retry inválido/limitado").
+    """
+    for st in _active_steps(task):
+        st.attempt = 1
+
+
 def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     """Reexecuta a partir de `target`: reabre o alvo e reseta os steps seguintes.
 
@@ -1438,7 +1524,10 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
         if st.position <= target.position and st.status != STEP_DONE:
             start = st
             break
-    start.attempt = 1
+    # Intervenção humana renova o orçamento da task INTEIRA (inclusive fases
+    # anteriores já `done`): elas não re-executam agora, mas voltam a ter
+    # tentativas se uma falha posterior fizer bounce-back para elas.
+    _renew_attempt_budget(task)
     start.status = STEP_PENDING
     start.error = None
     start.summary = None
@@ -1448,7 +1537,6 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     for st in active:
         if st.position > start.position:
             st.status = STEP_PENDING
-            st.attempt = 1
             st.error = None
             st.summary = None
             st.verdict = None
@@ -1809,6 +1897,7 @@ def send_instruction(
         _rewind_pipeline(session, task, target)
         anchor = target
     elif task.status == TASK_BLOCKED:
+        _renew_attempt_budget(task)
         blocked_steps = [st for st in _active_steps(task) if st.status == STEP_BLOCKED]
         if not blocked_steps:
             raise HTTPException(400, "nenhuma fase bloqueada aguardando instrução")
@@ -1818,15 +1907,18 @@ def send_instruction(
         anchor = step
         task.status = TASK_QUEUED
     elif task.status == TASK_PAUSED:
+        _renew_attempt_budget(task)
         task.status = TASK_QUEUED
         anchor = _pick_anchor(task)
     elif task.status == TASK_WAITING_APPROVAL:
+        _renew_attempt_budget(task)
         gated = next((st for st in _active_steps(task) if st.pause_before), None)
         if gated is not None:
             gated.pause_before = False
         anchor = gated or _pick_anchor(task)
         task.status = TASK_QUEUED
     elif task.status in (TASK_NEEDS_REVIEW, TASK_FAILED):
+        _renew_attempt_budget(task)
         pending = next((st for st in _active_steps(task) if st.status == STEP_PENDING), None)
         if pending is not None:
             anchor = pending
@@ -1841,6 +1933,7 @@ def send_instruction(
             anchor = failed
         task.status = TASK_QUEUED
     elif task.status == TASK_DONE:
+        _renew_attempt_budget(task)
         last = max(_active_steps(task), key=lambda st: st.position)
         _reopen_step(last)
         anchor = last

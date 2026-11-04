@@ -1,4 +1,4 @@
-import { ChangeEvent, FormEvent, useEffect, useState } from "react";
+import { ChangeEvent, FormEvent, useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import ModelSelect from "../components/ModelSelect";
 import { TaskCardGrid } from "../components/TaskCard";
@@ -20,13 +20,15 @@ export default function Tasks() {
   // campo de arquivo e input desabilitado com indicador durante a requisição.
   const [fileError, setFileError] = useState("");
   const [fileLoading, setFileLoading] = useState(false);
+  // Sequência da última carga de pipelines: trocas rápidas de repositório não
+  // deixam uma resposta antiga sobrescrever a seleção atual.
+  const pipelineReq = useRef(0);
 
   const load = () =>
-    Promise.all([api.listTasks(), api.listRepositories(), api.listPipelines()])
-      .then(([t, r, p]) => {
+    Promise.all([api.listTasks(), api.listRepositories()])
+      .then(([t, r]) => {
         setTasks(t);
         setRepos(r);
-        setPipelines(p);
       })
       .catch((e) => setError(String(e)));
 
@@ -34,8 +36,44 @@ export default function Tasks() {
     load();
   }, []);
 
+  // Troca de repositório: carrega os pipelines do escopo dele (globais + do
+  // projeto) e pré-seleciona os defaults configurados no projeto.
+  const onRepositoryChange = async (value: string) => {
+    setRepositoryId(value);
+    setPipelineId("");
+    setError("");
+    if (value === "") {
+      setPipelines([]);
+      setExecutor("kimi");
+      setModel("");
+      return;
+    }
+    const repo = repos.find((r) => r.id === Number(value));
+    const defaultExecutor = repo?.default_executor ?? "kimi";
+    setExecutor(defaultExecutor);
+    setModel(defaultExecutor === "kimi" ? "" : (repo?.default_model ?? ""));
+    const seq = ++pipelineReq.current;
+    try {
+      const list = await api.listPipelines(Number(value));
+      if (seq !== pipelineReq.current) return;
+      setPipelines(list);
+      if (repo?.default_pipeline_id != null && list.some((p) => p.id === repo.default_pipeline_id)) {
+        setPipelineId(String(repo.default_pipeline_id));
+      }
+    } catch (e) {
+      if (seq !== pipelineReq.current) return;
+      setPipelines([]);
+      setError(String(e));
+    }
+  };
+
   const submit = async (event: FormEvent) => {
     event.preventDefault();
+    // opencode sem modelo escolhido: o default não serve — escolher na lista.
+    if (executor === "opencode" && !model.trim()) {
+      setError("Escolha um modelo do opencode no campo Modelo.");
+      return;
+    }
     try {
       await api.createTask({
         repository_id: Number(repositoryId),
@@ -78,7 +116,7 @@ export default function Tasks() {
         <div className="form-inline">
           <div className="form-field" style={{flex: 1, minWidth: 160}}>
             <label className="form-label">Repositório</label>
-            <select value={repositoryId} onChange={(e) => setRepositoryId(e.target.value)} required>
+            <select value={repositoryId} onChange={(e) => void onRepositoryChange(e.target.value)} required>
               <option value="">— selecione —</option>
               {repos.map((repo) => (
                 <option key={repo.id} value={repo.id}>
@@ -89,8 +127,13 @@ export default function Tasks() {
           </div>
           <div className="form-field" style={{flex: 1, minWidth: 160}}>
             <label className="form-label">Pipeline</label>
-            <select value={pipelineId} onChange={(e) => setPipelineId(e.target.value)} required>
-              <option value="">— selecione —</option>
+            <select
+              value={pipelineId}
+              onChange={(e) => setPipelineId(e.target.value)}
+              required
+              disabled={repositoryId === ""}
+            >
+              <option value="">{repositoryId === "" ? "— escolha o repositório —" : "— selecione —"}</option>
               {pipelines.map((pipeline) => (
                 <option key={pipeline.id} value={pipeline.id}>
                   {pipeline.name}
@@ -112,9 +155,9 @@ export default function Tasks() {
             <select
               value={executor}
               onChange={(e) => {
-                const value = e.target.value;
-                setExecutor(value);
-                if (value !== "codex" && value !== "opencode") setModel("");
+                // Modelo é do executor: trocar de executor limpa a escolha.
+                setExecutor(e.target.value);
+                setModel("");
               }}
             >
               <option value="kimi">kimi code</option>

@@ -148,6 +148,16 @@ def test_peak_hours_window_disabled_when_empty():
     assert not s.in_peak_hours(_utc(2, 0))
 
 
+def test_peak_exempt_models_opencode_go():
+    """opencode-go não tem tarifa de pico; os demais modelos continuam pausados."""
+    s = Settings()
+    assert s.model_is_peak_exempt("opencode-go/mimo-v2.6-flash") is True
+    assert s.model_is_peak_exempt("OPENCODE-GO/anything") is True
+    assert s.model_is_peak_exempt("deepseek/deepseek-chat") is False
+    assert s.model_is_peak_exempt("") is False
+    assert s.model_is_peak_exempt(None) is False
+
+
 def test_peak_hours_custom_window(monkeypatch):
     monkeypatch.setenv("AUTOIA_PEAK_HOURS_WINDOWS", "22:00-02:00")
     monkeypatch.setenv("AUTOIA_PEAK_HOURS_WEEKDAYS_ONLY", "0")

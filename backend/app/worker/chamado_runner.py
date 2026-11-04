@@ -18,7 +18,7 @@ import time
 from sqlalchemy import exists, func, update
 from sqlalchemy.orm import Session
 
-from .. import budget, chamado_prompts, verdicts
+from .. import budget, chamado_prompts, model_catalog, verdicts
 from ..config import Settings
 from ..db import utcnow
 from ..models import (
@@ -540,7 +540,7 @@ def generate_text(settings: Settings, executor: str, prompt: str, log_suffix: st
             checkout_path=cwd,
             whitelisted_hosts=[],
             no_progress_timeout=settings.no_progress_timeout,
-            model=settings.opencode_model,
+            model=model_catalog.resolve_opencode_model(settings.opencode_bin, None),
             on_event=on_event,
         )
     else:

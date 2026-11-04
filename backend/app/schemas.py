@@ -48,6 +48,9 @@ class RepositoryCreate(ApiModel):
     allow_auto_tasks: bool = False
     allow_external_tasks: bool = False
     default_pipeline_id: int | None = None
+    # Executor/modelo pré-selecionados nas novas tarefas do projeto (None = kimi).
+    default_executor: Literal["kimi", "opencode", "codex"] | None = None
+    default_model: str | None = Field(default=None, max_length=200)
     auto_summary: bool = False
     # Modo de sandbox de execução do projeto: None herda o global; "off"|"fs"|"full".
     sandbox: str | None = None
@@ -80,6 +83,8 @@ class RepositoryUpdate(ApiModel):
     allow_auto_tasks: bool | None = None
     allow_external_tasks: bool | None = None
     default_pipeline_id: int | None = None
+    default_executor: Literal["kimi", "opencode", "codex"] | None = None
+    default_model: str | None = Field(default=None, max_length=200)
     auto_summary: bool | None = None
     sandbox: str | None = None
     sandbox_profile: str | None = None
@@ -110,6 +115,8 @@ class RepositoryOut(ApiModel):
     allow_auto_tasks: bool = False
     allow_external_tasks: bool = False
     default_pipeline_id: int | None = None
+    default_executor: str | None = None
+    default_model: str | None = None
     auto_summary: bool = False
     sandbox: str | None = None
     sandbox_profile: str | None = None
@@ -364,13 +371,16 @@ class SubTaskOut(ApiModel):
 
 class TaskCreate(ApiModel):
     repository_id: int
-    pipeline_id: int
+    # None = usa o pipeline padrão do projeto (400 se o projeto não tiver um).
+    pipeline_id: int | None = None
     title: str = Field(min_length=1, max_length=300)
     description: str = ""
     kind: Literal["issue", "bug", "feature", "chore"] = "issue"
-    executor: Literal["kimi", "opencode", "codex"] = "kimi"
+    # None = usa o executor padrão do projeto (ou "kimi").
+    executor: Literal["kimi", "opencode", "codex"] | None = None
     # Modelo do executor (precedência: task > Robot.model > default do executor).
-    # Vazio/null = não passa `--model` (codex usa o config dele).
+    # None = usa o modelo padrão do projeto quando o executor é o padrão dele;
+    # vazio = não passa `--model` (codex usa o config dele).
     model: str | None = Field(default=None, max_length=200)
     budget_limit: float | None = Field(default=None, gt=0)
     subtasks: list[SubTaskIn] = []
@@ -803,7 +813,8 @@ class TaskUpdateRequest(ApiModel):
 
     A associação distingue **campo ausente** (via `model_fields_set` — não altera)
     de **`null` explícito** (remove): `project_id: null` remove projeto e épico;
-    `epic_id: null` remove apenas o épico.
+    `epic_id: null` remove apenas o épico. `depends_on_task_id` segue a mesma
+    regra: ausente não altera; `null` remove a dependência de execução.
     """
 
     description: str | None = None
@@ -816,6 +827,9 @@ class TaskUpdateRequest(ApiModel):
     model: str | None = Field(default=None, max_length=200)
     # Modo de execução (auto | manual): alternável em runtime, em qualquer status.
     mode: str | None = Field(default=None, pattern="^(auto|manual)$")
+    # Dependência de execução (task predecessora). Ausente = não altera; `null`
+    # explícito remove (distinguido por `model_fields_set` no endpoint).
+    depends_on_task_id: int | None = None
 
 
 # ---------- Modelos de executor ----------
@@ -824,16 +838,16 @@ class CodexModelsOut(ApiModel):
     """Modelos disponíveis para o executor codex (populam o dropdown da UI)."""
 
     models: list[str] = []
-    # Fonte da lista: "cli" (`codex debug models`) ou "config" (AUTOIA_CODEX_MODELS).
-    source: str = "config"
+    # Fonte da lista: "cli" (`codex debug models`) | "erro" (CLI fora → lista vazia).
+    source: str = "erro"
 
 
 class OpenCodeModelsOut(ApiModel):
     """Modelos disponíveis para o executor opencode (populam o dropdown da UI)."""
 
     models: list[str] = []
-    # Fonte da lista: "cli" (`opencode models`) ou "config" (AUTOIA_OPENCODE_MODELS).
-    source: str = "config"
+    # Fonte da lista: "cli" (`opencode models`) | "erro" (CLI fora → lista vazia).
+    source: str = "erro"
 
 
 # ---------- Eventos ----------

@@ -139,6 +139,11 @@ class Repository(Base):
     allow_auto_tasks: Mapped[bool] = mapped_column(default=False)
     allow_external_tasks: Mapped[bool] = mapped_column(default=False)
     default_pipeline_id: Mapped[int | None] = mapped_column(Integer, ForeignKey("pipelines.id"), nullable=True)
+    # Executor/modelo padrão do projeto para novas tarefas (None = kimi). O
+    # `default_model` só é aplicado quando o executor da tarefa é o default do
+    # projeto — evita mandar um modelo de opencode para o codex, por exemplo.
+    default_executor: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    default_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Gera o resumo do desenvolvimento (LLM) automaticamente a cada avanço de fase
     # e ao parar em estado terminal/decisão, sem precisar clicar em "regenerar".
     auto_summary: Mapped[bool] = mapped_column(Boolean, default=False)

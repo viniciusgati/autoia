@@ -20,7 +20,7 @@ from dataclasses import replace
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
 
-from .. import budget, guardrails, prompts, verdicts
+from .. import budget, guardrails, model_catalog, prompts, verdicts
 from ..config import Settings
 from ..models import (
     STEP_DONE,
@@ -46,6 +46,7 @@ from .sandbox import (
     SandboxConfig,
     docker_available,
     docker_image_available,
+    ensure_image,
 )
 
 log = logging.getLogger("autoia.worker.subtask")
@@ -153,17 +154,36 @@ def _run_subtask_executor(
     model: str | None = None,
     require_device: bool = False,
     on_event,
+    slot_abort_check=None,
 ):
     """Dispatch do executor da task (kimi/opencode/codex) para UMA execução de
     subtarefa — espelha o `_run_executor` do runner, mas o ciclo de subtarefas
-    gerencia o próprio lock_push/sandbox (por isso não reusa o runner)."""
+    gerencia o próprio lock_push/sandbox (por isso não reusa o runner).
+
+    `slot_abort_check` (espelho do runner): interrompe a espera por slot quando a
+    fase/task mudou de estado no banco (pause/instrução/exclusão do usuário) —
+    sem isso a espera só terminava quando um slot liberava. `on_wait_start`/
+    `on_wait_end` emitem `slot_wait`/`slot_ready` para a timeline.
+    """
     workspace_dir = getattr(settings, "workspace_dir", None)
     # Fallback do sandbox (mesmo contrato do runner): sem docker/imagem e sem
     # fail_closed, executa sem isolamento com aviso no log — sem isso, o ciclo
     # de subtarefas falhava em cadeia em ambientes sem daemon docker (ex.: CI)
     # mesmo com `AUTOIA_SANDBOX=fs`, porque este dispatch não tinha o fallback.
     if sandbox is not None and sandbox.enabled:
-        if not (docker_available() and docker_image_available(sandbox.image)):
+        sandbox_ready = docker_available() and docker_image_available(sandbox.image)
+        if not sandbox_ready and sandbox.fail_closed:
+            # Mesmo contrato do runner: imagem que sumiu do Docker local é
+            # reconstruída a partir da receita versionada antes do infra_blocked.
+            ensure_image(
+                sandbox.image,
+                log_dir=getattr(settings, "log_dir", ".") or ".",
+                lock_dir=workspace_dir or ".",
+                timeout_s=getattr(settings, "sandbox_build_timeout", 2400),
+                enabled=getattr(settings, "sandbox_build_image", True),
+            )
+            sandbox_ready = docker_available() and docker_image_available(sandbox.image)
+        if not sandbox_ready:
             if sandbox.fail_closed:
                 outcome = exec_common.ExecOutcome()
                 outcome.aborted = True
@@ -225,16 +245,36 @@ def _run_subtask_executor(
     # Slot de emulador: no máximo `android_max_concurrent` execuções com qemu ao
     # mesmo tempo, entre TODOS os processos (workers forkados + chamado/chat).
     # Depois o slot LLM (teto global de executores — protege o provedor contra
-    # 429). Ordem fixa device → llm em todos os caminhos.
-    device_slot = exec_common.acquire_device_slot(
-        sandbox,
-        workspace_dir,
-        getattr(settings, "android_max_concurrent", 0),
-    )
-    llm_slot = exec_common.acquire_llm_slot(
-        workspace_dir, getattr(settings, "llm_max_concurrent", 0)
-    )
+    # 429). Ordem fixa device → llm em todos os caminhos. A espera é visível
+    # (`slot_wait`/`slot_ready`) e interrompível (`slot_abort_check`).
+    def _slot_wait_start(kind: str, limit: int) -> None:
+        log.info("subtask: aguardando slot de %s (limite %s) para a execução", kind, limit)
+        if on_event is not None:
+            on_event("slot_wait", {"slot": kind, "limit": limit}, 0.0)
+
+    def _slot_wait_end(kind: str, waited_s: float) -> None:
+        log.info("subtask: slot de %s liberado após %.1fs", kind, waited_s)
+        if on_event is not None:
+            on_event("slot_ready", {"slot": kind, "waited_ms": round(waited_s * 1000)}, 0.0)
+
+    device_slot = None
+    llm_slot = None
     try:
+        device_slot = exec_common.acquire_device_slot(
+            sandbox,
+            workspace_dir,
+            getattr(settings, "android_max_concurrent", 0),
+            should_abort=slot_abort_check,
+            on_wait_start=_slot_wait_start,
+            on_wait_end=_slot_wait_end,
+        )
+        llm_slot = exec_common.acquire_llm_slot(
+            workspace_dir,
+            getattr(settings, "llm_max_concurrent", 0),
+            should_abort=slot_abort_check,
+            on_wait_start=_slot_wait_start,
+            on_wait_end=_slot_wait_end,
+        )
         if executor == "opencode":
             return opencode_exec.run_opencode(
                 prompt,
@@ -246,7 +286,9 @@ def _run_subtask_executor(
                 risky_patterns=settings.risky_patterns,
                 checkout_path=checkout_path,
                 whitelisted_hosts=settings.whitelisted_hosts,
-                model=model or settings.opencode_model,
+                # Sem modelo escolhido → primeiro do catálogo do CLI (nunca
+                # um default fixo de config); CLI fora → sem `-m`.
+                model=model_catalog.resolve_opencode_model(settings.opencode_bin, model),
                 no_progress_timeout=settings.no_progress_timeout,
                 max_repeated_searches=getattr(settings, "max_repeated_searches", 0),
                 repo_id=repo_id,
@@ -298,6 +340,15 @@ def _run_subtask_executor(
             extra_env=extra_env,
             on_event=on_event,
         )
+    except exec_common.SlotWaitAborted as exc:
+        # Ação do usuário (pause/instrução/exclusão) durante a espera por slot:
+        # aborta sem iniciar o executor — o ciclo de subtarefas vê `aborted` e
+        # devolve a subtarefa para `pending` com o motivo.
+        outcome = exec_common.ExecOutcome()
+        outcome.aborted = True
+        outcome.abort_reason = exc.reason
+        outcome.sandbox_mode = sandbox.mode
+        return outcome
     finally:
         exec_common.release_slot(llm_slot)
         exec_common.release_slot(device_slot)
@@ -407,13 +458,6 @@ def _build_subtask_implement_prompt(
     if project_info:
         parts.append(project_info)
 
-    # Contexto da subtarefa
-    parts.append(f"## Subtarefa {subtask.position + 1}: {subtask.title}")
-    if subtask.description:
-        parts.append(subtask.description)
-    if subtask.acceptance_criteria:
-        parts.append(f"### Seus critérios\n{subtask.acceptance_criteria}")
-
     # Critérios gerais da história como referência
     if task.acceptance_criteria:
         parts.append(f"### Critérios gerais da história (referência)\n{task.acceptance_criteria}")
@@ -425,22 +469,43 @@ def _build_subtask_implement_prompt(
     if guidance:
         parts.append(guidance)
 
-    # Intervenção do usuário (retomada): entra direto no prompt — a subtarefa é
-    # parte da re-execução e a instrução não pode depender só do handoff.
-    if task.resume_instruction:
-        parts.append(
-            f"## Intervenção do usuário (retomada)\n{task.resume_instruction}\n\n"
-            "_A execução foi bloqueada e o usuário forneceu esta instrução para continuar "
-            "exatamente de onde parou. Atenda a instrução nesta execução._"
-        )
-
     # Progresso das subtarefas anteriores
     done = [s for s in sorted(task.subtasks, key=lambda x: x.position) if s.status == SUB_DONE]
     if done:
-        lines = ["### Subtarefas já concluídas (código na branch)"]
+        lines = ["### Subtarefas já concluídas (verificadas na branch)"]
         for s in done:
             lines.append(f"- Subtarefa {s.position + 1}: {s.title} — {s.summary or '(sem resumo)'[:200]}")
         parts.append("\n".join(lines))
+
+    # Intervenção do usuário (retomada): é HISTÓRICA e pode ser de uma subtarefa
+    # anterior. A subtarefa atual e o relatório de verificação dela prevalecem —
+    # sem essa priorização o developer revalidava a subtarefa antiga e marcava a
+    # atual como "já implementada" (task-279).
+    if task.resume_instruction:
+        parts.append(
+            f"## Intervenção do usuário (retomada)\n{task.resume_instruction}\n\n"
+            "_Esta instrução é histórica e se aplica à subtarefa que a motivou. "
+            f"Se ela citar outra subtarefa, ignore-a e implemente a subtarefa "
+            f"{subtask.position + 1} abaixo._"
+        )
+
+    # Contexto da subtarefa ATUAL — por último para ter prioridade sobre a
+    # instrução de retomada (que pode ser de uma subtarefa anterior).
+    subtask_parts = [
+        f"## Subtarefa {subtask.position + 1}: {subtask.title}",
+        "**Esta é a subtarefa desta execução. Prioridade máxima.**",
+    ]
+    if subtask.description:
+        subtask_parts.append(subtask.description)
+    if subtask.acceptance_criteria:
+        subtask_parts.append(f"### Seus critérios\n{subtask.acceptance_criteria}")
+    if getattr(subtask, "summary", None):
+        subtask_parts.append(
+            f"### Relatório da verificação anterior desta subtarefa\n{subtask.summary}"
+        )
+    if getattr(subtask, "error", None):
+        subtask_parts.append(f"### Motivo/estado registrado\n{subtask.error}")
+    parts.append("\n\n".join(subtask_parts))
 
     # Diff acumulado
     try:
@@ -571,6 +636,21 @@ def run_implement_subtasks(
       vira o resumo da fase. None quando não houve execução livre.
     """
     on_event = _make_on_event(session_factory, step.id, log_path)
+
+    # Bookkeeping honesto ANTES de montar os prompts: o arquivo só pode listar
+    # subtarefas VERIFICADAS (SUB_DONE). Um arquivo antigo com posições apenas
+    # "implementadas" fazia o developer achar que a subtarefa já estava pronta e
+    # re-declarar sem código (task-279). A correção no início evita que o dev
+    # leia um estado mentiroso antes de trabalhar.
+    try:
+        # Sem commit aqui: um commit só do arquivo de controle mudaria o HEAD e
+        # faria a guarda `subtask_done_rejected` achar que houve mudança de
+        # código. O commit fica para o fim da fase.
+        _normalize_and_commit_subtasks_done(
+            session_factory, task_id, checkout, commit=False
+        )
+    except gitops.GitError as exc:
+        return f"bookkeeping: {exc}", None
 
     with session_factory() as s:
         # Re-execução da fase implement (retry manual, instrução do usuário ou
@@ -777,6 +857,7 @@ def _run_free_implement(
             sandbox=sandbox,
             model=model,
             on_event=on_event,
+            slot_abort_check=exec_common.make_step_abort_check(session_factory, step.id),
         )
     finally:
         try:
@@ -807,21 +888,30 @@ def _run_free_implement(
 
 
 def _normalize_and_commit_subtasks_done(
-    session_factory, task_id: int, checkout: str
+    session_factory, task_id: int, checkout: str, *, commit: bool = True
 ) -> None:
     """Bookkeeping do SISTEMA: reescreve `autoia_subtasks_done.json` com a lista
-    ACUMULADA (posições 1-based) das subtarefas implementadas/verificadas da task
-    e commita o arquivo se o conteúdo mudou.
+    ACUMULADA (posições 1-based) das subtarefas **verificadas** (`SUB_DONE`) da
+    task e commita o arquivo se o conteúdo mudou.
+
+    Só entra `SUB_DONE`: uma subtarefa apenas `implementada` ainda não foi
+    verificada e NÃO pode ser usada pelo developer como prova de "já está
+    pronta" — era exatamente o que alimentava o laço da task-279 (arquivo
+    `[1..6]` com só 1-3 verificadas).
 
     O conteúdo nunca fica a cargo do robô: o developer pode gravar apenas a
     posição atual (regressão) — aqui o estado final é sempre cumulativo e
-    commitado, como a convenção do repo exige (caso da task-86)."""
+    commitado, como a convenção do repo exige (caso da task-86).
+
+    `commit=False` é usado no INÍCIO da fase: corrige o arquivo que o dev vai
+    ler sem criar um commit antes da guarda de re-declaração (um commit só do
+    controle mudaria o HEAD e mascararia a guarda)."""
     with session_factory() as s:
         positions = sorted(
             int(p) + 1
             for (p,) in s.query(SubTask.position).filter(
                 SubTask.task_id == task_id,
-                SubTask.status.in_([SUB_IMPLEMENTED, SUB_DONE]),
+                SubTask.status == SUB_DONE,
             )
         )
     content = json.dumps(positions) + "\n"
@@ -835,6 +925,8 @@ def _normalize_and_commit_subtasks_done(
         return
     with open(path, "w", encoding="utf-8") as f:
         f.write(content)
+    if not commit:
+        return
     gitops.run_git(checkout, "add", "--", "autoia_subtasks_done.json")
     if gitops.run_git(checkout, "diff", "--cached", "--quiet", check=False).returncode != 0:
         gitops.run_git(
@@ -983,7 +1075,19 @@ def _done_declaration_has_changes(checkout: str, head_before: str | None) -> boo
     except gitops.GitError:
         head_now = None
     if head_before and head_now and head_now != head_before:
-        return True
+        # Um commit só de arquivos de controle (ex.: autoia_subtasks_done.json)
+        # NÃO é correção de código. Sem este filtro, o commit de bookkeeping
+        # mudava o HEAD e a guarda achava que o dev havia corrigido algo.
+        try:
+            changed = gitops.run_git(
+                checkout, "diff", "--name-only", head_before, head_now,
+            ).stdout
+        except gitops.GitError:
+            return True
+        for path in changed.splitlines():
+            path = path.strip()
+            if path and not any(path.startswith(name) for name in _AUTOIA_CONTROL_FILES):
+                return True
     try:
         result = gitops.run_git(checkout, "status", "--porcelain")
     except gitops.GitError:
@@ -1072,6 +1176,7 @@ def _run_one_implement(
             sandbox=sandbox,
             model=model,
             on_event=on_event,
+            slot_abort_check=exec_common.make_step_abort_check(session_factory, step.id),
         )
     finally:
         try:
@@ -1382,6 +1487,7 @@ def _run_one_verify(
             model=model,
             require_device=False,
             on_event=on_event,
+            slot_abort_check=exec_common.make_step_abort_check(session_factory, step.id),
         )
     finally:
         try:
@@ -1424,8 +1530,27 @@ def _run_one_verify(
         label = verdicts.parse_pass_fail(raw)
         st.verdict = label or (raw or "")[:30] or "AUSENTE"
 
+        # A instrução de retomada é consumida pela verificação desta subtarefa:
+        # PASS/FAIL encerram a dúvida que a motivou. AUSENTE mantém (verificação
+        # inconclusiva; a instrução ainda pode ser necessária). Sem esta limpeza
+        # a instrução da subtarefa 3 continuava sendo injetada nas subtarefas 4-6
+        # e o developer revalidava a 3 em vez de implementar a atual (task-279).
+        if label in (verdicts.V_PASS, verdicts.V_FAIL):
+            task_row = s.get(Task, task_id)
+            if task_row is not None and task_row.resume_instruction:
+                task_row.resume_instruction = None
+                _system_event(
+                    s, step, "resume_instruction_cleared",
+                    {"position": st.position, "verdict": label,
+                     "reason": "subtarefa verificada; instrução de retomada consumida"},
+                )
+
         if label == verdicts.V_PASS:
             st.status = SUB_DONE
+            # Guarda o relatório PASS: antes o summary continuava com o FAIL
+            # anterior e a lista "subtarefas já concluídas" mostrava FAIL para
+            # uma subtarefa aprovada (task-279).
+            st.summary = raw or ""
             st.error = None
             st.finished_at = func.now()
             _system_event(

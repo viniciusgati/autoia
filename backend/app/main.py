@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 import time
 from datetime import timedelta
 
@@ -22,6 +23,35 @@ from .worker.chamado_runner import chamado_worker_loop, recover_stale_chamados
 from .worker.runner import acquire_worker_lock, recover_stale_steps, worker_loop
 
 log = logging.getLogger("autoia")
+
+# Diretriz compartilhada pelo pipeline `android-noemu`: o ambiente roda SEM
+# emulador/dispositivo Android de propósito. O emulador é o maior causador de
+# timeout/infra_blocked nas pipelines Android (boot + qemu + KVM); quando o
+# projeto não precisa de teste instrumentado, a verificação deve ser JVM/headless.
+# Esta diretriz é concatenada na missão de TODOS os robôs do pipeline e prevalece
+# sobre o contrato genérico de verificação (que permite device quando o critério
+# exige).
+ANDROID_NOEMU_POLICY = """
+### Diretriz OBRIGATÓRIA desta pipeline: SEM EMULADOR/DISPOSITIVO (device FORA DE ESCOPO)
+Esta pipeline roda em um ambiente Android deliberadamente SEM emulador e SEM
+dispositivo conectado. A ausência de device NÃO é falha de infraestrutura nem motivo
+para bloquear a fase.
+
+- NUNCA inicie emulador (`emulator`, AVD, instalação de system image) nem use `adb`
+  para instalar/abrir o app.
+- NUNCA execute teste instrumentado/conectado: `connectedAndroidTest`,
+  `connectedCheck`, `connectedDebugAndroidTest`, `uiTest` de device ou equivalentes.
+- NUNCA crie testes em `src/androidTest` que dependam de device; testes novos ficam em
+  `src/test` (JVM; use Robolectric quando precisar de APIs Android).
+- Verifique com o que é headless e determinístico: `./gradlew test` (ou
+  `testDebugUnitTest`), testes de unidade JVM, Robolectric, `assembleDebug`/
+  `compileDebugKotlin`, lint e revisão do código/diff.
+- Se um critério só puder ser provado em device, NÃO reprove por isso: valide por
+  código/teste JVM e registre em `NÃO VERIFICADO:` que a prova em device está fora do
+  escopo desta pipeline. Esta diretriz prevalece sobre o contrato genérico.
+- NÃO faça smoke test visual em emulador/navegador nem gere screenshots.
+"""
+
 
 SEED_ROBOTS = [
     (
@@ -347,6 +377,160 @@ Após testar tudo, escreva `autoia_verdict.txt`:
 
 NÃO modifique código — apenas TESTE e REPORTE.""",
     ),
+    # ── Pipeline Android SEM emulador ────────────────────────────────────────────
+    # Fluxo para projetos Android cuja verificação NÃO pode depender de emulador
+    # (boot/qemu = timeout e infra_blocked). Todos os robôs carregam a mesma
+    # diretriz (`ANDROID_NOEMU_POLICY`) e validam por JVM/Robolectric/build.
+    (
+        "android-noemu-po",
+        "refine",
+        """Você é o robô PO do pipeline ANDROID SEM EMULADOR. Sua missão é transformar
+uma IDEIA CRUA em uma história clara, executável e verificável SEM emulador/dispositivo.
+
+Ideia crua — Título: {task_title}
+Ideia crua — Descrição: {task_description}
+
+Escreva a história final com descrição objetiva, escopo mínimo e critérios de aceite
+verificáveis. Se a ideia for vaga ou ambígua, faça as melhores suposições e deixe-as
+EXPLÍCITAS na descrição.
+
+### Critérios verificáveis sem device (obrigatório)
+- Nenhum critério pode exigir emulador, dispositivo, `connectedAndroidTest`,
+  `connectedCheck` ou instalação do APK. Para comportamento de UI, descreva o
+  resultado esperado e critérios que possam ser provados por testes JVM/Robolectric,
+  build e inspeção de código.
+- Prefira critérios de unidade, contrato, estado e build (ex.: `./gradlew test`,
+  `assembleDebug`) a roteiros manuais em device."""
+        + ANDROID_NOEMU_POLICY,
+    ),
+    (
+        "android-noemu-qa",
+        "review",
+        """Você é o robô QA do pipeline ANDROID SEM EMULADOR. Sua missão é REVISAR A
+HISTÓRIA (descrição + critérios de aceite) antes do desenvolvimento.
+
+Título: {task_title}
+
+Além da revisão usual (clareza, completude, feedback visual e efetividade):
+- REPROVE (NEEDS_WORK) qualquer critério que dependa de emulador, dispositivo ou
+  teste conectado. No SUMMARY, reescreva o critério na versão verificável por testes
+  JVM/Robolectric, build e inspeção de código.
+- A história não pode exigir screenshots/execução em device como prova de aceite.
+Se a história estiver boa e verificável sem device, veredicto READY."""
+        + ANDROID_NOEMU_POLICY,
+    ),
+    (
+        "android-noemu-dev",
+        "implement",
+        """Você é o robô DESENVOLVEDOR do pipeline ANDROID SEM EMULADOR.
+
+Título: {task_title}
+Descrição: {task_description}
+
+Implemente a solução de forma limpa e idiomática, seguindo a stack Android já existente
+do projeto (Kotlin/Java + Gradle e as bibliotecas atuais). Atenda a TODOS os critérios de
+aceite.
+
+### Testes e evidência (obrigatório)
+- Escreva/ajuste testes em `src/test` (JVM). Use Robolectric quando precisar de APIs
+  Android sem device.
+- NÃO crie testes em `src/androidTest` que dependam de device e NÃO rode a suíte
+  instrumentada existente.
+- Antes do commit, rode `./gradlew test` (ou `testDebugUnitTest`) e pelo menos
+  `assembleDebug`/`compileDebugKotlin`; registre comandos e saídas reais no resumo.
+- Ao concluir, faça commit local das mudanças.
+
+### Regras de escopo e qualidade
+- NÃO modifique arquivos fora do escopo da tarefa (sem refactors oportunistas).
+- Se algo quebrado NÃO pertencer à sua tarefa, REPORTE no resumo em vez de corrigir
+  em silêncio."""
+        + ANDROID_NOEMU_POLICY,
+    ),
+    (
+        "android-noemu-validador",
+        "verify",
+        """Você é o robô VALIDADOR do pipeline ANDROID SEM EMULADOR — a prova de que a
+entrega funciona de verdade, sem depender de device.
+
+Título: {task_title}
+Descrição: {task_description}
+
+Valide CADA critério de aceite contra o código implementado:
+- Rode a suíte JVM (`./gradlew test` ou `testDebugUnitTest`) e o build
+  (`assembleDebug`/`compileDebugKotlin`), com resultado REAL no SUMMARY.
+- Valide o restante por revisão do código/diff; quando o comportamento for de UI,
+  confira a implementação e os testes JVM/Robolectric que a cobrem.
+- NÃO instale/abra o app, NÃO use `adb` e NÃO rode teste conectado/instrumentado.
+- Se um critério só puder ser provado em device, registre `NÃO VERIFICADO:` com o que
+  faltou e continue — ausência de emulador NÃO é FAIL.
+Só emita o veredicto depois de verificar de verdade o que é possível sem device."""
+        + ANDROID_NOEMU_POLICY,
+    ),
+    (
+        "android-noemu-avaliador",
+        "assess",
+        """Você é o robô AVALIADOR do pipeline ANDROID SEM EMULADOR — a avaliação final
+da tarefa ANTES da integração.
+
+Título: {task_title}
+Descrição: {task_description}
+Branch base: {default_branch}
+
+Avalie se a tarefa foi realmente entregue: critérios de aceite atendidos, escopo
+respeitado, solução coerente e de qualidade, sem lixo (temporários, debug, credenciais)
+e sem dívidas não justificadas. Valide por revisão do diff/código e pelas evidências
+JVM/build do handoff. NÃO exija prova em device: se o validador registrou
+`NÃO VERIFICADO:` por falta de emulador, isso não é defeito por si só. Só emita FAIL
+por defeito real no código ou evidência insuficiente para confiar na entrega."""
+        + ANDROID_NOEMU_POLICY,
+    ),
+    (
+        "android-noemu-merger",
+        "merge",
+        """Você é o robô MERGER do pipeline ANDROID SEM EMULADOR — a fase que deixa a
+branch pronta para a integração.
+
+Título: {task_title}
+Descrição: {task_description}
+
+## Verificação antes de decidir
+- Estado: `git status`, `git branch --show-current`, `git log --oneline -5`.
+- Divergência: `git log origin/{default_branch}..HEAD`, `git log HEAD..origin/{default_branch}`
+  e `git merge-base`.
+- Rode APENAS a verificação JVM/build do projeto (`./gradlew test`, `assembleDebug`).
+  NÃO rode `connectedAndroidTest`/`connectedCheck`, NÃO use `adb` e NÃO inicie emulador.
+- Antecipe conflitos: `git merge-tree --write-tree origin/{default_branch} HEAD`.
+
+## Se houver conflito — resolva NA BRANCH
+1. `git merge origin/{default_branch}`.
+2. Aplique as regras de decisão: feedback do usuário > lado já integrado/testado >
+   combinar ambos > evitar duplicação.
+3. Edite, rode a suíte JVM de novo ATÉ PASSAR e faça commit local do merge resolvido.
+
+A integração final (merge + push) é feita pelo SISTEMA ao fim da fase: você NÃO faz
+push nem merge final. Se a resolução for ambígua ou de alto risco, escreva
+`autoia_blocked.json` e pare."""
+        + ANDROID_NOEMU_POLICY,
+    ),
+    (
+        "android-noemu-deploy-tester",
+        "verify",
+        """Você é o robô DEPLOY TESTER do pipeline ANDROID SEM EMULADOR — a validação
+final pós-merge, na branch DEFAULT integrada.
+
+Título: {task_title}
+Descrição: {task_description}
+
+Confirme no git log que o merge da tarefa está presente na default e valide o estado
+integrado:
+- Rode a suíte JVM (`./gradlew test`/`testDebugUnitTest`) e o build
+  (`assembleDebug`/`compileDebugKotlin`); confira que os critérios continuam atendidos.
+- NÃO instale/abra o app, NÃO use `adb`, NÃO rode teste conectado e NÃO inicie emulador.
+- Registre evidências reais e limitações no SUMMARY. Ausência de device não é FAIL:
+  valide por build/testes JVM e revisão do código final.
+NÃO modifique nem commite arquivos. Emita o veredicto obrigatório."""
+        + ANDROID_NOEMU_POLICY,
+    ),
 ]
 
 SEED_PIPELINES = [
@@ -475,6 +659,21 @@ SEED_PIPELINES = [
             ("merger", False),
             ("deploy-tester", True),
             ("browser-tester", True),
+        ],
+    ),
+    # Android SEM emulador: fluxo próprio (robôs `android-noemu-*`) para projetos
+    # cuja verificação é JVM/Robolectric/build. Sem tester/browser-tester/emulador;
+    # o deploy-tester pós-merge também roda apenas a suíte JVM e o build.
+    (
+        "android-noemu",
+        [
+            ("android-noemu-po", False),
+            ("android-noemu-qa", False),
+            ("android-noemu-dev", False),
+            ("android-noemu-validador", False),
+            ("android-noemu-avaliador", False),
+            ("android-noemu-merger", False),
+            ("android-noemu-deploy-tester", True),
         ],
     ),
 ]
@@ -766,6 +965,77 @@ def run_api() -> None:
     uvicorn.run(app, host=settings.api_host, port=settings.api_port)
 
 
+def _pending_sandbox_images(settings: Settings, session_factory) -> list[str]:
+    """Imagens de sandbox dos repositórios configurados que estão faltando.
+
+    Usado no startup do worker: em vez de descobrir a imagem faltando na cara
+    de uma fase (`infra_blocked`), confere na subida — uma limpeza de disco pode
+    ter apagado as imagens locais do Docker.
+    """
+    from app.models import Repository
+    from app.worker import runner as runner_mod
+
+    images: list[str] = []
+    with session_factory() as s:
+        repos = s.query(Repository).all()
+    for repo in repos:
+        try:
+            cfg = runner_mod._sandbox_config(settings, repo)
+        except Exception:  # pragma: no cover — repo com config exótica
+            continue
+        if cfg.enabled and cfg.image:
+            images.append(cfg.image)
+    return sorted(set(images))
+
+
+def _preflight_sandbox_images(settings: Settings, session_factory, logger) -> None:
+    """No startup: garante (reconstruindo se preciso) as imagens do sandbox.
+
+    Roda em thread daemon para não atrasar o loop; usa o MESMO lock por imagem
+    do `sandbox.ensure_image`, então workers concorrentes não duplicam o build.
+    """
+    if not getattr(settings, "sandbox_build_image", True):
+        return
+    from app.worker import sandbox as sandbox_mod
+
+    try:
+        missing = [
+            image
+            for image in _pending_sandbox_images(settings, session_factory)
+            if not sandbox_mod.docker_image_available(image)
+        ]
+    except Exception:
+        logger.exception("startup: falha ao conferir imagens do sandbox")
+        return
+    for image in missing:
+        logger.warning("startup: imagem do sandbox ausente — construindo %s", image)
+        try:
+            ok = sandbox_mod.ensure_image(
+                image,
+                log_dir=settings.log_dir,
+                lock_dir=settings.workspace_dir,
+                timeout_s=settings.sandbox_build_timeout,
+                enabled=True,
+            )
+        except Exception:
+            logger.exception("startup: falha ao construir a imagem %s", image)
+            continue
+        logger.info(
+            "startup: imagem do sandbox %s %s", image, "pronta" if ok else "FALHOU"
+        )
+
+
+def _start_sandbox_image_preflight(settings: Settings, session_factory, logger) -> None:
+    """Confere/reconstrói as imagens do sandbox em thread daemon (não bloqueia)."""
+    thread = threading.Thread(
+        target=_preflight_sandbox_images,
+        args=(settings, session_factory, logger),
+        daemon=True,
+        name="sandbox-image-preflight",
+    )
+    thread.start()
+
+
 def _worker_setup(settings: Settings, *, recover: bool, logger) -> object:
     """Engine/session + (opcional) recuperação de órfãos + proxy egress.
 
@@ -838,6 +1108,8 @@ def _worker_main(settings: Settings) -> None:
 
     _install_worker_shutdown_handler(logger)
     _engine, session_factory = _worker_setup(settings, recover=True, logger=logger)
+    # Subida do app: já confere as imagens do sandbox (reconstrói se faltarem).
+    _start_sandbox_image_preflight(settings, session_factory, logger)
     worker_loop(settings, session_factory, settings.workspace_dir)
 
 
@@ -897,6 +1169,58 @@ def run_chat_worker() -> None:
     chat_worker_loop(settings, session_factory, settings.workspace_dir)
 
 
+def _supervise_worker_children(
+    children: list[int],
+    spawn,
+    logger,
+    is_stopping,
+    *,
+    poll_s: float = 1.0,
+    waitpid=os.waitpid,
+) -> list[int]:
+    """Pai supervisor: mantém o grupo de workers com N processos vivos.
+
+    Filho que sai sozinho (crash, `os._exit` de uma exceção que escapou do loop)
+    é LOGADO e substituído — sem isso a capacidade cai em silêncio (com 2 de 3
+    workers mortos a fila andava com um terço do parque e as tasks pareciam
+    "travadas sem worker livre") e o filho morto virava zumbi para sempre.
+
+    `children` é atualizado IN-PLACE: o handler de sinal do pai varre a mesma
+    lista. Filho que morre logo após nascer aumenta a espera (anti fork bomb).
+    """
+    fast_deaths = 0
+    while not is_stopping():
+        delay = poll_s if fast_deaths == 0 else min(30.0, poll_s * (2**fast_deaths))
+        if delay > 0:
+            time.sleep(delay)
+        if is_stopping():
+            break
+        alive: list[int] = []
+        deaths = 0
+        for pid in list(children):
+            try:
+                wpid, status = waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                continue  # já colhido por outro caminho
+            if wpid == 0:
+                alive.append(pid)
+                continue
+            deaths += 1
+            logger.error("worker filho %s saiu (status %s) — repondo o processo", pid, status)
+            try:
+                alive.append(spawn())
+            except Exception:
+                logger.exception("não foi possível repor o worker filho %s", pid)
+        children[:] = alive
+        fast_deaths = deaths if deaths else 0
+        if not alive and not deaths:
+            # Grupo vazio sem morte nova (todos os spawns falharam) — espera mais
+            # para não virar fork bomb e tenta de novo.
+            fast_deaths = 2
+            logger.error("grupo de workers vazio — repondo no próximo ciclo")
+    return children
+
+
 def run_worker() -> None:
     import argparse
     import signal
@@ -945,8 +1269,8 @@ def run_worker() -> None:
     parent_engine.dispose()  # fecha o pool antes do fork (os filhos criam o próprio)
 
     logger.info("iniciando %s processos de worker (parallelismo por task)", workers)
-    children: list[int] = []
-    for _ in range(workers):
+
+    def _spawn_worker() -> int:
         pid = os.fork()
         if pid == 0:  # filho: loop puro, sem lock/recover (engine próprio)
             try:
@@ -956,7 +1280,12 @@ def run_worker() -> None:
                 _worker_process(settings, logger)
             finally:
                 os._exit(0)
-        children.append(pid)
+        return pid
+
+    children: list[int] = [_spawn_worker() for _ in range(workers)]
+    # Subida do grupo: confere/reconstrói as imagens do sandbox em background
+    # (após o fork — nunca paralelizar thread de build com `os.fork`).
+    _start_sandbox_image_preflight(settings, _sf, logger)
 
     def _on_signal(signum, _frame):
         logger.info("pai recebeu sinal %s — encaminhando para os workers", signum)
@@ -987,8 +1316,9 @@ def run_worker() -> None:
 
     signal.signal(signal.SIGTERM, _on_signal)
     signal.signal(signal.SIGINT, _on_signal)
-    for pid in children:
-        os.waitpid(pid, 0)
+    # Supervisão em vez de `waitpid` bloqueante no primeiro filho: quem morre é
+    # reposto (e colhido — sem zumbi) enquanto o pai estiver de pé.
+    _supervise_worker_children(children, _spawn_worker, logger, lambda: False)
 
 
 if __name__ == "__main__":

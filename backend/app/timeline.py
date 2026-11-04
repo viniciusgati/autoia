@@ -94,6 +94,22 @@ def _trim(text: str, limit: int) -> str:
     return text[:limit].rsplit("\n", 1)[0] + "…"
 
 
+def _fmt_duration_ms(ms: float) -> str:
+    """Duração legível em PT-BR a partir de milissegundos (ex.: 215000 -> '3min 35s')."""
+    total = max(0, int(ms / 1000))
+    if total < 60:
+        return f"{total}s"
+    return f"{total // 60}min {total % 60:02d}s"
+
+
+def _slot_label(slot: str | None) -> str:
+    """Nome humano do slot de execução ('llm'/'device' -> texto da timeline)."""
+    return {
+        "llm": "execução LLM",
+        "device": "emulador",
+    }.get(slot or "", slot or "execução")
+
+
 def fallback_mission(
     step: TaskStep,
     task: Task,
@@ -549,6 +565,36 @@ def derive_task_timeline(session: Session, task: Task) -> list[dict]:
             timeline.append(_event_base(
                 evt, meta, payload, EV_SYSTEM, "sandbox",
                 f"🛡 execução em sandbox [{mode}]{detail}{wall_txt}",
+            ))
+            continue
+
+        if kind == "slot_wait":
+            slot = _slot_label(payload.get("slot"))
+            limit = payload.get("limit")
+            limit_txt = (
+                f" (máx. {limit} simultânea{'s' if limit != 1 else ''})"
+                if isinstance(limit, int) and limit > 0
+                else ""
+            )
+            timeline.append(_event_base(
+                evt, meta, payload, EV_SYSTEM, "aguardando slot de execução",
+                f"⏳ aguardando slot de {slot}{limit_txt} — o executor ainda não iniciou",
+                status="running",
+            ))
+            continue
+
+        if kind == "slot_ready":
+            slot = _slot_label(payload.get("slot"))
+            waited = payload.get("waited_ms")
+            waited_txt = (
+                f" após {_fmt_duration_ms(waited)}"
+                if isinstance(waited, (int, float)) and waited >= 1000
+                else ""
+            )
+            timeline.append(_event_base(
+                evt, meta, payload, EV_SYSTEM, "slot de execução liberado",
+                f"▶ slot de {slot} liberado{waited_txt} — iniciando o executor",
+                status="completed",
             ))
             continue
 

@@ -83,6 +83,77 @@ def test_tracker_grep_repetido_do_mesmo_termo():
     assert violation is not None
 
 
+def test_tracker_leituras_em_trechos_diferentes_do_mesmo_arquivo_nao_violam():
+    """Regressão T324: ler `main.js` (~7 mil linhas) em blocos distintos é
+    exploração legítima — o fingerprint não pode ser só o caminho."""
+    tracker = SemanticLoopTracker(max_repeats=6)
+    for offset in (5540, 100, 6746, 1560, 6100, 430):
+        assert tracker.register(
+            "read",
+            {"filePath": "/w/task_324/src/js/main.js", "offset": offset, "limit": 200},
+        ) is None
+
+
+def test_tracker_leitura_repetida_do_mesmo_trecho_viola():
+    tracker = SemanticLoopTracker(max_repeats=2)
+    call = {"filePath": "src/js/main.js", "offset": 100, "limit": 200}
+    assert tracker.register("read", call) is None
+    violation = tracker.register("read", call)
+    assert violation is not None
+    assert violation.pattern == "repeated-search"
+
+
+def test_tracker_bash_grep_com_echo_exit_nao_confunde_o_alvo():
+    """Regressão T324: `; echo "EXIT:$?"` não pode virar o alvo do grep (o
+    watchdog antigo pegava o ÚLTIMO token citado e matava a verificação)."""
+    tracker = SemanticLoopTracker(max_repeats=6)
+    commands = [
+        'grep -n "perfil" src/js/main.js; echo "EXIT:$?"',
+        'grep -rn "createApp" tests/*.js | head -30; echo "EXIT:$?"',
+        'grep -n "onboarding-perfil" src/index.html; echo "EXIT:$?"',
+        'grep -c "perfil" src/js/main.js; grep -n "boas-vindas" src/js/main.js',
+        'grep -rn "state.perfil" src tests; echo "EXIT:$?"',
+        'grep -rn "Salvar dia ideal" src/index.html; echo "EXIT:$?"',
+    ]
+    for command in commands:
+        assert tracker.register("bash", {"command": command}) is None
+
+
+def test_tracker_bash_mesmo_termo_em_arquivos_diferentes_nao_viola():
+    """Regressão T324: procurar o MESMO termo em arquivos de teste diferentes é
+    exploração legítima. O fingerprint do grep precisa incluir o escopo, senão
+    todo `grep "perfil"` colapsa em `grep:perfil` e o robô é morto no 6º."""
+    tracker = SemanticLoopTracker(max_repeats=6)
+    commands = [
+        'grep -rn "perfil" tests/backup-ui.test.js',
+        'grep -rn "perfil" tests/backup.test.js',
+        'grep -rn "perfil" tests/boot.test.js',
+        'grep -rn "perfil" tests/shell-ui.test.js',
+        'grep -rn "perfil" tests/navegacao-ui.test.js',
+        'grep -rn "perfil" tests/ux-contrato.test.js',
+    ]
+    for command in commands:
+        assert tracker.register("bash", {"command": command}) is None
+
+
+def test_tracker_bash_mesmo_termo_e_escopo_viola():
+    tracker = SemanticLoopTracker(max_repeats=2)
+    command = 'grep -rn "perfil" tests/backup-ui.test.js'
+    assert tracker.register("bash", {"command": command}) is None
+    violation = tracker.register("bash", {"command": command})
+    assert violation is not None
+    assert "grep:perfil:tests/backup-ui.test.js" in violation.detail
+
+
+def test_tracker_bash_mesmo_grep_com_echo_exit_viola():
+    tracker = SemanticLoopTracker(max_repeats=2)
+    command = 'grep -n "perfil" src/js/main.js; echo "EXIT:$?"'
+    assert tracker.register("bash", {"command": command}) is None
+    violation = tracker.register("bash", {"command": command})
+    assert violation is not None
+    assert "grep:perfil" in violation.detail
+
+
 def test_tracker_desligado_nunca_viola():
     tracker = SemanticLoopTracker(max_repeats=0)
     for _ in range(20):

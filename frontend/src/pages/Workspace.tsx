@@ -960,8 +960,9 @@ export default function Workspace() {
                     act(() =>
                       api.updateTaskStory(taskId, {
                         executor: value,
-                        // Modelo só faz sentido em codex/opencode: trocar para kimi limpa.
-                        model: value === "codex" || value === "opencode" ? task.model ?? null : null,
+                        // Modelo é do executor (catálogos diferentes): trocar
+                        // de executor limpa a escolha; kimi nem tem modelo.
+                        model: null,
                       }),
                     );
                   }}
@@ -972,7 +973,14 @@ export default function Workspace() {
                 </select>
               </label>
               {(task.executor === "codex" || task.executor === "opencode") && (
-                <label className="ws-executor" title={`modelo do ${task.executor} (vazio = padrão do ${task.executor})`}>
+                <label
+                  className="ws-executor"
+                  title={
+                    task.executor === "opencode"
+                      ? "modelo do opencode — catálogo do CLI, obrigatório (sem escolha, a execução usa o primeiro do catálogo)"
+                      : `modelo do ${task.executor} (vazio = padrão do ${task.executor})`
+                  }
+                >
                   modelo:
                   <ModelSelect
                     value={task.model ?? ""}

@@ -505,6 +505,93 @@ class TestSubtaskWorker:
                 assert sub.status == "done", f"sub {sub.position} status={sub.status}"
                 assert sub.verdict == "PASS"
 
+    def test_verify_pass_limpa_instrucao_de_retomada_e_guarda_summary_pass(
+        self, flow, fake_kimi, settings, monkeypatch
+    ):
+        """PASS consome a instrução de retomada e substitui o summary FAIL antigo
+        pelo PASS: sem isso a instrução vazava para as próximas subtarefas e a
+        lista "já concluídas" mostrava FAIL numa subtarefa aprovada (task-279)."""
+        from app.models import STEP_DONE, SUB_IMPLEMENTED, SubTask, Task, TaskStep
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            s.add(SubTask(
+                task_id=task_id, position=0, title="Sub 1",
+                description="fazer A", status=SUB_IMPLEMENTED,
+                summary="FAIL antigo que não pode aparecer depois do PASS",
+            ))
+            task = s.get(Task, task_id)
+            task.resume_instruction = "Corrija a subtarefa 3 (instrução velha)"
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            for st in steps[:3]:
+                st.status = STEP_DONE
+            steps[3].status = "pending"
+            s.commit()
+
+        step_id = claim_next(session_factory)
+        assert step_id is not None
+        monkeypatch.setattr(settings, "kimi_bin", fake_kimi(
+            [{"role": "assistant", "content": "tudo certo!"}],
+            verdict="ready_pass",
+        ))
+        assert execute_step(settings, session_factory, step_id) is None
+
+        with session_factory() as s:
+            task = s.get(Task, task_id)
+            sub = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+            verify = (
+                s.query(TaskStep).filter(TaskStep.task_id == task_id)
+                .order_by(TaskStep.position).all()[3]
+            )
+            assert task.resume_instruction is None, "PASS deve consumir a instrução"
+            assert sub.status == "done"
+            assert sub.verdict == "PASS"
+            assert (sub.summary or "").startswith("PASS"), sub.summary
+            kinds = {e.kind for e in verify.events}
+            assert "resume_instruction_cleared" in kinds
+
+    def test_verify_fail_limpa_instrucao_de_retomada(
+        self, flow, fake_kimi, settings, monkeypatch
+    ):
+        """FAIL também consome a instrução: o relatório novo do validador é o
+        contexto que o developer deve receber, não a instrução antiga."""
+        from app.models import STEP_DONE, SUB_IMPLEMENTED, SubTask, Task, TaskStep
+        from app.worker.runner import claim_next, execute_step
+
+        session_factory = flow["session_factory"]
+        task_id = flow["task"]["id"]
+
+        with session_factory() as s:
+            s.add(SubTask(
+                task_id=task_id, position=0, title="Sub 1",
+                description="fazer A", status=SUB_IMPLEMENTED, summary="feito",
+            ))
+            task = s.get(Task, task_id)
+            task.resume_instruction = "Corrija a subtarefa 3 (instrução velha)"
+            steps = s.query(TaskStep).filter(TaskStep.task_id == task_id).order_by(TaskStep.position).all()
+            for st in steps[:3]:
+                st.status = STEP_DONE
+            steps[3].status = "pending"
+            s.commit()
+
+        step_id = claim_next(session_factory)
+        assert step_id is not None
+        monkeypatch.setattr(settings, "kimi_bin", fake_kimi(
+            [{"role": "assistant", "content": "teste falhou!"}],
+            verdict="fail",
+        ))
+        assert execute_step(settings, session_factory, step_id) is None
+
+        with session_factory() as s:
+            task = s.get(Task, task_id)
+            sub = s.query(SubTask).filter(SubTask.task_id == task_id).first()
+            assert task.resume_instruction is None, "FAIL deve consumir a instrução"
+            assert sub.status == "pending"
+            assert (sub.summary or "").startswith("FAIL"), sub.summary
+
     def test_verify_subtask_fail_triggers_bounceback(self, flow, fake_kimi, settings, monkeypatch):
         """Se o tester reprova uma subtarefa, bounce-back para implement."""
         from app.worker.runner import claim_next, execute_step
@@ -1013,7 +1100,10 @@ class TestPostDeployFix:
             assert subs[2].status == "done", f"sub 2 status={subs[2].status}"
             assert subs[2].title == "Corrigir deploy: adicionar DATABASE_URL"
             assert subs[2].verdict == "PASS"
-            assert subs[2].summary == "ok"
+            # PASS guarda o relatório da verificação (não deixa o summary FAIL
+            # antigo); o conteúdo do veredicto inclui o "ok" emitido pelo fake.
+            assert (subs[2].summary or "").startswith("PASS")
+            assert "ok" in (subs[2].summary or "")
 
             # Todos os steps devem estar done (exceto talvez o deploy-tester que
             # pode ter ficado pending na segunda rodada — mas o merge re-ocorreu)
@@ -1043,7 +1133,6 @@ def test_subtask_executor_dispatch(monkeypatch):
         whitelisted_hosts = []
         kimi_bin = "kimi"
         opencode_bin = "opencode"
-        opencode_model = "opencode-model"
         codex_bin = "codex"
         codex_model = ""
         cost_per_interaction = 0.01
@@ -1080,7 +1169,12 @@ def test_subtask_executor_dispatch(monkeypatch):
     assert st._run_subtask_executor(s, "codex", "p", **base) == "codex-ok"
     assert set(calls) == {"kimi", "opencode", "codex"}
     # Parâmetros específicos de cada executor são repassados corretamente.
-    assert calls["opencode"]["model"] == "opencode-model"
+    # opencode sem modelo escolhido: o fallback vem do catálogo do CLI (vazio
+    # nos testes — nunca roda `opencode models` de verdade) → sem `-m`.
+    assert calls["opencode"]["model"] is None
+    # modelo explícito repassa direto (precedência task/robô)
+    assert st._run_subtask_executor(s, "opencode", "p", **base, model="prov/modelo-x") == "opencode-ok"
+    assert calls["opencode"]["model"] == "prov/modelo-x"
     # codex sem modelo explícito → None (sem `--model`; usa o default do CLI)
     assert calls["codex"]["model"] is None
     # modelo explícito repassa (precedência task/robô)

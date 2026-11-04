@@ -8,8 +8,10 @@ import signal
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from ..models import STEP_RUNNING, TASK_CANCELLED, TaskStep
 from .sandbox import (
     SandboxConfig,
     build_bwrap_command,
@@ -151,12 +153,42 @@ def needs_emulator_slot(sandbox: SandboxConfig | None) -> bool:
     )
 
 
-def _acquire_slot(kind: str, workspace_dir: str | None, limit: int) -> object | None:
+class SlotWaitAborted(Exception):
+    """Espera por slot de execução interrompida por pedido de parada.
+
+    Levantada por `acquire_device_slot`/`acquire_llm_slot` quando `should_abort`
+    devolve um motivo enquanto a execução espera um slot livre — o chamador
+    converte em `ExecOutcome(aborted=True)` e a fase NÃO chega a iniciar o
+    executor (nada a matar ainda). Ação típica: pause/instrução do usuário.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _acquire_slot(
+    kind: str,
+    workspace_dir: str | None,
+    limit: int,
+    *,
+    should_abort: Callable[[], str | None] | None = None,
+    on_wait_start: Callable[[str, int], None] | None = None,
+    on_wait_end: Callable[[str, float], None] | None = None,
+) -> object | None:
     """Segura um slot de `workspace_dir/.<kind>-slots/<n>.lock` (flock exclusivo).
 
     Semáforo entre PROCESSOS: o worker roda N processos forkados e há ainda os
     workers de chamado/chat — um `threading.Semaphore` não os cobre. Liberado
     sozinho se o processo morrer. `limit <= 0` ou sem workspace = sem slot.
+
+    `should_abort` (opcional) é consultado a cada ciclo de espera: devolver um
+    motivo interrompe a espera com `SlotWaitAborted`. É o que faz pause/instrução
+    do usuário valerem ANTES de o executor existir — não há subprocesso para o
+    stop file matar, e o heartbeat remove o `.stop-task-*` em até 5s (o sinal
+    durável da ação humana é o status da fase no banco; ver
+    `make_step_abort_check`). `on_wait_start`/`on_wait_end` dão visibilidade à
+    espera (timeline/log): sem eles a fase ficava "rodando" sem nenhum sinal.
     """
     if limit <= 0 or not workspace_dir:
         return None
@@ -166,6 +198,7 @@ def _acquire_slot(kind: str, workspace_dir: str | None, limit: int) -> object | 
     except OSError:
         # Sem como criar os locks → não segura a fase por causa disso.
         return None
+    waiting_since: float | None = None
     while True:
         for index in range(limit):
             try:
@@ -177,9 +210,20 @@ def _acquire_slot(kind: str, workspace_dir: str | None, limit: int) -> object | 
             except OSError:
                 fh.close()
                 continue
+            if waiting_since is not None and on_wait_end is not None:
+                on_wait_end(kind, time.monotonic() - waiting_since)
             return fh
         # Todos ocupados: espera e tenta de novo (o próximo é liberado quando uma
-        # execução terminar — cada fase tem `run_timeout`).
+        # execução terminar — cada fase tem `run_timeout`). Antes de esperar,
+        # respeita a ação do usuário (pause/instrução/exclusão).
+        if should_abort is not None:
+            reason = should_abort()
+            if reason:
+                raise SlotWaitAborted(reason)
+        if waiting_since is None:
+            waiting_since = time.monotonic()
+            if on_wait_start is not None:
+                on_wait_start(kind, limit)
         time.sleep(1.0)
 
 
@@ -187,19 +231,36 @@ def acquire_device_slot(
     sandbox: SandboxConfig | None,
     workspace_dir: str | None,
     limit: int,
+    *,
+    should_abort: Callable[[], str | None] | None = None,
+    on_wait_start: Callable[[str, int], None] | None = None,
+    on_wait_end: Callable[[str, float], None] | None = None,
 ) -> object | None:
     """Slot de execução COM emulador (liberar com `release_slot`).
 
     Só quando `needs_emulator_slot`: sem emulador, `limit <= 0` ou sem workspace
     devolve `None`. A espera é segura — o heartbeat do worker e o processamento
-    de `.stop-*` rodam em outra thread, iniciada antes de `execute_step`.
+    de `.stop-*` rodam em outra thread, iniciada antes de `execute_step` — e
+    interrompível via `should_abort` (pause/instrução/exclusão durante a espera).
     """
     if not needs_emulator_slot(sandbox):
         return None
-    return _acquire_slot("device", workspace_dir, limit)
+    return _acquire_slot(
+        "device", workspace_dir, limit,
+        should_abort=should_abort,
+        on_wait_start=on_wait_start,
+        on_wait_end=on_wait_end,
+    )
 
 
-def acquire_llm_slot(workspace_dir: str | None, limit: int) -> object | None:
+def acquire_llm_slot(
+    workspace_dir: str | None,
+    limit: int,
+    *,
+    should_abort: Callable[[], str | None] | None = None,
+    on_wait_start: Callable[[str, int], None] | None = None,
+    on_wait_end: Callable[[str, float], None] | None = None,
+) -> object | None:
     """Slot de execução LLM (liberar com `release_slot`) — TETO GLOBAL de
     executores simultâneos (fases + missões/resumos/PM/dispatcher).
 
@@ -209,7 +270,44 @@ def acquire_llm_slot(workspace_dir: str | None, limit: int) -> object | None:
     normais → 17 erros no mesmo minuto). A ordem de aquisição é SEMPRE device →
     llm (consistente em todos os caminhos, sem ciclo).
     """
-    return _acquire_slot("llm", workspace_dir, limit)
+    return _acquire_slot(
+        "llm", workspace_dir, limit,
+        should_abort=should_abort,
+        on_wait_start=on_wait_start,
+        on_wait_end=on_wait_end,
+    )
+
+
+def make_step_abort_check(session_factory, step_id: int) -> Callable[[], str | None]:
+    """Constrói o `should_abort` da espera de slot para UMA fase (step).
+
+    O status do step no banco é o sinal DURÁVEL da ação do usuário: pause/
+    instrução/rewind resetam a fase para `pending` (`_force_stop_running`) e a
+    exclusão do projeto cancela a task. O `.stop-task-<id>` é um pulso — o
+    `process_stop_files` do heartbeat o remove em até 5s — e não serve para uma
+    espera de slot, onde não existe subprocesso para matar. Sem este check, a
+    task-250 ficou ~14 min "rodando" sem rodar, ignorando a instrução do usuário.
+    """
+
+    def _check() -> str | None:
+        with session_factory() as s:
+            step = s.get(TaskStep, step_id)
+            if step is None:
+                return "fase removida durante a espera por slot de execução"
+            if step.status != STEP_RUNNING:
+                return (
+                    "execução interrompida pelo usuário (pause/instrução/rewind) "
+                    "enquanto aguardava slot de execução"
+                )
+            task = step.task
+            if task is not None and task.status == TASK_CANCELLED:
+                return (
+                    "execução interrompida (tarefa cancelada/projeto excluído) "
+                    "enquanto aguardava slot de execução"
+                )
+        return None
+
+    return _check
 
 
 def release_slot(handle: object | None) -> None:
