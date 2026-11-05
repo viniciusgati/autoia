@@ -302,7 +302,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   de todas as subtarefas `implemented`/`done`) e commita se mudou
   (`_normalize_and_commit_subtasks_done`) — o robô não pode gravar só a posição atual
   (a task-86 morreu porque o dev gravou `[4]` em vez de `[1, 2, 3, 4]`). O prompt da
-  ferramenta (`SUB_TASK_DONE_TOOL`) deixa explícito o conteúdo cumulativo.
+  ferramenta (`SUB_TASK_DONE_TOOL`) deixa explícito o conteúdo cumulativo. Se o repo
+  **ignora** o arquivo (`.gitignore`), ele fica no checkout sem commit; qualquer falha
+  de git no bookkeeping é best-effort (log) e **não derruba a fase** — antes um
+  `git add` de arquivo ignorado esgotava as tentativas (task-343).
 - **PM** (`pm`): decide `retry <pos>` / `continuar` (top-up de orçamento) / `escalar`
   (default seguro). Limite por task: `AUTOIA_MAX_PM_DECISIONS` (default 2). Decisão
   inválida/ausente → **escalar**. A decisão AUTOMÁTICA (`_maybe_pm`) captura o último

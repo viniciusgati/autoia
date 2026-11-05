@@ -1304,3 +1304,65 @@ def test_needs_reverification_interrompida_entrna_na_fila():
     assert needs_reverification(SimpleNamespace(status=SUB_PENDING, error=None)) is False
     # done não volta
     assert needs_reverification(SimpleNamespace(status=SUB_DONE, error=None)) is False
+
+
+# ---------------------------------------------------------------------------
+# Bookkeeping de subtarefas não pode derrubar a fase
+# ---------------------------------------------------------------------------
+
+def test_bookkeeping_ignorado_nao_falha(flow, tmp_path):
+    """Se o projeto ignora autoia_subtasks_done.json, o worker não tenta
+    commitá-lo (e não transforma o bookkeeping em falha da fase — task-343)."""
+    import subprocess
+
+    from app.models import SUB_DONE, SubTask
+    from app.worker import gitops, subtask
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True)
+    (repo / ".gitignore").write_text("autoia_subtasks_done.json\n")
+    subprocess.run(["git", "add", ".gitignore"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-m", "init"], cwd=repo, check=True)
+
+    with flow["session_factory"]() as s:
+        s.add(SubTask(
+            task_id=flow["task"]["id"], position=0, title="sub",
+            description="d", status=SUB_DONE,
+        ))
+        s.commit()
+
+    subtask._normalize_and_commit_subtasks_done(
+        flow["session_factory"], flow["task"]["id"], str(repo)
+    )
+
+    assert (repo / "autoia_subtasks_done.json").read_text() == "[1]\n"
+    status = gitops.run_git(str(repo), "status", "--porcelain").stdout.strip()
+    assert status == "", f"arquivo ignorado não deveria aparecer no status: {status}"
+    assert len(gitops.run_git(str(repo), "log", "--oneline").stdout.splitlines()) == 1
+
+
+def test_bookkeeping_erro_git_nao_propaga(flow, tmp_path, monkeypatch):
+    """Falha genérica de git no bookkeeping é logada, não vira falha da fase."""
+    from app.models import SUB_DONE, SubTask
+    from app.worker import gitops, subtask
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    with flow["session_factory"]() as s:
+        s.add(SubTask(
+            task_id=flow["task"]["id"], position=0, title="sub",
+            description="d", status=SUB_DONE,
+        ))
+        s.commit()
+
+    def boom(*args, **kwargs):
+        raise gitops.GitError(("add",), "falha simulada")
+
+    monkeypatch.setattr(gitops, "run_git", boom)
+    # não deve levantar
+    subtask._normalize_and_commit_subtasks_done(
+        flow["session_factory"], flow["task"]["id"], str(repo)
+    )
+    assert (repo / "autoia_subtasks_done.json").read_text() == "[1]\n"

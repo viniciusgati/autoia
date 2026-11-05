@@ -927,11 +927,31 @@ def _normalize_and_commit_subtasks_done(
         f.write(content)
     if not commit:
         return
-    gitops.run_git(checkout, "add", "--", "autoia_subtasks_done.json")
-    if gitops.run_git(checkout, "diff", "--cached", "--quiet", check=False).returncode != 0:
-        gitops.run_git(
-            checkout, "commit", "-m",
-            "autoia: registra subtarefas implementadas (bookkeeping)",
+    # Bookkeeping é estado do SISTEMA (a fonte de verdade é a tabela `subtasks`):
+    # se o projeto ignora o arquivo, mantê-lo no checkout sem commit é correto.
+    # Antes, o `git add` de um arquivo ignorado levantava GitError, o chamador
+    # transformava em falha da fase e a task esgotava as tentativas (task-343).
+    try:
+        ignored = gitops.run_git(
+            checkout, "check-ignore", "-q", "autoia_subtasks_done.json", check=False
+        )
+        if ignored.returncode == 0:
+            log.info(
+                "bookkeeping de subtarefas: autoia_subtasks_done.json é ignorado "
+                "pelo repo — mantendo no checkout sem commit"
+            )
+            return
+        gitops.run_git(checkout, "add", "--", "autoia_subtasks_done.json")
+        if gitops.run_git(checkout, "diff", "--cached", "--quiet", check=False).returncode != 0:
+            gitops.run_git(
+                checkout, "commit", "-m",
+                "autoia: registra subtarefas implementadas (bookkeeping)",
+            )
+    except gitops.GitError:
+        # Bookkeeping nunca deve derrubar uma fase cujo código já foi entregue.
+        log.warning(
+            "bookkeeping de subtarefas falhou em %s — seguindo sem commit",
+            checkout, exc_info=True,
         )
 
 
