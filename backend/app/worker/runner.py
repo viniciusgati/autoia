@@ -2185,6 +2185,84 @@ def _next_opencode_account(s: Session, eff: EffectiveSettings, task: Task) -> st
     return opencode_accounts.next_account(s, task.repository, eff.opencode_account)
 
 
+# Papéis de fase "somente leitura": produzem história/veredicto no texto final ou
+# em arquivos consumidos pelo worker (autoia_verdict/blocked/decision) e NUNCA
+# devem alterar código. Sem esta trava, `refine` (PO) e `review`/`assess`/`verify`
+# alteravam fontes e o worker commitava tudo como se fosse implementação — a
+# task-326 teve o PO commitando 35 arquivos de código/testes na fase 0.
+_READ_ONLY_ROLES = frozenset({"refine", "review", "assess", "verify"})
+
+
+def _revert_read_only_changes(
+    s: Session,
+    step: TaskStep,
+    checkout: str,
+    head_before: str | None,
+    role: str,
+) -> None:
+    """Descarta alterações de código feitas por uma fase somente-leitura.
+
+    Cobre os dois caminhos: árvore suja (checkout/clean) e commit feito pelo
+    próprio robô (reset --hard para o HEAD anterior à fase). O evento
+    `readonly_phase_changes_reverted` deixa a tentativa visível na timeline.
+    """
+    if role not in _READ_ONLY_ROLES:
+        return
+    try:
+        status = gitops.run_git(checkout, "status", "--porcelain").stdout.strip()
+    except gitops.GitError:
+        return
+    try:
+        head_now = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+    except gitops.GitError:
+        head_now = None
+    commit_changed = bool(head_before and head_now and head_now != head_before)
+    if not status and not commit_changed:
+        return
+
+    files = [line[3:].strip() for line in status.splitlines() if line.strip()]
+    reverted_commit = False
+    if commit_changed:
+        try:
+            gitops.run_git(checkout, "reset", "--hard", head_before)
+            reverted_commit = True
+        except gitops.GitError:
+            log.warning(
+                "não foi possível reverter commit da fase read-only em %s",
+                checkout, exc_info=True,
+            )
+    if status and not reverted_commit:
+        try:
+            gitops.run_git(checkout, "checkout", "--", ".")
+        except gitops.GitError:
+            log.warning(
+                "não foi possível reverter alterações da fase read-only em %s",
+                checkout, exc_info=True,
+            )
+    # Remove arquivos não rastreados criados pela fase (ignorados NÃO são tocados).
+    try:
+        gitops.run_git(checkout, "clean", "-fd")
+    except gitops.GitError:
+        log.warning(
+            "não foi possível limpar arquivos não rastreados da fase read-only em %s",
+            checkout, exc_info=True,
+        )
+    _system_event(
+        s, step, "readonly_phase_changes_reverted",
+        {
+            "role": role,
+            "files": files[:50],
+            "commit_reverted": reverted_commit,
+            "reason": "fase somente-leitura alterou o checkout; alterações foram descartadas",
+        },
+    )
+    log.warning(
+        "fase %s (%s) alterou %d arquivo(s)%s — alterações revertidas",
+        step.id, role, len(files),
+        " e um commit" if reverted_commit else "",
+    )
+
+
 def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str, outcome, verdict_label: str | None, head_before: str | None = None) -> dict | None:
     trigger: dict | None = None
     with session_factory() as s:
@@ -2220,6 +2298,11 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
             _mark_decision(s, step, task, decision)
             s.commit()
             return None
+
+        # Fases somente-leitura (PO/QA/avaliador/validador) não alteram código:
+        # qualquer arquivo/commit produzido pelo robô é descartado ANTES de o
+        # worker decidir/commitar a fase.
+        _revert_read_only_changes(s, step, checkout, head_before, role)
 
         if outcome.aborted:
             if reason.startswith("provider_limit:"):
@@ -2813,6 +2896,11 @@ def _decide_subtask_verify(
         task_id = step.task_id
         log_path = step.log_path or os.path.join(eff.log_dir, f"step_{step_id}.log")
 
+    try:
+        head_before = gitops.run_git(checkout, "rev-parse", "HEAD").stdout.strip()
+    except gitops.GitError:
+        head_before = None
+
     result = subtask.run_verify_subtasks(
         eff, session_factory, step,
         task_id, checkout, base, branch, project_info, log_path,
@@ -2839,6 +2927,10 @@ def _decide_subtask_verify(
             _mark_blocked(s, step, task, block)
             s.commit()
             return None
+
+        # O ciclo de subtarefas do validador também é somente-leitura: ele pode
+        # rodar testes, mas não deve alterar código nem commitar.
+        _revert_read_only_changes(s, step, checkout, head_before, "verify")
 
         if result is None:
             if _attempt_execution_events(session_factory, step.id) == 0:

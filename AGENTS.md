@@ -215,6 +215,15 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `PASS` em ~2s sem abrir navegador/rodar nada (270 fases no histórico). Além disso,
   verificação de subtarefas só carimba `PASS` se a tentativa atual teve execução real
   (`tool_call`/`assistant_text`); sem execução vira `INCONCLUSIVE` → avaliador/revisão.
+- **Fases somente-leitura** (`refine`/`review`/`assess`/`verify`): produzem apenas
+  história/veredicto (texto final ou `autoia_verdict/blocked/decision`) e **não podem
+  alterar código**. O worker detecta árvore suja e commits feitos pelo robô e descarta
+  (`git checkout -- .`/`git clean -fd`/`reset --hard`, evento
+  `readonly_phase_changes_reverted`) antes de decidir/commitar a fase. Exceções:
+  `analyze` (iniciador pode criar o scaffold), `implement` e `merge` (resolução de
+  conflito). Sem isso, o PO implementava e commitava o trabalho inteiro (task-326:
+  35 arquivos de código/testes na fase 0) e o QA/avaliador podiam “consertar” código
+  sem passar pelo developer.
 - **Stack do projeto**: antes de cada execução do kimi (steps e PM), o worker grava um
   `AGENTS.md` **não versionado** na raiz do checkout (excluído via `.git/info/exclude`)
   declarando a tecnologia detectada do projeto + regras de padrão (não introduzir outra

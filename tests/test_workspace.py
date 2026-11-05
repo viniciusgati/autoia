@@ -20,6 +20,19 @@ STREAM = [
     {"role": "assistant", "content": "implementação concluída com sucesso"},
 ]
 
+PO_STORY = [
+    {
+        "role": "assistant",
+        "content": (
+            "## Descrição\n"
+            "Como usuário, quero registrar um pedido para acompanhar meu histórico.\n\n"
+            "## Critérios de aceite\n"
+            "- [ ] o pedido é registrado e listado\n"
+            "- [ ] erro claro quando faltar item\n"
+        ),
+    }
+]
+
 DECISION_JSON = json.dumps({
     "question": "Validar no OrderService ou no StockService?",
     "options": ["A — validar no OrderService", "B — validar no StockService"],
@@ -282,20 +295,32 @@ def test_workspace_reexecution_preserves_history(flow, fake_kimi):
 
 
 def test_workspace_diff_from_git(flow, fake_kimi):
-    """Arquivos alterados e diff vêm do git (commit real da fase)."""
+    """Arquivos alterados e diff vêm do git (commit real da fase).
+
+    O arquivo é criado pelo developer (implement), não pelo PO: fases read-only
+    (PO/QA/avaliador/validador) têm as alterações revertidas pelo worker.
+    """
     settings = flow["settings"]
-    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass", write_file="feature.py", write_content="x = 1\n")
     settings.task_budget = 100.0
     task_id = flow["task"]["id"]
 
-    _execute(flow, _run_claim(flow))
+    settings.kimi_bin = fake_kimi(PO_STORY)
+    _execute(flow, _run_claim(flow))  # po
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    _execute(flow, _run_claim(flow))  # qa
+
+    settings.kimi_bin = fake_kimi(
+        STREAM, write_file="feature.py", write_content="x = 1\n"
+    )
+    _execute(flow, _run_claim(flow))  # developer
 
     data = flow["client"].get(f"/api/tasks/{task_id}/workspace").json()
-    occ = data["occurrences"][0]
+    occ = next(o for o in data["occurrences"] if o["position"] == 2)
     assert "feature.py" in occ["files"]
     assert occ["file_count"] >= 1
 
-    diff = flow["client"].get(f"/api/tasks/{task_id}/steps/0/diff").json()
+    diff = flow["client"].get(f"/api/tasks/{task_id}/steps/2/diff").json()
     assert diff["commit"]
     assert "feature.py" in diff["files"]
     assert diff["stat"]

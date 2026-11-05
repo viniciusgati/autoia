@@ -1202,6 +1202,21 @@ def test_docker_sandbox_flow_phase_completa_com_evento_sandbox(flow, tmp_path):
     from app.models import RunEvent, TaskStep
     from app.worker import runner
 
+    # A fase que escreve é o developer (implement): PO/QA são somente-leitura e
+    # o worker reverte qualquer arquivo criado por elas.
+    with flow["session_factory"]() as s:
+        steps = (
+            s.query(TaskStep)
+            .filter(TaskStep.task_id == flow["task"]["id"])
+            .order_by(TaskStep.position)
+            .all()
+        )
+        steps[0].status = "done"
+        steps[0].summary = "história"
+        steps[1].status = "done"
+        steps[1].summary = "revisão ok"
+        s.commit()
+
     step_id = runner.claim_next(flow["session_factory"])
     assert step_id is not None
     result = runner.execute_step(settings, flow["session_factory"], step_id)
