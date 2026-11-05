@@ -224,6 +224,11 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   conflito). Sem isso, o PO implementava e commitava o trabalho inteiro (task-326:
   35 arquivos de código/testes na fase 0) e o QA/avaliador podiam “consertar” código
   sem passar pelo developer.
+- **História do PO só é gravada se for história**: o `refine` só atualiza
+  `Task.description`/`acceptance_criteria` quando o texto final contém
+  `## Descrição` **e** `## Critérios de aceite`. Texto solto/relatório de
+  implementação gera evento `refine_story_missing` e a descrição original é
+  preservada (task-326: a ideia crua foi substituída por um relatório do PO).
 - **Stack do projeto**: antes de cada execução do kimi (steps e PM), o worker grava um
   `AGENTS.md` **não versionado** na raiz do checkout (excluído via `.git/info/exclude`)
   declarando a tecnologia detectada do projeto + regras de padrão (não introduzir outra

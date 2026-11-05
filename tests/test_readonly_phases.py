@@ -86,6 +86,34 @@ def test_refine_nao_commit_codigo(flow, fake_kimi):
     assert reverted[0]["payload"]["commit_reverted"] is False
 
 
+def test_refine_sem_historia_preserva_descricao_original(flow, fake_kimi):
+    """Relatório de implementação no lugar da história NÃO vira task.description.
+
+    Regressão da task-326: o texto final do PO (relatório de developer) substituiu
+    a ideia crua porque `parse_story` aceita texto sem marcadores.
+    """
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+    settings.kimi_bin = fake_kimi(
+        [{"role": "assistant", "content": "Trabalho concluído. Tudo implementado."}],
+        write_file="hacked_report.py",
+        write_content="print(1)\n",
+    )
+
+    step_id = _execute_next(flow)
+    with flow["session_factory"]() as s:
+        from app.models import Task
+
+        task = s.get(Task, flow["task"]["id"])
+        assert task.description == "d", "descrição original foi sobrescrita"
+        step = s.get(TaskStep, step_id)
+        kinds = [e.kind for e in step.events]
+        assert "refine_story_missing" in kinds
+
+    checkout = _checkout(flow)
+    assert not os.path.exists(os.path.join(checkout, "hacked_report.py"))
+
+
 def test_refine_commit_do_robo_e_revertido(flow, tmp_path):
     """Se o PO commitar durante a fase, o commit é desfeito (reset --hard)."""
     settings = flow["settings"]

@@ -2501,23 +2501,45 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
 
         # Papel refine (po): grava a história na task.
         if role == "refine":
-            description, criteria = verdicts.parse_story(outcome.final_text or "")
-            if description:
-                task.description = description
-            if criteria:
-                task.acceptance_criteria = criteria
-            # Gera subtarefas a partir do plano de implementação (se o PO gerou)
-            subtask_data = verdicts.parse_subtasks(outcome.final_text or "")
-            if not task.subtasks:
-                _create_subtasks(s, step, task, subtask_data)
-            elif _can_replace_pending_subtasks(step, task):
-                # Re-execução do PO (bounce-back de QA com NEEDS_WORK): o plano de
-                # implementação foi REESCRITO, mas as subtarefas antigas continuam
-                # no banco — QA/verify/assess leriam um plano obsoleto e reprovam
-                # de novo (loop). Se nenhuma subtarefa foi trabalhada ainda
-                # (developer não rodou), substitui o plano antigo pelo novo.
-                task.subtasks.clear()
-                _create_subtasks(s, step, task, subtask_data)
+            final_text = outcome.final_text or ""
+            lowered = final_text.lower()
+            has_story = (
+                "## descrição" in lowered
+                and "## critérios de aceite" in lowered
+            )
+            if not has_story:
+                # O PO às vezes responde com um relatório de implementação (ou
+                # texto solto) em vez da história. NÃO sobrescrever a descrição
+                # original com esse texto — a task-326 perdeu a ideia crua e
+                # passou a ter um relatório de developer como história.
+                _system_event(
+                    s, step, "refine_story_missing",
+                    {
+                        "reason": (
+                            "texto final sem '## Descrição' e '## Critérios de "
+                            "aceite'; descrição original preservada"
+                        ),
+                        "text_length": len(final_text),
+                    },
+                )
+            else:
+                description, criteria = verdicts.parse_story(final_text)
+                if description:
+                    task.description = description
+                if criteria:
+                    task.acceptance_criteria = criteria
+                # Gera subtarefas a partir do plano de implementação (se o PO gerou)
+                subtask_data = verdicts.parse_subtasks(final_text)
+                if not task.subtasks:
+                    _create_subtasks(s, step, task, subtask_data)
+                elif _can_replace_pending_subtasks(step, task):
+                    # Re-execução do PO (bounce-back de QA com NEEDS_WORK): o plano de
+                    # implementação foi REESCRITO, mas as subtarefas antigas continuam
+                    # no banco — QA/verify/assess leriam um plano obsoleto e reprovam
+                    # de novo (loop). Se nenhuma subtarefa foi trabalhada ainda
+                    # (developer não rodou), substitui o plano antigo pelo novo.
+                    task.subtasks.clear()
+                    _create_subtasks(s, step, task, subtask_data)
 
         steps = _active_steps(task)
         nxt = next((st for st in steps if st.position > step.position), None)
