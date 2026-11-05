@@ -144,6 +144,10 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("archived", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
     "pipelines": [("repository_id", "INTEGER REFERENCES repositories(id)")],
+    "task_proposals": [
+        # Histórias/casos de uso do docs/PRODUTO.md cobertos pela proposta.
+        ("coverage_json", "TEXT"),
+    ],
     "tasks": [
         ("acceptance_criteria", "TEXT"),
         ("pm_decisions", "INTEGER DEFAULT 0 NOT NULL"),

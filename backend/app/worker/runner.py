@@ -1815,6 +1815,7 @@ def execute_step(
             head_before = None
         role = step.robot.role if step.robot else ""
         has_subtasks = bool(task.subtasks)  # força eager load dentro da sessão
+        is_post_merge = bool(step.post_merge)
         if not step.goal:
             step.goal = _step_goal(step, task)
         s.commit()
@@ -1824,13 +1825,19 @@ def execute_step(
     _maybe_step_mission(settings, session_factory, step_id, run)
 
     # ── Ramo de subtarefas: implement e verify iteram sobre subtarefas ──
-    if has_subtasks and role == "implement":
+    # Fases PÓS-MERGE nunca entram no ciclo de subtarefas: elas rodam na branch
+    # default integrada e precisam validar o produto/estado final como uma
+    # execução livre. Sem este guard, `deploy-tester`/`browser-tester` (role
+    # verify) caíam em `_decide_subtask_verify`, encontravam todas as subtarefas
+    # já verificadas pelo validador pré-merge e terminavam com PASS sem executar
+    # nada (270 fases no histórico do autoia — browser-tester nunca abriu navegador).
+    if has_subtasks and role == "implement" and not is_post_merge:
         trigger = _decide_subtask_implement(
             eff, session_factory, step_id, checkout, base, branch, project_info
         )
         _maybe_release_workspace(eff, session_factory, task.id, checkout)
         return trigger
-    if has_subtasks and role == "verify":
+    if has_subtasks and role == "verify" and not is_post_merge:
         trigger = _decide_subtask_verify(
             eff, session_factory, step_id, checkout, base, branch, project_info
         )
@@ -1960,6 +1967,29 @@ def _consume_verdict(s: Session, step: TaskStep, checkout: str) -> str | None:
 def _event_count(session_factory, step_id: int) -> int:
     with session_factory() as s:
         return s.query(func.count(RunEvent.id)).filter(RunEvent.step_id == step_id).scalar() or 0
+
+
+def _attempt_execution_events(session_factory, step_id: int) -> int:
+    """Conta eventos de execução REAL (tool_call/assistant_text) da tentativa atual.
+
+    A fronteira é o último `attempt_started`: eventos de tentativas anteriores não
+    contam. Uma fase de verificação sem NENHUMA execução nesta tentativa não pode
+    ser carimbada PASS — era exatamente o furo em que `browser-tester`/`deploy-tester`
+    de tasks com subtarefas "passavam" em ~2s sem abrir navegador nem rodar nada.
+    """
+    with session_factory() as s:
+        last_attempt = (
+            s.query(func.max(RunEvent.id))
+            .filter(RunEvent.step_id == step_id, RunEvent.kind == "attempt_started")
+            .scalar()
+        )
+        query = s.query(func.count(RunEvent.id)).filter(
+            RunEvent.step_id == step_id,
+            RunEvent.kind.in_(("tool_call", "assistant_text")),
+        )
+        if last_attempt is not None:
+            query = query.filter(RunEvent.id > last_attempt)
+        return int(query.scalar() or 0)
 
 
 def _scan_artifacts(s: Session, step: TaskStep, checkout: str) -> int:
@@ -2811,28 +2841,38 @@ def _decide_subtask_verify(
             return None
 
         if result is None:
-            # Todas as subtarefas PASS → avança para o próximo step
-            step.summary = _subtask_progress_summary(task)
-            step.status = STEP_DONE
-            step.verdict = "PASS"
-            task.current_step = step.position
-            nxt = next(
-                (st for st in _active_steps(task)
-                 if st.position > step.position),
-                None,
-            )
-            if nxt:
-                nxt.status = STEP_PENDING
+            if _attempt_execution_events(session_factory, step.id) == 0:
+                # Todas as subtarefas já constavam verificadas e esta tentativa
+                # não executou nada. NÃO carimba PASS: encaminha como
+                # inconclusivo para o avaliador (ou revisão humana). Sem isso,
+                # uma re-execução da fase verify "passava" sem ter verificado.
+                result = (
+                    "inconclusive: nenhuma execução nesta tentativa "
+                    "(todas as subtarefas já constavam verificadas)"
+                )
             else:
-                task.status = TASK_DONE
-            _system_event(
-                s, step, "phase_done",
-                {"next": nxt.position if nxt else None, "subtasks": True},
-            )
-            _finish(step)
-            s.commit()
-            _spawn_tasks(session_factory, step_id, checkout)
-            return None
+                # Todas as subtarefas PASS → avança para o próximo step
+                step.summary = _subtask_progress_summary(task)
+                step.status = STEP_DONE
+                step.verdict = "PASS"
+                task.current_step = step.position
+                nxt = next(
+                    (st for st in _active_steps(task)
+                     if st.position > step.position),
+                    None,
+                )
+                if nxt:
+                    nxt.status = STEP_PENDING
+                else:
+                    task.status = TASK_DONE
+                _system_event(
+                    s, step, "phase_done",
+                    {"next": nxt.position if nxt else None, "subtasks": True},
+                )
+                _finish(step)
+                s.commit()
+                _spawn_tasks(session_factory, step_id, checkout)
+                return None
 
         if result.startswith("inconclusive:"):
             # Validação não conseguiu avaliar o código (veredicto AUSENTE, timeout,
@@ -3562,6 +3602,151 @@ def proposal_description_error(description: str) -> str | None:
     return None
 
 
+# Documento de produto: histórias no formato `### H1.1 — Título`. O worker usa
+# os IDs para auditar a cobertura do lote de propostas (não é fonte de verdade
+# do produto, mas é o contrato que o propositor recebeu).
+_PRODUTO_STORY_RE = re.compile(r"^#{2,4}\s+(H\d+\.\d+)\b", re.MULTILINE)
+_COVERAGE_ID_RE = re.compile(r"^[A-Za-z]{1,4}\d+(?:\.\d+)?$")
+_UI_HINTS_RE = re.compile(
+    r"\b(ui|interface|tela|frontend|dashboard|painel|chat|formulario|formulário|pwa)\b",
+    re.IGNORECASE,
+)
+_UI_DEFER_RE = re.compile(
+    r"\b(ui|interface|tela|frontend)\b[^.\n]{0,140}"
+    r"\b(fora de escopo|subsequente|depois|complementar|futura|futuro)\b",
+    re.IGNORECASE,
+)
+_E2E_TITLE_RE = re.compile(
+    r"(ponta\s*a\s*ponta|end[-\s]*to[-\s]*end|e2e|aceite\s+final)",
+    re.IGNORECASE,
+)
+
+
+def _produto_story_ids(checkout: str) -> list[str]:
+    """Lê os IDs de histórias (ex.: H1.1) de `docs/PRODUTO.md` no checkout.
+
+    Sem o documento, retorna [] e o gate de cobertura fica inativo (projetos que
+    não usam backlog de produto mantêm o comportamento anterior).
+    """
+    for relative in ("docs/PRODUTO.md", "docs/produto.md", "PRODUTO.md"):
+        path = os.path.join(checkout, relative)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            return []
+        ids = [match.group(1).upper() for match in _PRODUTO_STORY_RE.finditer(text)]
+        return list(dict.fromkeys(ids))
+    return []
+
+
+def _parse_coverage(raw) -> tuple[list[str], list[str]]:
+    """Normaliza `coverage` do autoia_tasks.json em IDs de história + avisos."""
+    if raw in (None, ""):
+        return [], []
+    if isinstance(raw, str):
+        raw = [part.strip() for part in raw.split(",") if part.strip()]
+    if not isinstance(raw, list):
+        return [], ["'coverage' deve ser uma lista de IDs (ex.: [\"H1.1\"])"]
+    coverage: list[str] = []
+    warnings: list[str] = []
+    for value in raw:
+        item = str(value).strip().upper()
+        if not item:
+            continue
+        if not _COVERAGE_ID_RE.match(item):
+            warnings.append(f"coverage inválido: {value!r} (use IDs como H1.1)")
+            continue
+        if item not in coverage:
+            coverage.append(item)
+    return coverage, warnings
+
+
+def _coverage_audit(
+    stories: list[str],
+    new_entries: list[dict],
+    existing_coverage: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Audita a cobertura do lote contra as histórias do documento de produto.
+
+    Retorna `(missing, notes)`:
+    - `missing`: IDs de histórias sem NENHUMA proposta que as declare;
+    - `notes`: avisos legíveis (backend com UI, UI adiada, lote sem frontend, etc.).
+
+    A proposta sintética de aceite ponta a ponta NÃO entra no cálculo: ela valida
+    o produto, não substitui a entrega de uma história.
+    """
+    if not stories:
+        return [], []
+    covered: set[str] = set(existing_coverage or [])
+    for info in new_entries:
+        covered.update(info.get("coverage") or [])
+    missing = [story for story in stories if story not in covered]
+    notes: list[str] = []
+    if missing:
+        notes.append("histórias sem proposta que as declare: " + ", ".join(missing))
+    without_coverage = [info["title"] for info in new_entries if not info.get("coverage")]
+    if without_coverage:
+        notes.append(
+            "propostas sem cobertura declarada: " + ", ".join(without_coverage)
+        )
+    if not any(info.get("surface") in ("frontend", "fullstack") for info in new_entries):
+        notes.append(
+            "nenhuma proposta de frontend/fullstack no lote — a UI pode ter ficado de fora"
+        )
+    story_surfaces: dict[str, set[str]] = {}
+    for info in new_entries:
+        for story in info.get("coverage") or []:
+            story_surfaces.setdefault(story, set()).add(info.get("surface") or "")
+    backend_only = [
+        story
+        for story, surfaces in story_surfaces.items()
+        if "backend" in surfaces and not ({"frontend", "fullstack"} & surfaces)
+    ]
+    if backend_only:
+        notes.append(
+            "histórias cobertas só por propostas backend (confirme se têm UI): "
+            + ", ".join(backend_only)
+        )
+    for info in new_entries:
+        title = info["title"]
+        text = f"{title}\n{info.get('description') or ''}"
+        if info.get("surface") == "backend" and _UI_HINTS_RE.search(text):
+            notes.append(
+                f"'{title}' está como backend mas menciona UI — avalie fullstack/frontend"
+            )
+        if _UI_DEFER_RE.search(info.get("description") or ""):
+            notes.append(
+                f"'{title}' adia a UI; inclua a proposta de frontend/fullstack no mesmo lote"
+            )
+    return missing, notes
+
+
+def _build_e2e_proposal_description(stories: list[str]) -> str:
+    ids = ", ".join(stories)
+    return (
+        "### Contexto\n"
+        "As propostas deste lote entregam partes do produto, mas cada task valida "
+        "apenas os próprios critérios. É preciso uma verificação final no estado "
+        "integrado da branch default, cobrindo as histórias do documento de produto: "
+        f"{ids}.\n\n"
+        "### Escopo\n"
+        "- Subir o produto integrado (API + frontend) na branch default.\n"
+        "- Percorrer cada caso de uso do `docs/PRODUTO.md` como um usuário real, no "
+        "browser, incluindo caminho feliz, erro e estado vazio quando aplicável.\n"
+        "- Registrar screenshots e evidências de cada fluxo; apontar telas ausentes.\n\n"
+        "### Critérios de aceite\n"
+        f"- [ ] Cada história ({ids}) tem fluxo navegável e foi exercitada no browser real.\n"
+        "- [ ] Screenshots de cada fluxo testado, incluindo ao menos um cenário de erro/vazio.\n"
+        "- [ ] Qualquer tela/fluxo ausente reprova o aceite (FAIL) com a lista do que falta.\n\n"
+        "### Fora de escopo\n"
+        "- Implementar correções nesta task: ela valida e reporta; correções viram tasks "
+        "próprias (o aceite é o portão final de valor, não um developer)."
+    )
+
+
 def _parse_depends_on(raw) -> tuple[list[int], list[str]]:
     """Normaliza `depends_on` (posições 1-based do arquivo) em posições válidas."""
     if raw in (None, ""):
@@ -3695,10 +3880,19 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
         # acumuladas de execuções anteriores).
         position_of_index: dict[int, int] = {}
         next_position = (max(p.position for p in proposals) + 1) if proposals else 0
+        created_positions: list[int] = [p.position for p in proposals]
+        existing_coverage: list[str] = [
+            story
+            for proposal in proposals
+            if not _E2E_TITLE_RE.search(proposal.title)
+            for story in proposal.coverage
+        ]
 
         added = 0
         rejected: list[dict] = []
         warnings: list[dict] = []
+        new_entries: list[dict] = []
+        added_titles: list[str] = []
 
         for index, entry in enumerate(entries, start=1):
             title = _entry_title(entry)
@@ -3719,6 +3913,9 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
             kind = entry.get("kind", "feature")
             if kind not in ("feature", "bug", "issue", "chore"):
                 kind = "feature"
+            coverage, coverage_warnings = _parse_coverage(entry.get("coverage"))
+            for coverage_warning in coverage_warnings:
+                warnings.append({"title": title, "reason": coverage_warning})
             target_repo_name = (entry.get("repository") or "").strip()
             target_repo_id: int | None = None
             if target_repo_name:
@@ -3750,6 +3947,14 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
             )
             if pipeline_warning:
                 warnings.append({"title": title, "reason": pipeline_warning})
+            effective_surface = (entry.get("surface") or "").strip().lower()
+            if not effective_surface and pipeline_id:
+                pipeline = s.get(Pipeline, pipeline_id)
+                pipeline_name = (pipeline.name if pipeline else "").lower()
+                for candidate in ("fullstack", "frontend", "backend"):
+                    if candidate in pipeline_name:
+                        effective_surface = candidate
+                        break
 
             raw_positions, dep_warnings = _parse_depends_on(entry.get("depends_on"))
             for warning in dep_warnings:
@@ -3788,16 +3993,82 @@ def _spawn_tasks(session_factory, step_id: int, checkout: str) -> None:
                 target_repository_id=target_repo_id,
                 pipeline_id=pipeline_id,
                 depends_on_json=json.dumps(depends_on),
+                coverage_json=json.dumps(coverage),
                 status="pending",
             )
             s.add(proposal)
             position_of_index[index] = proposal.position
             existing_by_title[title] = proposal
+            created_positions.append(proposal.position)
+            added_titles.append(title)
+            new_entries.append({
+                "title": title,
+                "surface": effective_surface,
+                "description": description,
+                "coverage": coverage,
+            })
             added += 1
 
+        stories = _produto_story_ids(checkout)
+        missing: list[str] = []
+        coverage_notes: list[str] = []
+        if stories and added > 0:
+            delivery_entries = [
+                info for info in new_entries
+                if not _E2E_TITLE_RE.search(info["title"])
+            ]
+            missing, coverage_notes = _coverage_audit(
+                stories, delivery_entries, existing_coverage
+            )
+
+        # Gate de valor: quando o projeto tem documento de produto, o lote ganha
+        # uma proposta final de aceite ponta a ponta (browser real), dependente de
+        # todas as outras. Ela também fica PENDENTE de decisão humana — o usuário
+        # pode rejeitar —, mas o sistema não deixa o lote terminar sem esse portão.
+        e2e_title = "Aceite ponta a ponta do produto (browser real)"
+        has_e2e = any(_E2E_TITLE_RE.search(title) for title in existing_by_title)
+        if stories and added > 0 and not has_e2e:
+            e2e_pipeline_id, e2e_pipeline_warning = _resolve_proposal_pipeline(
+                s, task.repository_id, "fullstack", None
+            )
+            if e2e_pipeline_warning:
+                warnings.append({"title": e2e_title, "reason": e2e_pipeline_warning})
+            e2e_depends = sorted(set(created_positions))
+            e2e = TaskProposal(
+                task_id=task.id,
+                step_id=step.id,
+                position=next_position + added,
+                title=e2e_title,
+                description=_build_e2e_proposal_description(stories),
+                kind="chore",
+                pipeline_id=e2e_pipeline_id,
+                depends_on_json=json.dumps(e2e_depends),
+                coverage_json=json.dumps(stories),
+                status="pending",
+            )
+            s.add(e2e)
+            created_positions.append(e2e.position)
+            added_titles.append(e2e_title)
+            added += 1
+            _system_event(
+                s, step, "task_spawn_e2e",
+                {"title": e2e_title, "coverage": stories, "depends_on": e2e_depends},
+            )
+
+        if coverage_notes:
+            _system_event(
+                s, step, "task_spawn_coverage_warning",
+                {
+                    "stories": stories,
+                    "missing": missing,
+                    "notes": coverage_notes[:12],
+                },
+            )
         if added > 0:
-            titles = [t for t in (_entry_title(e) for e in entries) if t]
-            _system_event(s, step, "task_spawned", {"count": added, "titles": titles[:10]})
+            _system_event(
+                s, step, "task_spawned",
+                {"count": added, "titles": added_titles[:10]},
+            )
         if rejected:
             _system_event(
                 s, step, "task_spawn_rejected",

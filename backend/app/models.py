@@ -561,6 +561,10 @@ class TaskProposal(Base):
     # Posições (0-based, iguais a `position`) das propostas predecessoras.
     # Armazenado como JSON text (coluna aditiva) — exposto como lista na API.
     depends_on_json: Mapped[str] = mapped_column(Text, default="[]")
+    # IDs de histórias/casos de uso do docs/PRODUTO.md cobertos pela proposta
+    # (ex.: ["H1.1", "H2.2"]). JSON text (coluna aditiva) — o propositor declara
+    # e o worker valida a cobertura do lote contra o documento de produto.
+    coverage_json: Mapped[str] = mapped_column(Text, default="[]")
     status: Mapped[str] = mapped_column(String(20), default="pending")
     created_at: Mapped[datetime] = mapped_column(default=utcnow)
     accepted_task_id: Mapped[int | None] = mapped_column(
@@ -584,6 +588,22 @@ class TaskProposal(Base):
                 result.append(int(value))
             except (TypeError, ValueError):
                 continue
+        return result
+
+    @property
+    def coverage(self) -> list[str]:
+        """IDs de histórias do documento de produto cobertos (lista vazia se inválida)."""
+        try:
+            values = json.loads(self.coverage_json or "[]")
+        except (TypeError, ValueError):
+            return []
+        if not isinstance(values, list):
+            return []
+        result: list[str] = []
+        for value in values:
+            item = str(value).strip()
+            if item and item not in result:
+                result.append(item)
         return result
 
     @property

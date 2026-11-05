@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-from app.models import Task
+from app.models import Task, TaskStep
 from app.worker import runner
 
 HARMLESS = [
@@ -37,6 +37,23 @@ def _make_task_with_deploy_pipeline(flow) -> dict:
     task = response.json()
     flow["client"].post(f"/api/tasks/{task['id']}/start")
     return task
+
+
+def _add_subtasks(flow, task_id: int) -> None:
+    """Duas subtarefas pendentes: força o pipeline a usar o ciclo de subtarefas
+    (implement/verify), que era o gatilho do bug das fases pós-merge."""
+    with flow["session_factory"]() as s:
+        from app.models import SUB_PENDING, SubTask
+
+        s.add(SubTask(
+            task_id=task_id, position=0, title="Sub 1",
+            description="fazer A", status=SUB_PENDING,
+        ))
+        s.add(SubTask(
+            task_id=task_id, position=1, title="Sub 2",
+            description="fazer B", status=SUB_PENDING,
+        ))
+        s.commit()
 
 
 def _state(flow, task_id: int) -> dict:
@@ -88,6 +105,78 @@ def test_happy_path_merges_then_runs_post_merge_on_main(flow, fake_kimi):
         # o merge chegou: o commit da task está na main local
         log = runner_git_log(checkout)
         assert "autoia: merge autoia/" in log
+
+
+def test_post_merge_verify_with_subtasks_actually_runs(flow, fake_kimi):
+    """Regressão: task COM subtarefas não pode pular o deploy-tester/browser-tester.
+
+    Antes do fix, `has_subtasks and role == "verify"` mandava a fase pós-merge
+    para `_decide_subtask_verify`; como as subtarefas já tinham sido verificadas
+    pelo validador pré-merge, a fase terminava PASS em ~2s sem executar nada.
+    Aqui o `assistant_text` prova que o executor rodou de verdade na main.
+    """
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass", write_file="feature.txt")
+    settings.task_budget = 100.0
+    settings.max_pm_decisions = 0
+    task = _make_task_with_deploy_pipeline(flow)
+    _add_subtasks(flow, task["id"])
+
+    for _ in range(12):
+        step_id = runner.claim_next(flow["session_factory"])
+        if step_id is None:
+            break
+        runner.execute_step(settings, flow["session_factory"], step_id)
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "done"
+    deploy = state["steps"][-1]
+    assert deploy["post_merge"] is True
+
+    with flow["session_factory"]() as s:
+        step = (
+            s.query(TaskStep)
+            .filter(TaskStep.task_id == task["id"], TaskStep.post_merge.is_(True))
+            .order_by(TaskStep.position)
+            .first()
+        )
+        kinds = [e.kind for e in step.events]
+        assert step.status == "done"
+        assert step.verdict == "PASS"
+        assert any(k in ("assistant_text", "tool_call") for k in kinds), (
+            "fase pós-merge concluiu sem executar o executor (bug de subtarefas)"
+        )
+        assert step.summary
+
+
+def test_post_merge_fail_with_subtasks_goes_to_review_no_bounce(flow, fake_kimi):
+    """Regressão: FAIL pós-merge em task com subtarefas deve ir para needs_review
+    (sem bounce e sem PASS falso do ciclo de subtarefas)."""
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="ready_pass", write_file="feature.txt")
+    settings.task_budget = 100.0
+    settings.max_pm_decisions = 0
+    task = _make_task_with_deploy_pipeline(flow)
+    _add_subtasks(flow, task["id"])
+
+    for _ in range(6):  # po..merger (pré-merge); deploy-tester fica pendente
+        step_id = runner.claim_next(flow["session_factory"])
+        if step_id is None:
+            break
+        runner.execute_step(settings, flow["session_factory"], step_id)
+
+    settings.kimi_bin = fake_kimi(HARMLESS, verdict="fail")
+    step_id = runner.claim_next(flow["session_factory"])
+    assert step_id is not None
+    runner.execute_step(settings, flow["session_factory"], step_id)
+
+    state = _state(flow, task["id"])
+    assert state["status"] == "needs_review"
+    deploy = state["steps"][-1]
+    assert deploy["status"] == "failed"
+    assert "código já integrado" in (state["error"] or "")
+    # nenhuma fase anterior foi reaberta (pós-merge nunca faz bounce)
+    assert all(st["status"] == "done" for st in state["steps"][:-1])
 
 
 def test_post_merge_failure_goes_to_review_no_bounce(flow, fake_kimi):

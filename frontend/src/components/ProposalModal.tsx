@@ -124,6 +124,14 @@ export default function ProposalModal({
               </span>
             </p>
           )}
+          {(proposal.coverage?.length ?? 0) > 0 && (
+            <p
+              className="proposal-coverage"
+              title="Histórias/casos de uso do PRODUTO.md cobertos por esta proposta"
+            >
+              📌 cobre: {(proposal.coverage ?? []).join(", ")}
+            </p>
+          )}
 
           {proposal.status === "pending" && editing ? (
             <div className="form-stack">

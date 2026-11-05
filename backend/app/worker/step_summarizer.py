@@ -118,6 +118,19 @@ def summarize_step(settings, session_factory, step_id: int) -> bool:
             if not delivered_text:
                 delivered_text = step.summary or ""
 
+            # Fase que NÃO executou nada (ex.: pós-merge no-op histórico): sem
+            # texto final e sem tool_call/assistant_text, o resumo seria uma
+            # invenção a partir da missão/handoff — melhor não gerar e deixar a
+            # UI cair no fallback vazio do que afirmar trabalho inexistente.
+            if not delivered_text and not any(
+                ev["type"] in ("tool_call", "text") for ev in occurrence["events"]
+            ):
+                log.info(
+                    "resumo de fase: step %s sem execução registrada — ignorando",
+                    step_id,
+                )
+                return False
+
             diff_text = ""
             if step.diff_stat:
                 diff_text = step.diff_stat

@@ -98,6 +98,14 @@ export default function ProposalCard({
             ⛓ requer antes: {depLabels.join(", ")}
           </div>
         )}
+        {(proposal.coverage?.length ?? 0) > 0 && (
+          <div
+            className="proposal-coverage"
+            title="Histórias/casos de uso do PRODUTO.md cobertos por esta proposta"
+          >
+            📌 cobre: {(proposal.coverage ?? []).join(", ")}
+          </div>
+        )}
         {proposal.description && (
           <p className="proposal-desc">
             {proposal.description.length > 240

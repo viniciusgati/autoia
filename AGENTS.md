@@ -183,7 +183,16 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   **já nasce com a pipeline da filha** (`deep-v2-<surface>` do repo > global;
   fallback: default do repo → pipeline da mãe, com `task_spawn_warning` se não achar);
   `depends_on` (posições 1-based do arquivo) → encadeamento traduzido para as posições
-  reais. O aceite (`POST .../proposals/{id}/accept`) resolve dependências para
+  reais. `coverage` (IDs `H1.1` etc. do `docs/PRODUTO.md`) é persistido em
+  `task_proposals.coverage_json` e exibido no card; o worker audita o lote contra o
+  documento e emite `task_spawn_coverage_warning` (histórias sem proposta, proposta
+  backend que menciona UI, UI adiada sem tarefa de frontend/fullstack). **Regra de
+  valor vertical**: história com resultado visível ao usuário exige `frontend` ou
+  `fullstack`; UI não pode ficar "para depois" sem a proposta complementar no mesmo
+  lote. Quando o documento de produto existe, o worker **acrescenta** uma proposta
+  final `Aceite ponta a ponta do produto (browser real)` (`fullstack`, `coverage` =
+  todas as histórias, dependente de todas; evento `task_spawn_e2e`) — ela valida o
+  estado integrado e nunca é auto-aceita. O aceite (`POST .../proposals/{id}/accept`) resolve dependências para
   `Task.depends_on_task_id` (predecessora PENDENTE → 400; rejeitada → dispensada) e
   `POST .../proposals/accept-all` aceita tudo em ordem e já enfileira (`start=true`);
   o `claim_next` **só reclama a task quando a dependência está `done`** (evita
@@ -192,12 +201,20 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   os **re-enfileira sozinho** (`task_dependency_resumed`) quando a dependência volta
   a andar (instrução humana/PM retry) ou conclui — sem isso o dependente ficava preso
   em `needs_review` para sempre e só destravava com "pode seguir" manual (task-252).
-  A UI (`RepoProposals`) agrupa por task de origem e mostra ordem (`1º`, `2º`...) +
-  "requer antes" — as colunas são aditivas (`task_proposals.depends_on_json`,
+  A UI (`RepoProposals`) agrupa por task de origem e mostra ordem (`1º`, `2º`...),
+  "requer antes" e a cobertura (`📌 cobre: H1.1, H2.2`) — as colunas são aditivas
+  (`task_proposals.depends_on_json`, `task_proposals.coverage_json`,
   `tasks.depends_on_task_id`).
 - **Fases `post_merge`** rodam na branch **default integrada** (`gitops.checkout_default`
   = fetch + `reset --hard origin/<base>`); fases normais rodam na branch `autoia/task-<id>`.
   O **merge+push acontece na última fase pré-merge** (feito pelo worker, nunca pelo robô).
+  Fases pós-merge **NUNCA entram no ciclo de subtarefas** (`implement`/`verify` com
+  `task.subtasks`): `deploy-tester`/`browser-tester` executam sempre como verificação
+  livre na default integrada. Sem esse guard, elas caíam em `_decide_subtask_verify`,
+  achavam todas as subtarefas já verificadas pelo validador pré-merge e terminavam
+  `PASS` em ~2s sem abrir navegador/rodar nada (270 fases no histórico). Além disso,
+  verificação de subtarefas só carimba `PASS` se a tentativa atual teve execução real
+  (`tool_call`/`assistant_text`); sem execução vira `INCONCLUSIVE` → avaliador/revisão.
 - **Stack do projeto**: antes de cada execução do kimi (steps e PM), o worker grava um
   `AGENTS.md` **não versionado** na raiz do checkout (excluído via `.git/info/exclude`)
   declarando a tecnologia detectada do projeto + regras de padrão (não introduzir outra

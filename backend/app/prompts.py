@@ -59,6 +59,25 @@ subtarefas já dividem o trabalho na mesma branch, e propostas virariam tasks co
 branches paralelas (risco de conflito de merge). Se houver subtarefas, o sistema IGNORA
 este arquivo. Escolha UMA das formas de divisão por task.
 
+### Regra de valor vertical (OBRIGATÓRIA)
+- Cada proposta deve entregar um RESULTADO utilizável pelo usuário final (não apenas
+  "API pronta" ou "infraestrutura de tela"). Prefira fatias verticais: backend + tela +
+  testes na MESMA proposta (`surface: "fullstack"`).
+- Se a história tem interface (tela, chat, painel, formulário, feedback visual), a
+  proposta que a entrega deve ser `frontend` ou `fullstack`. NÃO classifique como
+  `backend` uma história cujo resultado o usuário vê na tela.
+- É PROIBIDO deixar a UI "para uma tarefa futura/complementar" sem criar essa tarefa
+  NO MESMO `autoia_tasks.json`. Se a UI não entra nesta proposta, inclua a proposta
+  complementar de frontend/fullstack no mesmo lote e encadeie com `depends_on`.
+- Se existir `docs/PRODUTO.md`, leia-o e declare em `coverage` os IDs das histórias
+  cobertas. O lote deve cobrir TODAS as histórias do documento; o que ficar de fora
+  precisa de justificativa explícita no texto final.
+- Inclua (ou deixe o sistema incluir) a proposta final de **Aceite ponta a ponta do
+  produto** (`surface: "fullstack"`), dependente de todas as outras, para o
+  browser-tester percorrer os casos de uso no estado integrado. Quando existe
+  `docs/PRODUTO.md`, o sistema cria uma automaticamente se ela não foi proposta —
+  não duplique.
+
 ### Formato do arquivo (JSON array)
 ```json
 [
@@ -67,6 +86,7 @@ este arquivo. Escolha UMA das formas de divisão por task.
     "description": "### Contexto\\n<problema/oportunidade, por que a tarefa existe>\\n### Escopo\\n<o que entra, áreas/arquivos prováveis>\\n### Critérios de aceite\\n- [ ] <verificação concreta>\\n### Fora de escopo\\n<o que NÃO entra>",
     "kind": "feature",
     "surface": "fullstack",
+    "coverage": ["H1.1", "H2.2"],
     "depends_on": [],
     "repository": "nome-do-repo"
   },
@@ -94,7 +114,12 @@ este arquivo. Escolha UMA das formas de divisão por task.
 - `kind` (opcional, default "feature"): "feature", "bug", "issue" ou "chore".
 - `surface` (opcional, recomendado): superfície da entrega — "backend", "frontend"
   ou "fullstack". O sistema usa para escolher a pipeline (`deep-v2-<surface>`) e a
-  proposta já nasce com ela; sem `surface`, vale o padrão do projeto.
+  proposta já nasce com ela; sem `surface`, vale o padrão do projeto. História com
+  resultado visível ao usuário => `frontend` ou `fullstack` (ver regra de valor vertical).
+- `coverage` (recomendado; OBRIGATÓRIO quando existir `docs/PRODUTO.md`): lista de IDs
+  das histórias/casos de uso cobertos, exatamente como no documento (ex.: `["H1.1",
+  "H2.2"]`). O worker compara a união do lote com o documento e avisa o que ficou
+  descoberto.
 - `pipeline` (opcional): nome EXATO de uma pipeline, quando o projeto tiver um fluxo
   próprio (ex.: ADVPL). Tem prioridade sobre `surface`.
 - `depends_on` (opcional): posições 1-based NESTE ARQUIVO das propostas que precisam
@@ -771,8 +796,23 @@ cada uma na interface. Escreva com EXATAMENTE estas seções:
 ### Critérios de decisão
 - <para cada proposta: o que valida a escolha e qual o impacto esperado>
 
+### Matriz de cobertura (obrigatória quando existir docs/PRODUTO.md)
+| História | Proposta que entrega | Superfície | Valor visível ao usuário |
+|---|---|---|---|
+| H1.1 | <título ou "NÃO COBERTA — motivo"> | fullstack/backend/frontend | <o que o usuário consegue fazer> |
+| ... | ... | ... | ... |
+
+Toda história do `docs/PRODUTO.md` deve aparecer nesta tabela. Se alguma ficar fora,
+diga explicitamente o motivo e o impacto — "UI fica para depois" NÃO é justificativa
+suficiente: crie a proposta de frontend/fullstack no mesmo lote.
+
 ### Pendências
 - <o que ficou de fora propositalmente e por quê>
+
+### Aceite ponta a ponta
+- <título da proposta final que valida o produto integrado no browser real; ela depende
+  de todas as outras e cobre todas as histórias> (o sistema também cria uma
+  automaticamente quando `docs/PRODUTO.md` existe)
 
 IMPORTANTE: as propostas ficam PENDENTES de decisão humana — o sistema NÃO cria a task
 automaticamente. Elas só virarão tasks quando o usuário aprovar."""

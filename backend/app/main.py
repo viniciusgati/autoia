@@ -322,10 +322,15 @@ Ideia/brainstorm — Título: {task_title}
 Ideia/brainstorm — Descrição: {task_description}
 
 Cada proposta deve ter título claro, descrição com contexto e critérios, e kind adequado
-(feature/bug/issue/chore). Priorize por impacto. IMPORTANTE: as propostas NÃO são criadas
-automaticamente como tasks — o sistema as registra como PROPOSTAS pendentes e o usuário
-decide aceitar ou rejeitar cada uma. No texto final, documente as propostas criadas e a
-justificativa de cada uma.""",
+(feature/bug/issue/chore). Priorize por impacto e entregue VALOR VERTICAL: cada proposta
+deve deixar o usuário conseguir fazer algo de ponta a ponta (backend + tela + testes na
+mesma entrega, `surface: "fullstack"`), não apenas uma camada técnica. Se existir
+`docs/PRODUTO.md`, leia-o, declare `coverage` com os IDs das histórias cobertas e cubra
+TODAS — UI "para depois" só vale com a proposta de frontend/fullstack correspondente no
+mesmo lote. Inclua a proposta final de aceite ponta a ponta (browser real). IMPORTANTE:
+as propostas NÃO são criadas automaticamente como tasks — o sistema as registra como
+PROPOSTAS pendentes e o usuário decide aceitar ou rejeitar cada uma. No texto final,
+documente as propostas criadas, a matriz de cobertura e a justificativa de cada uma.""",
     ),
     (
         "browser-tester",

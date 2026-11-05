@@ -4126,6 +4126,18 @@ strong {
   word-break: break-word;
 }
 
+/* Cobertura declarada (histórias do PRODUTO.md) — a UI mostra o que a proposta cobre. */
+.proposal-coverage {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(126, 231, 135, 0.06);
+  border-left: 3px solid rgba(126, 231, 135, 0.5);
+  border-radius: 4px;
+  padding: 4px 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 /* Grupo de propostas de uma MESMA task de origem (ordem/cadeia relativas ao grupo). */
 .proposal-group {
   margin-bottom: 8px;

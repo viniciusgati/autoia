@@ -46,19 +46,28 @@ def spawn_flow(settings, bare_repo):
     }
 
 
-def _kimi_spawn(tmp_path, tasks: list[dict]) -> str:
+def _kimi_spawn(tmp_path, tasks: list[dict], doc: str | None = None) -> str:
     """Fake kimi que emite JSONL e, quando o prompt NÃO pede veredicto (fases de
     implementação/refino), escreve autoia_tasks.json no cwd. Em fases verify
     escreve apenas o veredicto PASS — reproduz o caso real (arquivo escrito uma
-    vez e consumido pelo worker no fim da fase)."""
+    vez e consumido pelo worker no fim da fase). `doc` escreve um
+    docs/PRODUTO.md no checkout para exercitar o gate de cobertura."""
     script = tmp_path / f"kimi_spawn_{len(list(tmp_path.glob('kimi_spawn_*')))}"
     payload = json.dumps(tasks)
+    doc_code = (
+        "os.makedirs('docs', exist_ok=True)\n"
+        f"with open('docs/PRODUTO.md', 'w') as f:\n"
+        f"    f.write({doc!r})\n"
+        if doc
+        else ""
+    )
     script.write_text(
         "#!/usr/bin/env python3\n"
         "import sys, json\n"
         "print(json.dumps({'role': 'assistant', 'content': 'ok'}))\n"
         "import os\n"
-        "prompt = sys.argv[sys.argv.index('-p') + 1] if '-p' in sys.argv else ''\n"
+        + doc_code
+        + "prompt = sys.argv[sys.argv.index('-p') + 1] if '-p' in sys.argv else ''\n"
         "if 'VEREDICTO' not in prompt.upper():\n"
         f"    with open('autoia_tasks.json', 'w') as f:\n"
         f"        f.write({payload!r})\n"
@@ -286,11 +295,13 @@ def test_spawn_bloqueado_em_task_com_subtarefas(spawn_flow, tmp_path):
         assert blocked[0].payload["reason"] == "task já tem subtarefas"
 
 
-def _run_proposer(flow, tmp_path, entries: list[dict]) -> tuple[int, list[dict]]:
+def _run_proposer(
+    flow, tmp_path, entries: list[dict], doc: str | None = None
+) -> tuple[int, list[dict]]:
     """Cria a pipeline de propositor, roda a fase com `entries` como
     autoia_tasks.json e retorna (parent_id, propostas gravadas)."""
     settings = flow["settings"]
-    settings.kimi_bin = _kimi_spawn(tmp_path, entries)
+    settings.kimi_bin = _kimi_spawn(tmp_path, entries, doc=doc)
     settings.task_budget = 100.0
     client = flow["client"]
     pipeline_id = _simple_pipeline(flow)
@@ -384,3 +395,75 @@ def test_surface_invalida_gera_warning_e_usa_fallback(spawn_flow, tmp_path):
         warnings = [e for e in step.events if e.kind == "task_spawn_warning"]
         assert len(warnings) == 1
         assert "surface" in warnings[0].payload["warnings"][0]["reason"]
+
+
+def test_coverage_gate_e_aceite_e2e(spawn_flow, tmp_path):
+    """Com docs/PRODUTO.md, o worker:
+    - persiste a cobertura declarada na proposta;
+    - avisa histórias sem proposta e proposta backend que adia UI;
+    - acrescenta a proposta final de aceite ponta a ponta (fullstack, depende de todas).
+
+    Este é o gate que faltava no Auxfam: as propostas de chat/painel eram backend e
+    diziam "UI fica para depois" sem criar a tarefa de UI.
+    """
+    doc = (
+        "# Produto\n\n"
+        "## Épico E1 — Fundação\n\n"
+        "### H1.1 — Login do pai\nComo pai, quero entrar.\n\n"
+        "### H1.2 — Família e filhas\nComo pai, quero cadastrar minhas filhas.\n"
+    )
+    desc = (
+        "### Contexto\n"
+        "O backend do diário precisa existir para a filha conversar, mas esta "
+        "proposta entrega apenas a camada de API e deixa a interface para depois.\n\n"
+        "### Escopo\n"
+        "- Endpoints de sessão, mensagens e streaming SSE do diário.\n"
+        "- Persistência por filha e testes de isolamento.\n\n"
+        "### Critérios de aceite\n"
+        "- [ ] A filha consegue criar/retomar a sessão do dia via API.\n"
+        "- [ ] A suíte de testes passa.\n\n"
+        "### Fora de escopo\n"
+        "- A UI da conversa fica como tarefa subsequente; aqui o foco é API.\n"
+    )
+    parent_id, proposals = _run_proposer(
+        spawn_flow,
+        tmp_path,
+        [rich_proposal(
+            title="diário backend",
+            surface="backend",
+            coverage=["H1.1"],
+            description=desc,
+        )],
+        doc=doc,
+    )
+
+    assert len(proposals) == 2
+    delivery = next(p for p in proposals if "Aceite" not in p["title"])
+    e2e = next(p for p in proposals if "Aceite" in p["title"])
+    assert delivery["coverage"] == ["H1.1"]
+    assert e2e["coverage"] == ["H1.1", "H1.2"]
+    assert e2e["depends_on"] == [delivery["position"]]
+    assert "ponta a ponta" in e2e["title"].lower()
+
+    pipelines = spawn_flow["client"].get(
+        f"/api/pipelines?repository_id={spawn_flow['repo_id']}"
+    ).json()
+    fullstack = next(p for p in pipelines if p["name"] == "deep-v2-fullstack")
+    assert e2e["pipeline_id"] == fullstack["id"]
+
+    with spawn_flow["session_factory"]() as s:
+        parent = s.get(Task, parent_id)
+        step = next(st for st in parent.steps if st.position == 0)
+        coverage_events = [
+            e for e in step.events if e.kind == "task_spawn_coverage_warning"
+        ]
+        assert len(coverage_events) == 1
+        payload = coverage_events[0].payload
+        assert payload["missing"] == ["H1.2"]
+        notes = " ".join(payload["notes"])
+        assert "H1.2" in notes
+        assert "backend" in notes
+        assert "UI" in notes or "frontend" in notes
+        assert "só por propostas backend" in notes
+        e2e_events = [e for e in step.events if e.kind == "task_spawn_e2e"]
+        assert len(e2e_events) == 1

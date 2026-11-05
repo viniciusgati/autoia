@@ -441,6 +441,8 @@ class TaskProposalOut(ApiModel):
     # Posições (0-based, iguais a `position`) das propostas que precisam ser
     # concluídas antes desta (encadeamento de execução).
     depends_on: list[int] = []
+    # Histórias/casos de uso do docs/PRODUTO.md cobertos (ex.: ["H1.1", "H2.2"]).
+    coverage: list[str] = []
     status: str
     created_at: datetime
     accepted_task_id: int | None = None

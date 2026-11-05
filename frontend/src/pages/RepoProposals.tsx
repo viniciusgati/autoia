@@ -113,10 +113,19 @@ export default function RepoProposals() {
             .filter((p) => p.task_id === taskId)
             .map((p) => [p.position, `#${p.position + 1} ${p.title}`]),
         );
+        const coveredStories = new Set<string>();
+        for (const p of items) {
+          for (const story of p.coverage ?? []) coveredStories.add(story);
+        }
         return (
           <div key={taskId} className="proposal-group">
             <h3 className="resumo-section proposal-group-head">
               <span>Propostas da task #{taskId}</span>
+              <span className="muted small">
+                {coveredStories.size > 0
+                  ? `📌 ${coveredStories.size} história(s) coberta(s)`
+                  : "⚠ cobertura não declarada"}
+              </span>
               <button
                 className="link-btn"
                 disabled={busyTask === taskId}

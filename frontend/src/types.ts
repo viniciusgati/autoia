@@ -197,6 +197,8 @@ export interface TaskProposal {
   pipeline_id: number | null;
   /** Posições (0-based) das propostas que precisam ser concluídas antes desta. */
   depends_on: number[];
+  /** Histórias/casos de uso do docs/PRODUTO.md cobertos (ex.: ["H1.1", "H2.2"]). */
+  coverage?: string[];
   status: "pending" | "accepted" | "rejected";
   created_at: string;
   accepted_task_id: number | null;
