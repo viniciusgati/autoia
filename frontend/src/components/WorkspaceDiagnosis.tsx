@@ -18,12 +18,14 @@ function reportExcerpt(report: string): string {
   return paragraph.length > 500 ? `${paragraph.slice(0, 500)}…` : paragraph;
 }
 
-export function WorkspaceDiagnosis({ ws, diagnoses, canAct, onSubtask, onPrepare, onDetails, onFocus }: {
+export function WorkspaceDiagnosis({ ws, diagnoses, canAct, onSubtask, onPrepare, onPrepareFailure, onDetails, onFocus }: {
   ws: Workspace;
   diagnoses: SubtaskDiagnosis[];
   canAct: boolean;
   onSubtask: (position: number) => void;
   onPrepare: (diagnosis: SubtaskDiagnosis) => void;
+  /** Preenche a orientação com o relatório da fase que falhou (QA/validador/etc.). */
+  onPrepareFailure: (occurrence: WorkspaceOccurrence) => void;
   onDetails: (occurrence: WorkspaceOccurrence) => void;
   onFocus: () => void;
 }) {
@@ -47,8 +49,12 @@ export function WorkspaceDiagnosis({ ws, diagnoses, canAct, onSubtask, onPrepare
     : task.status === "cancelled" ? "Tarefa cancelada"
     : task.status === "open" ? "Aguardando sua orientação" : "Tudo pronto para começar";
   const reason = halted
-    ? task.block_reason || task.error || failure?.stop?.reason
+    ? task.block_reason || failure?.stop?.reason || task.error
     : null;
+  // Relatório completo da fase que parou (ex.: NEEDS_WORK do QA). O resumo
+  // automático (`delivered`) pode ser de OUTRA execução da mesma fase (429,
+  // timeout) e escondia o motivo real — a fonte correta aqui é `stop.detail`.
+  const failureReport = failure?.stop?.detail?.trim() || null;
   const next = blocked
     ? task.block_question || "Leia o motivo e envie a orientação necessária no campo de mensagem."
     : halted && issues.length > 0
@@ -77,6 +83,23 @@ export function WorkspaceDiagnosis({ ws, diagnoses, canAct, onSubtask, onPrepare
         {phase && <span className={`badge ${halted ? "badge-warn" : "badge-run"}`}>Fase {phase.position + 1} · {phase.robot?.name ?? "agente"}</span>}
       </div>
       {reason && <div className="ws-diagnosis-reason"><Markdown text={reason} /></div>}
+      {failureReport && (
+        <div className="ws-diagnosis-failure-report">
+          <div className="ws-diagnosis-excerpt"><Markdown text={reportExcerpt(failureReport)} /></div>
+          <div className="ws-diagnosis-actions">
+            {failure && <button onClick={() => onDetails(failure)}>Ver relatório completo</button>}
+            {failure && (
+              <button
+                className="link-btn"
+                disabled={!canAct}
+                onClick={() => onPrepareFailure(failure)}
+              >
+                Preparar correção
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       <p className="ws-diagnosis-copy">{next}</p>
       <div className="ws-diagnosis-stats">
         <div className="ws-diagnosis-stat"><strong>{finishedSteps}<small> / {task.steps.length}</small></strong><span>etapas concluídas</span></div>
@@ -102,7 +125,7 @@ export function WorkspaceDiagnosis({ ws, diagnoses, canAct, onSubtask, onPrepare
           ))}
         </ul>
       )}
-      {halted && issues.length === 0 && (
+      {halted && issues.length === 0 && !failureReport && (
         <div className="ws-diagnosis-actions">
           {failure && <button onClick={() => onDetails(failure)}>Ver detalhes da execução</button>}
           <button className="link-btn" disabled={!canAct} onClick={onFocus}>Escrever orientação</button>

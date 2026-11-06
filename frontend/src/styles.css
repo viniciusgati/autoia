@@ -6239,6 +6239,10 @@ pre, .prewrap { overflow-wrap: anywhere; }
 .exec-session-command pre { white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; background: var(--panel); border: 1px solid var(--surface-border); border-radius: 8px; font-size: 11px; }
 .ws-diagnosis-reason { background: #0000001a; padding: 12px 14px; border-left: 2px solid var(--warn); border-radius: 0 6px 6px 0; font-size: 13px; overflow-wrap: anywhere; }
 .ws-diagnosis-reason p { margin: 0; }
+/* Relatório da fase que parou (ex.: NEEDS_WORK do QA) — separado do motivo curto. */
+.ws-diagnosis-failure-report { margin-top: 8px; padding: 10px 12px; background: rgba(255, 255, 255, 0.03); border: 1px solid var(--surface-border); border-radius: 6px; }
+.ws-diagnosis-failure-report .ws-diagnosis-excerpt { margin-top: 0; }
+.ws-diagnosis-failure-report .ws-diagnosis-actions { margin-top: 10px; }
 .ws-diagnosis-stat small { font-size: 12px; color: var(--muted); font-weight: 400; }
 .ws-diagnosis-item-copy > strong { display: block; margin-top: 8px; }
 .ws-diagnosis-events details { margin-bottom: 12px; }

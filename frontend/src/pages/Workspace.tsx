@@ -395,7 +395,13 @@ function OccurrenceCard({ occ, onChanged, onError, canAct, onDetails, onFile, su
 }) {
   const meta = occStatusMeta(occ.status);
   const running = occ.status === "running";
-  const deliveredText = occ.delivered?.summary || occ.delivered_text;
+  // Numa reprovação, o resumo automático pode pertencer a OUTRA execução da
+  // mesma fase (ex.: 429/timeout anterior) e escondia o relatório real. O
+  // `stop.detail` é a fonte de verdade da reprovação; não mostramos o resumo
+  // stale como se fosse a resposta desta execução.
+  const deliveredText = occ.stop?.kind === "verdict"
+    ? null
+    : occ.delivered?.summary || occ.delivered_text;
   const subtasks = occurrenceSubtasks(occ);
   // Mensagens que o usuário enviou no workspace e motivaram esta execução da fase.
   const interventions = occ.events.filter((e) => e.raw?.kind === "user_intervention");
@@ -842,6 +848,31 @@ export default function Workspace() {
     requestAnimationFrame(focusInput);
   };
 
+  /** Preenche a orientação com o relatório da fase que parou (ex.: QA NEEDS_WORK)
+   *  e aponta o reenvio para a fase anterior, que é quem deve corrigir. */
+  const prepareFailureCorrection = (occ: WorkspaceOccurrence) => {
+    if (!task) return;
+    const report = (occ.stop?.detail || occ.stop?.reason || "").trim();
+    const previous = [...task.steps]
+      .filter((step) => step.position < occ.position)
+      .sort((a, b) => b.position - a.position)[0];
+    const target = previous ?? task.steps.find((step) => step.position === occ.position);
+    const robot = occ.robot?.name ?? "agente";
+    const draft = [
+      `Corrija os apontamentos da fase ${occ.position + 1} (${robot}) e reexecute a validação.`,
+      report ? `\nRelatório da etapa:\n\n${report}` : "",
+      "\nLeia o handoff com o histórico completo, ajuste o que foi apontado e informe as evidências da correção.",
+    ].join("");
+    if (task.mode === "manual") {
+      setChatText((prev) => (prev.trim() ? `${prev}\n\n${draft}` : draft));
+    } else {
+      setInstruction((prev) => (prev.trim() ? `${prev}\n\n${draft}` : draft));
+      if (target) setResumePos(String(target.position));
+    }
+    setFollowLatest(false);
+    requestAnimationFrame(focusInput);
+  };
+
   /** Atribuição de responsável salva: atualiza o header sem recarregar a página. */
   const handleAssigned = (updated: Task) => {
     setWs((prev) => (prev ? { ...prev, task: updated } : prev));
@@ -1060,7 +1091,7 @@ export default function Workspace() {
       <div className="ws-body">
       <main className="ws-timeline">
         {!ws && <div className="muted ws-loading">carregando workspace…</div>}
-        {ws && <WorkspaceDiagnosis ws={ws} diagnoses={diagnoses} canAct={canAct} onSubtask={openSubtask} onPrepare={prepareCorrection} onDetails={setDetailsOcc} onFocus={focusInput} />}
+        {ws && <WorkspaceDiagnosis ws={ws} diagnoses={diagnoses} canAct={canAct} onSubtask={openSubtask} onPrepare={prepareCorrection} onPrepareFailure={prepareFailureCorrection} onDetails={setDetailsOcc} onFocus={focusInput} />}
         {ws && ws.occurrences.length === 0 && (
           <div className="ws-empty">
             <p className="muted">Nenhuma etapa executada ainda.</p>
