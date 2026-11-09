@@ -13,6 +13,11 @@ import { fmtCost } from "../lib/money";
 import { diagnoseSubtasks, suggestedCorrectionStep, type SubtaskDiagnosis } from "../lib/workspaceDiagnosis";
 import type { Epic, Project, RepositoryMember, StepFileDiff, Task, TaskMessage, TaskProposal, Workspace, WorkspaceOccurrence } from "../types";
 
+/** Container de rolagem do conteúdo (o menu lateral fica fixo fora dele). */
+function contentScroller(): HTMLElement | null {
+  return document.querySelector<HTMLElement>(".content");
+}
+
 /** Estados do workspace (mapeamento dos status do sistema para os 7 do blueprint). */
 function statusMeta(status: string): { label: string; cls: string } {
   switch (status) {
@@ -635,7 +640,9 @@ export default function Workspace() {
     if (window.location.hash === "#diagnostico") {
       document.getElementById("diagnostico")?.scrollIntoView({ block: "start" });
     } else {
-      window.scrollTo({ top: 0 });
+      const el = contentScroller();
+      if (el) el.scrollTo({ top: 0 });
+      else window.scrollTo({ top: 0 });
     }
   }, [taskId, ws?.task.id]);
 
@@ -716,18 +723,25 @@ export default function Workspace() {
   // Mantém o fim da página sempre visível enquanto a execução evolui.
   useEffect(() => {
     if (!followLatest || !wsActive) return;
-    window.scrollTo({ top: document.documentElement.scrollHeight });
+    const el = contentScroller();
+    if (el) el.scrollTo({ top: el.scrollHeight });
+    else window.scrollTo({ top: document.documentElement.scrollHeight });
   }, [ws, followLatest, wsActive]);
 
   useEffect(() => {
+    const el = contentScroller();
     const onScroll = () => {
-      const gap =
-        document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
-      const nearBottom = gap < 120;
-      if (!nearBottom && followLatest) setFollowLatest(false);
+      const gap = el
+        ? el.scrollHeight - el.clientHeight - el.scrollTop
+        : document.documentElement.scrollHeight - window.innerHeight - window.scrollY;
+      if (gap >= 120 && followLatest) setFollowLatest(false);
     };
-    window.addEventListener("scroll", onScroll);
-    return () => window.removeEventListener("scroll", onScroll);
+    if (el) el.addEventListener("scroll", onScroll);
+    else window.addEventListener("scroll", onScroll);
+    return () => {
+      el?.removeEventListener("scroll", onScroll);
+      window.removeEventListener("scroll", onScroll);
+    };
   }, [followLatest]);
 
   const task = ws?.task ?? null;
