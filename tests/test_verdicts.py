@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from app import verdicts
+from app import prompts, verdicts
 
 
 def test_parse_pass_fail():
@@ -24,6 +24,14 @@ def test_parse_ready_work():
     assert verdicts.parse_ready_work("NEEDS_WORK\nSUMMARY: ambíguo") == "NEEDS_WORK"
     assert verdicts.parse_ready_work("Analisei a história.\nREADY\nSUMMARY: ok") == "READY"
     assert verdicts.parse_ready_work("PASS") is None
+
+
+def test_contract_review_tem_regra_de_convergencia():
+    """O QA não pode transformar a revisão em loop de polimento: depois que o PO
+    aplica os itens anteriores, a próxima revisão deve emitir READY (task-350)."""
+    assert "Convergência" in prompts.CONTRACT_REVIEW
+    assert "emita READY" in prompts.CONTRACT_REVIEW
+    assert "NÃO abra novos itens" in prompts.CONTRACT_REVIEW
 
 
 def test_parse_head_hash():

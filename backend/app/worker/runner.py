@@ -934,6 +934,17 @@ def _finish(step: TaskStep) -> None:
         step.finished_by_id = step.responsible_id
 
 
+def _step_done(step: TaskStep) -> None:
+    """Marca a fase concluída e limpa o erro de uma tentativa anterior.
+
+    Uma fase reaberta por rewind/PM pode chegar aqui com `error` da reprovação
+    anterior preservada de propósito para o handoff; sem limpar, a UI mostra a
+    fase `done`/READY carregando o erro antigo (task-350).
+    """
+    step.status = STEP_DONE
+    step.error = None
+
+
 def _tool_call_target(arguments) -> str:
     """Extrai o alvo (arquivo/comando/query) de argumentos de tool call (kimi/opencode)."""
     if isinstance(arguments, str):
@@ -1184,6 +1195,25 @@ def _build_handoff(
             sections.append(
                 f"### Fase {st.position} — {robot_name} ({role}) — FALHOU\n"
                 f"_Esta fase falhou e o trabalho voltou para você._\n{detail}"
+            )
+        elif (
+            st.position > current_step.position
+            and (st.summary or st.error)
+            and (st.verdict in (verdicts.V_NEEDS_WORK, verdicts.V_FAIL) or st.error)
+        ):
+            # Reabertura a partir de uma fase anterior (instrução humana/PM): a
+            # fase posterior reprovada volta a `pending`, mas o relatório dela é
+            # o MOTIVO da reexecução — sem esta seção o alvo refaz o trabalho sem
+            # saber o que o QA/verificador apontou (loop de correções repetidas,
+            # task-350).
+            label = st.verdict or "reprovada"
+            detail = st.summary or ""
+            if st.error:
+                detail = f"{st.error}\n{detail}".strip()
+            sections.append(
+                f"### Fase {st.position} — {robot_name} ({role}) — {label} (reprovada)\n"
+                f"_Esta fase reprovou o trabalho e foi reaberta junto com a sua; o "
+                f"relatório completo abaixo é o motivo da reexecução._\n{detail}"
             )
     diff = ""
     try:
@@ -2414,7 +2444,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                         s, step, "verify_inconclusive",
                         {"reason": "veredicto AUSENTE (esperado PASS)"},
                     )
-                    step.status = STEP_DONE
+                    _step_done(step)
                     step.verdict = "INCONCLUSIVE"
                     task.current_step = step.position
                     assess = next(
@@ -2551,7 +2581,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
         nxt_manual = nxt is not None and _effective_step_mode(nxt, task) == STEP_MODE_MANUAL
         end_manual = nxt is None and task.mode == TASK_MODE_MANUAL
         if nxt_manual or end_manual:
-            step.status = STEP_DONE
+            _step_done(step)
             task.current_step = step.position
             task.status = TASK_OPEN
             task.chat_status = CHAT_STATUS_IDLE
@@ -2564,7 +2594,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
 
         if step.post_merge:
             # fase pós-merge: nunca faz merge nem commit; só avança (ou conclui)
-            step.status = STEP_DONE
+            _step_done(step)
             task.current_step = step.position
             if nxt is None:
                 task.status = TASK_DONE
@@ -2605,7 +2635,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
                 return trigger
             if result.ok:
                 _system_event(s, step, "merged", {"detail": result.detail})
-                step.status = STEP_DONE
+                _step_done(step)
                 if nxt is not None:
                     nxt.status = STEP_PENDING
                     task.current_step = step.position
@@ -2626,7 +2656,7 @@ def _decide(eff: EffectiveSettings, session_factory, step_id: int, checkout: str
             _spawn_tasks(session_factory, step_id, checkout)
             return None
 
-        step.status = STEP_DONE
+        _step_done(step)
         task.current_step = step.position
         nxt.status = STEP_PENDING
         _system_event(s, step, "phase_done", {"next": nxt.position})
@@ -2883,7 +2913,7 @@ def _decide_subtask_implement(
             step.diff_stat = gitops.diff_stat(checkout, base, branch) or ""
         except gitops.GitError:
             pass
-        step.status = STEP_DONE
+        _step_done(step)
         task.current_step = step.position
         nxt = next(
             (st for st in _active_steps(task)
@@ -2967,7 +2997,7 @@ def _decide_subtask_verify(
             else:
                 # Todas as subtarefas PASS → avança para o próximo step
                 step.summary = _subtask_progress_summary(task)
-                step.status = STEP_DONE
+                _step_done(step)
                 step.verdict = "PASS"
                 task.current_step = step.position
                 nxt = next(
@@ -3011,7 +3041,7 @@ def _decide_subtask_verify(
                 None,
             )
             if assess is not None:
-                step.status = STEP_DONE
+                _step_done(step)
                 step.verdict = "INCONCLUSIVE"
                 step.error = reason
                 task.current_step = step.position
@@ -3182,24 +3212,42 @@ def _subtask_progress_summary(task: Task, post_merge: bool = False) -> str:
 # ---------------------------------------------------------------------------
 
 def _pm_context(s: Session, task: Task) -> str:
+    steps = _active_steps(task)
+    # `attempt` conta apenas as reaberturas (bounce-back/humano); uma fase pode
+    # ter rodado várias vezes com `attempt` 1 (QA re-executado após cada correção
+    # do PO). O PM precisa do número REAL de execuções para decidir com segurança
+    # (ex.: QA reprovou 6 vezes não é "tentativa 1, retry plausível").
+    run_counts = dict(
+        s.query(RunEvent.step_id, func.count(RunEvent.id))
+        .filter(
+            RunEvent.step_id.in_([st.id for st in steps]),
+            RunEvent.kind == "attempt_started",
+        )
+        .group_by(RunEvent.step_id)
+        .all()
+    )
     lines = [
         f"Tarefa #{task.id}: {task.title}",
         f"Status: {task.status} | Orçamento: {task.budget_limit:.2f} US$ | Gasto: {task.cost_spent:.2f} US$",
         f"Branch: {task.branch}",
         f"Decisões de PM já tomadas: {task.pm_decisions}",
     ]
-    for st in _active_steps(task):
+    for st in steps:
         robot = st.robot
         robot_name = robot.name if robot else "?"
         role = robot.role if robot else "?"
+        runs = run_counts.get(st.id, 0)
         lines.append(
             f"Fase {st.position} ({robot_name}/{role}) [{st.status}] tentativa {st.attempt}"
+            f" (execuções reais: {runs})"
             f"{' veredicto ' + st.verdict if st.verdict else ''}"
             f"{' erro: ' + st.error if st.error else ''}"
         )
     lines.append(
         "No retry, use a POSIÇÃO NUMÉRICA da fase (ex.: `retry 0`) — é o identificador "
-        "seguro. Nome do robô ou role também são aceitos, desde que exatamente como acima."
+        "seguro. Nome do robô ou role também são aceitos, desde que exatamente como acima. "
+        "`retry` de uma fase já `done` reabre a partir dela (inclusive a própria fase) "
+        "com orçamento novo, desde que o limite de decisões do PM permita."
     )
     return "\n".join(lines)
 
@@ -3351,7 +3399,14 @@ def _pm_decide(
         # failed/guardrail_blocked deixava a task travada — o claim exige todas
         # as fases anteriores `done` e a fase reaberta nunca era reclamada
         # (task-194: PM retry no developer com o qa failed = deadlock).
+        #
+        # Alvo `done` (ex.: o PM manda `retry 0`/po porque a causa é a história e
+        # o QA reprovou): reabre a partir dele — o próprio alvo + todas as fases
+        # seguintes —, como o `_rewind_pipeline` da instrução humana. Antes a
+        # cadeia só considerava `status != done`, ficava vazia e a task morria
+        # com "PM: retry inválido/limitado" (task-350).
         retry_chain: list[TaskStep] = []
+        retry_target: TaskStep | None = None
         if decision["action"] == verdicts.PM_RETRY:
             target = None
             if decision.get("position") is not None:
@@ -3379,23 +3434,56 @@ def _pm_decide(
                     None,
                 )
             if target is not None:
-                retry_chain = [
-                    st for st in _active_steps(task)
-                    if st.position <= target.position and st.status != STEP_DONE
-                ]
+                retry_target = target
+                active = _active_steps(task)
+                if target.status == STEP_DONE:
+                    # Fases anteriores ainda não concluídas também voltam ao
+                    # pending (o claim exige as anteriores `done`) e, a partir do
+                    # alvo, todas as seguintes são re-executadas.
+                    retry_chain = [
+                        st for st in active
+                        if st.position < target.position and st.status != STEP_DONE
+                    ] + [st for st in active if st.position >= target.position]
+                else:
+                    retry_chain = [
+                        st for st in active
+                        if st.position <= target.position and st.status != STEP_DONE
+                    ]
                 decision["chain"] = [st.position for st in retry_chain]
 
         _system_event(s, anchor, "pm_decision", {"trigger": trigger, **decision})
 
         if decision["action"] == verdicts.PM_RETRY:
-            if retry_chain and all(st.attempt < eff.max_attempts for st in retry_chain):
+            done_target = retry_target is not None and retry_target.status == STEP_DONE
+            if retry_chain and (
+                done_target or all(st.attempt < eff.max_attempts for st in retry_chain)
+            ):
                 for st in retry_chain:
-                    st.status = STEP_PENDING
-                    st.attempt += 1
-                    st.error = None
-                    st.summary = None
-                    st.finished_at = None
-                    st.started_at = None
+                    if done_target:
+                        # Novo ciclo a partir do alvo: orçamento novo (mesma
+                        # semântica da ação humana). Sem o reset, um alvo done
+                        # no teto (`attempt == max_attempts`) seria recusado.
+                        st.attempt = 1
+                    else:
+                        st.attempt += 1
+                    if (
+                        done_target
+                        and st.position > retry_target.position
+                        and st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED)
+                    ):
+                        # Mantém o relatório da fase posterior que motivou a
+                        # reabertura — o handoff do alvo precisa dos apontamentos
+                        # (o predecessor, ao concluir, volta esta fase a pending).
+                        st.status = STEP_PENDING
+                        st.started_at = None
+                        st.finished_at = None
+                    else:
+                        st.status = STEP_PENDING
+                        st.error = None
+                        st.summary = None
+                        st.verdict = None
+                        st.finished_at = None
+                        st.started_at = None
                 task.status = TASK_IN_PROGRESS
                 task.error = None
                 task.current_step = min(st.position for st in retry_chain)

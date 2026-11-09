@@ -197,6 +197,9 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str]]] = {
         ("pause_before", "BOOLEAN DEFAULT 0 NOT NULL"),
     ],
     "step_artifacts": [],
+    # Resumo de fase chaveado pela EXECUÇÃO real (run), não pelo attempt — o
+    # contador `attempt` se repete em re-execuções após bounce-back (task-350).
+    "step_summaries": [("run", "INTEGER NOT NULL DEFAULT 1")],
     "task_proposals": [
         ("pipeline_id", "INTEGER REFERENCES pipelines(id)"),
         # Posições (0-based) das propostas predecessoras — encadeamento de execução.

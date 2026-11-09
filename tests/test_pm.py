@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.models import Task
+from app.models import RunEvent, Task
 from app.worker import runner
 
 HARMLESS = [
@@ -118,6 +118,53 @@ def test_pm_retry_reabre_cadeia_com_fase_anterior_failed(flow, fake_kimi):
         assert dev.status == "pending" and dev.attempt == 3
         assert tester.status == "pending" and tester.attempt == 2
         assert t.current_step == 1
+
+
+def test_pm_retry_reabre_fase_done_no_teto(flow, fake_kimi):
+    """PM retry do PO (`done`, 3/3) quando o QA reprovou a história: reabre a
+
+    partir do alvo — PO + fases seguintes — com orçamento novo. Antes a cadeia
+    só considerava `status != done`, vinha vazia e a task morria em
+    "PM: retry inválido/limitado" (task-350).
+    """
+    flow["settings"].task_budget = 100.0
+    _set_state(flow, status="failed")
+    _set_step(flow, 0, "done", attempt=3)
+    _set_step(flow, 1, "failed", attempt=1, error="veredicto NEEDS_WORK")
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.summary = "NEEDS_WORK\nSUMMARY: falta refetch da família após o aceite"
+        qa.verdict = "NEEDS_WORK"
+        s.commit()
+
+    _pm(flow, fake_kimi, "pm_retry_po")  # DECISÃO: retry 0
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        po = next(st for st in t.steps if st.position == 0)
+        qa = next(st for st in t.steps if st.position == 1)
+        assert t.status == "in_progress"
+        assert t.error is None
+        assert po.status == "pending" and po.attempt == 1  # novo ciclo
+        assert qa.status == "pending"
+        # O relatório do QA permanece: é o motivo da correção do PO.
+        assert qa.summary.startswith("NEEDS_WORK")
+        assert qa.verdict == "NEEDS_WORK"
+        assert t.current_step == 0
+
+
+def test_pm_context_mostra_execucoes_reais(flow):
+    """O PM precisa ver o número REAL de execuções (run), não só o `attempt`:
+    o QA re-executado após cada correção do PO fica com attempt 1."""
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        qa = next(st for st in t.steps if st.position == 1)
+        s.add(RunEvent(step_id=qa.id, seq=1, kind="attempt_started", payload={}))
+        s.add(RunEvent(step_id=qa.id, seq=2, kind="attempt_started", payload={}))
+        s.commit()
+        context = runner._pm_context(s, t)
+        assert "execuções reais: 2" in context
 
 
 def test_pm_continue_applies_budget(flow, fake_kimi):

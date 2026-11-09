@@ -359,6 +359,66 @@ def test_step_summary_persisted_and_exposed(flow, fake_kimi):
     assert delivered["summary"].startswith("A validação")
 
 
+def test_step_done_limpa_erro_de_reprovacao_anterior(flow):
+    """Fase reaberta pode chegar ao sucesso com o `error` da reprovação antiga
+    preservado para o handoff; `done` não pode continuar exibindo esse erro."""
+    with flow["session_factory"]() as s:
+        t = s.get(Task, flow["task"]["id"])
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.error = "veredicto NEEDS_WORK (esperado READY)"
+        runner._step_done(qa)
+        assert qa.status == "done"
+        assert qa.error is None
+
+
+def test_step_summary_chaveado_por_run_nao_por_attempt(flow, fake_kimi):
+    """Cada execução real da fase (run) tem seu "O que foi entregue".
+
+    O contador `attempt` volta a 1 no retry humano; usar `attempt` como chave
+    fazia a segunda execução sobrescrever/omitir o resumo da primeira (task-350).
+    """
+    settings = flow["settings"]
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    step_id = _run_claim(flow)
+    _execute(flow, step_id)
+
+    settings.kimi_bin = fake_kimi([], write_file="autoia_step_summary.json", write_content=json.dumps({
+        "summary": "Resumo da primeira execução da fase.",
+        "changes": [], "files": [], "issues": [], "result": "completed",
+    }))
+    assert summarize_step(settings, flow["session_factory"], step_id)
+
+    resp = flow["client"].post(f"/api/tasks/{task_id}/steps/0/retry")
+    assert resp.status_code == 200, resp.text
+    settings.kimi_bin = fake_kimi(STREAM, verdict="ready_pass")
+    step_id2 = _run_claim(flow)
+    _execute(flow, step_id2)
+
+    settings.kimi_bin = fake_kimi([], write_file="autoia_step_summary.json", write_content=json.dumps({
+        "summary": "Resumo da segunda execução da fase.",
+        "changes": [], "files": [], "issues": [], "result": "completed",
+    }))
+    assert summarize_step(settings, flow["session_factory"], step_id2)
+
+    with flow["session_factory"]() as s:
+        rows = (
+            s.query(StepSummary)
+            .filter_by(step_id=step_id)
+            .order_by(StepSummary.id)
+            .all()
+        )
+        assert [row.run for row in rows] == [1, 2]
+        assert [row.attempt for row in rows] == [1, 1]
+
+    data = flow["client"].get(f"/api/tasks/{task_id}/workspace").json()
+    occurrences = [o for o in data["occurrences"] if o["position"] == 0]
+    assert occurrences[0]["delivered"]["summary"].startswith("Resumo da primeira")
+    assert occurrences[1]["delivered"]["summary"].startswith("Resumo da segunda")
+
+
 def test_step_summary_nao_sobe_emulador(flow, fake_kimi, monkeypatch):
     """Regressão da task 195: o resumo de fase é LLM pura e NÃO pode subir o
     emulador Android (sem `skip_device_bootstrap` cada "O que foi entregue"
@@ -458,6 +518,56 @@ def test_instruction_rewind_with_position(flow, fake_kimi):
     assert step0["status"] == "pending"
     assert step0["attempt"] == 1  # ação humana = novo orçamento
     assert step1["status"] == "pending"
+
+
+def test_instruction_rewind_preserva_relatorio_da_fase_falha(flow, fake_kimi, monkeypatch):
+    """Rewind para o PO mantém o relatório do QA que reprovou a história.
+
+    O relatório é o MOTIVO da correção: sem ele no handoff, o PO reescreve a
+    história sem saber os apontamentos e o loop QA↔PO se repete (task-350).
+    """
+    settings = flow["settings"]
+    settings.kimi_bin = fake_kimi(PO_STORY)
+    settings.task_budget = 100.0
+    task_id = flow["task"]["id"]
+
+    _execute(flow, _run_claim(flow))  # fase 0 (po) conclui
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        t.status = "needs_review"
+        qa = next(st for st in t.steps if st.position == 1)
+        qa.status = "failed"
+        qa.error = "veredicto NEEDS_WORK"
+        qa.summary = (
+            "NEEDS_WORK\nSUMMARY: falta refetch automático de /family após o aceite "
+            "da política; separar os dois formulários de senha."
+        )
+        qa.verdict = "NEEDS_WORK"
+        s.commit()
+
+    resp = flow["client"].post(
+        f"/api/tasks/{task_id}/instruction",
+        json={"instruction": "Continue corrigindo os apontamentos do QA", "position": 0},
+    )
+    assert resp.status_code == 200, resp.text
+
+    with flow["session_factory"]() as s:
+        t = s.get(Task, task_id)
+        po = next(st for st in t.steps if st.position == 0)
+        qa = next(st for st in t.steps if st.position == 1)
+        assert po.status == "pending"
+        assert qa.status == "pending"
+        assert qa.summary.startswith("NEEDS_WORK")  # relatório preservado
+        assert qa.verdict == "NEEDS_WORK"
+
+        monkeypatch.setattr(runner.gitops, "diff_stat", lambda *a, **k: "")
+        checkout = runner._task_workspace(settings, t.repository_id, t.id)
+        handoff_text = runner._build_handoff(
+            s, t, po, checkout, t.repository.default_branch, t.branch
+        )
+        assert "falta refetch automático de /family" in handoff_text
+        assert "NEEDS_WORK (reprovada)" in handoff_text
 
 
 def test_instruction_rewind_reabre_cadeia_com_anterior_failed(flow, fake_kimi):

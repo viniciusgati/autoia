@@ -241,7 +241,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   `autoia_verdict.txt` na raiz do checkout (o worker lê, **remove** e decide).
   `verify`/`assess` sem veredicto = FAIL.
   Parse tolerante a preâmbulo (marcador como palavra isolada em qualquer linha) em
-  `verdicts.py` — não restrinja à primeira linha.
+  `verdicts.py` — não restrinja à primeira linha. `review` tem regra de **convergência**:
+  READY quando a história é implementável; depois que o PO aplica os apontamentos de um
+  veredicto anterior, a revisão verifica **só esses itens** e não abre novos de polimento
+  (evita loop QA↔PO — task-350).
 - **Handoff entre fases** (`autoia_handoff.md`, em `worker/handoff.py`): o worker gera,
   **antes de cada execução do robô** (steps e PM), um documento **não versionado** na
   raiz do checkout com o histórico **COMPLETO** das fases anteriores (resumos integrais
@@ -250,7 +253,11 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   no **texto final** com as seções *O que foi feito / Arquivos alterados / Evidência /
   Pendências / Para a próxima fase* (`HANDOFF_DOCUMENT`; exceto `refine` e `pm`, que têm
   formatos próprios). O worker persiste o texto final **INTEGRAL** em `TaskStep.summary`
-  (nunca trunca) e regenera o handoff para a próxima fase.
+  (nunca trunca) e regenera o handoff para a próxima fase. Numa reabertura por
+  rewind/PM, a fase posterior que reprovou volta a `pending` mas seu relatório
+  (`summary`/`verdict`/`error`) é **preservado** e entra no handoff do alvo — sem
+  isso a instrução "corrija os apontamentos do QA" reabria o PO sem os apontamentos
+  (task-350).
 - **Bounce-back automático**: falha de fase **pré-merge** (veredicto FAIL/NEEDS_WORK,
   timeout, erro) → a **fase anterior** volta a `pending` com o relatório
   completo no contexto, até `max_attempts`. Falha **pós-merge** → **nunca** bounce
@@ -277,7 +284,10 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   uma fase com uma **anterior não-concluída** (`failed`/`guardrail_blocked`) reabre a
   **cadeia** da primeira não-concluída até o alvo — reabrir só o alvo deixava a task
   travada para sempre, pois `claim_next` exige todas as fases anteriores `done`
-  (task-194). `_sweep_stuck_tasks` também move para `needs_review` a task cuja primeira
+  (task-194). O PM `retry` de uma fase **`done`** reabre a partir dela (o próprio alvo
+  + as fases seguintes) com **orçamento novo**, desde que o limite de decisões permita —
+  é o caminho para corrigir a história no PO mesmo com o PO já concluído (task-350).
+  `_sweep_stuck_tasks` também move para `needs_review` a task cuja primeira
   fase não-concluída está `failed`/`guardrail_blocked` mesmo com pendings posteriores.
 - **Subtarefas**: fases `implement`/`verify` iteram sobre subtarefas (cada uma com seu
   bounce-back). **Subtarefa NÃO tem limite próprio de tentativas** — o contador é
@@ -313,7 +323,9 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   o PM (instrução/"tentar novamente" → evento `pm_decision_discarded`): o estado que
   a motivou não existe mais e aplicar "escalar" por cima travava a task em
   `needs_review` mesmo com a execução nova concluindo (task-264). O PM manual
-  (botão/API, sem âncora) aplica sempre.
+  (botão/API, sem âncora) aplica sempre. O contexto do PM mostra as **execuções reais**
+  (`run`, contagem de `attempt_started`), não só o `attempt` — o QA re-executado após
+  cada correção do PO mantém `attempt 1` e parecia "tentativa 1" (task-350).
 - **Executor por task**: `Task.executor` (`kimi` \| `opencode` \| `codex`, default
   `kimi`) define o CLI que roda cada fase e o PM (escolhido na criação da tarefa;
   tasks filhas herdam). `kimi_exec` estima custo por interação; `opencode_exec`
@@ -472,7 +484,8 @@ tests/                  # pytest; fixtures compartilhadas em conftest.py
   interação inferior fixo. `TaskDetail` atual fica para auditoria técnica.
 - **"O que foi entregue" por fase** (`worker/step_summarizer.py` + tabela `StepSummary`):
   LLM dedicada (via executor da task, zero custo contábil) gera `autoia_step_summary.json`
-  por `(step, attempt)` quando a fase termina `done` **ou falha** (gate
+  por `(step, run)` quando a fase termina `done` **ou falha** (a `run` é a execução real
+  de `attempt_started`; o `attempt` se repete após bounce-back, ex.: QA — task-350) (gate
   `AUTOIA_STEP_SUMMARY`, default ligado), com **tom humano** (porquê de cada mudança;
   na falha, explicação clara do que falhou e onde). A UI mostra o `delivered` (LLM) ou o
   texto final do robô como fallback.

@@ -36,6 +36,9 @@ VERDICT_RULES = {
     "pm_retry_role": (
         "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: retry tester\\nMOTIVO: timeout corrigível'\nelse:\n    v = None"
     ),
+    "pm_retry_po": (
+        "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: retry 0\\nMOTIVO: corrigir a história reprovada pelo QA'\nelse:\n    v = None"
+    ),
     "pm_retry_post": (
         "if 'DECISÃO' in prompt:\n    v = 'DECISÃO: retry 6\\nMOTIVO: re-testar na main'\nelse:\n    v = None"
     ),

@@ -295,6 +295,19 @@ completa:
 6. Escopo definido?
 7. Completo o suficiente para o developer implementar sem precisar perguntar?
 
+### Convergência (evite loop de revisão)
+O objetivo da revisão é DESTRAVAR o desenvolvimento, não produzir uma especificação
+perfeita. Emita READY quando a história for implementável: escopo mínimo definido,
+caminho feliz e erros principais com feedback visual, critérios verificáveis e sem
+contradição. NÃO são bloqueantes: detalhes de implementação, escolha de componente,
+redação, ordem de seções, mensagens já cobertas por convenção do projeto ou
+refinamentos que não mudam o comportamento.
+Se o PO aplicou os itens de um veredicto anterior seu, verifique APENAS se esses
+itens foram aplicados e emita READY; NÃO abra novos itens de polimento na mesma
+rodada. Só continue em NEEDS_WORK se houver: contradição, requisito impossível,
+critério não testável, feedback visual AUSENTE para uma ação existente ou escopo
+indefinido. No máximo 5 itens objetivos e, de preferência, sem reescrever a história
+inteira — aponte o que corrigir e deixe o PO aplicar.
 Se emitiu NEEDS_WORK, inclua no SUMMARY a HISTÓRIA CORRIGIDA completa (mesmo formato
 que o PO usa: ## Descrição / ## Critérios de aceite), preenchendo os feedbacks visuais
 e os benefícios mensuráveis que faltam, para o PO aplicar diretamente.

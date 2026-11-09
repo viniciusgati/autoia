@@ -480,10 +480,11 @@ class TaskSummary(Base):
 class StepSummary(Base):
     """Resumo de UMA execução de fase ("O que foi entregue"), gerado por LLM dedicada.
 
-    O resumo da fase é chaveado por (step, attempt): cada re-execução tem o seu,
-    preservando o histórico imutável da timeline. A LLM nunca é fonte de verdade —
-    eventos/arquivos/diff são. Regenerar um passo cria uma nova linha apenas se o
-    attempt mudar; falha na geração não afeta o pipeline.
+    O resumo é chaveado por (step, run): a `run` é a numeração real de
+    `attempt_started`, única mesmo quando `attempt` se repete após bounce-back
+    (o QA re-executado sem incrementar o próprio `attempt`). O `attempt` fica
+    preservado como metadado histórico. A LLM nunca é fonte de verdade —
+    eventos/arquivos/diff são. Falha na geração não afeta o pipeline.
     """
 
     __tablename__ = "step_summaries"
@@ -493,6 +494,8 @@ class StepSummary(Base):
     step_id: Mapped[int] = mapped_column(ForeignKey("task_steps.id"))
     position: Mapped[int] = mapped_column(Integer)
     attempt: Mapped[int] = mapped_column(Integer, default=1)
+    # Execução real da fase (numeração de `attempt_started`; ver StepMission).
+    run: Mapped[int] = mapped_column(Integer, default=1)
     summary: Mapped[str] = mapped_column(Text, default="")
     changes: Mapped[list] = mapped_column(JSON, default=list)
     result: Mapped[str | None] = mapped_column(String(20), nullable=True)

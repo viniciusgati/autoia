@@ -4,9 +4,11 @@ Mesma filosofia do `summarizer`: usa o executor da task (kimi/opencode) com o
 contrato `autoia_step_summary.json`, custo contábil zerado, e NUNCA é fonte de
 verdade — a LLM apenas interpreta eventos/arquivos/diff já registrados.
 
-O resumo é chaveado por (step, attempt): re-execuções têm resumos independentes,
-preservando o histórico imutável da timeline do workspace. Falha na geração NUNCA
-afeta o pipeline (a UI simplesmente mostra o texto final do robô como fallback).
+O resumo é chaveado por (step, run): a `run` é a execução REAL da fase (numeração
+de `attempt_started`), única mesmo quando `attempt` se repete após bounce-back —
+ex.: QA re-executado após cada correção do PO. Preserva o histórico imutável da
+timeline do workspace. Falha na geração NUNCA afeta o pipeline (a UI simplesmente
+mostra o texto final do robô como fallback).
 """
 
 from __future__ import annotations
@@ -108,6 +110,9 @@ def summarize_step(settings, session_factory, step_id: int) -> bool:
             if not occurrences:
                 return False
             occurrence = occurrences[-1]
+            # Execução REAL da fase (a `run` é única mesmo quando `attempt` se
+            # repete após bounce-back — ex.: QA re-executado várias vezes).
+            occurrence_run = occurrence["run"]
             stop = occurrence.get("stop") or {}
             activity_lines = []
             for ev in occurrence["events"]:
@@ -176,7 +181,7 @@ def summarize_step(settings, session_factory, step_id: int) -> bool:
                 s.query(StepSummary)
                 .filter(
                     StepSummary.step_id == step.id,
-                    StepSummary.attempt == step.attempt,
+                    StepSummary.run == occurrence_run,
                 )
                 .first()
             )
@@ -187,6 +192,7 @@ def summarize_step(settings, session_factory, step_id: int) -> bool:
                 step_id=step.id,
                 position=step.position,
                 attempt=step.attempt,
+                run=occurrence_run,
                 summary=data.get("summary") or "",
                 changes=data.get("changes") or [],
                 result=data.get("result"),

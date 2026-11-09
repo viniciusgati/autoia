@@ -16,7 +16,7 @@ PIDS="$ROOT/data/.start.pids"
 PID_API="$PIDS/api.pid"
 PID_WORKER="$PIDS/worker.pid"
 PID_FRONT="$PIDS/frontend.pid"
-WORKERS="${AUTOIA_WORKERS:-3}"
+WORKERS="${AUTOIA_WORKERS:-10}"
 API_PORT="${AUTOIA_API_PORT:-9000}"
 
 if [[ ! -f "$VENV" ]]; then

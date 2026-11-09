@@ -1536,6 +1536,16 @@ def _rewind_pipeline(session: Session, task: Task, target: TaskStep) -> None:
     start.started_at = None
     for st in active:
         if st.position > start.position:
+            if st.status in (STEP_FAILED, STEP_GUARDRAIL_BLOCKED):
+                # Preserva o RELATÓRIO da fase posterior que reprovou (summary/
+                # verdict/error): ele é o motivo da reabertura e entra no handoff
+                # do alvo. Sem isso, a instrução "corrija os apontamentos do QA"
+                # reabria o PO sem os apontamentos e o loop de correções
+                # repetidas continuava (task-350).
+                st.status = STEP_PENDING
+                st.started_at = None
+                st.finished_at = None
+                continue
             st.status = STEP_PENDING
             st.error = None
             st.summary = None
@@ -1628,7 +1638,7 @@ def task_workspace(
     task = _get_task_or_404(session, task_id)
     occurrences = derive_task_occurrences(session, task)
     step_summaries = {
-        (ss.step_id, ss.attempt): ss
+        (ss.step_id, ss.run): ss
         for ss in session.query(StepSummary)
         .filter(StepSummary.task_id == task_id)
         .all()
@@ -1666,7 +1676,7 @@ def task_workspace(
     for occ in occurrences:
         sid = occ["step_id"]
         step = steps_by_id.get(sid)
-        delivered = step_summaries.get((sid, occ["attempt"]))
+        delivered = step_summaries.get((sid, occ["run"]))
         mission = missions.get((sid, occ["run"]))
         prev_occ = last_by_step.get(sid)
         # Branch da alteração: pré-merge = branch da task; pós-merge = default do
